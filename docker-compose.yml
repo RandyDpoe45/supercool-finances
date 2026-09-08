@@ -5,11 +5,24 @@
 # it GROWS ONE SERVICE PER STEP as the specs are built (see specs/README.md).
 # It is NOT a final integration task — it exists from step 0 and accretes.
 #
-# Current state — Step 1 (spec 01, storage layer):
-#   - The five networks (§2) are declared. Only `data` has members right now; the
-#     four edge/app networks are intentionally empty until later steps add the
-#     services that live on them. Isolation is by network MEMBERSHIP + not
-#     publishing ports — so these are plain bridge networks (no `internal: true`).
+# Current state — Step 2 (spec 02, Keycloak identity provider):
+#   - The five networks (§2) are declared. `data` carries the datastores; `keycloak`
+#     now also joins `app-public`, `app-internal` and `data` (spec 00 §2). The
+#     `edge-*` networks remain empty until step 4 adds the gateways/nginx.
+#     Isolation is by network MEMBERSHIP + not publishing ports — so these are
+#     plain bridge networks (no `internal: true`).
+#   - `keycloak` (spec 02): quay.io/keycloak/keycloak, pinned tag (NOT :latest — a
+#     reproducible-from-zero boot needs a fixed digest; reasoned deviation from
+#     spec 00's `keycloak:latest` baseline). Boots `start --import-realm`, importing
+#     tools/keycloak/realm-export.json (mounted read-only) into the `supercool`
+#     realm on first boot. Connects to the `keycloak` Postgres DB (spec 01) via
+#     DISCRETE creds (KC_DB_URL_HOST/DATABASE + KC_DB_USERNAME/PASSWORD), never a
+#     full JDBC URL var. Host-published on :8082 for the browser login redirect.
+#     A network alias `keycloak.localtest.me` on app-public/app-internal makes
+#     in-container services resolve that SAME name to this container, so the token
+#     `issuer` (http://keycloak.localtest.me:8082/realms/supercool) is identical for
+#     the browser and for containers (spec 02, the load-bearing detail).
+#     See infra/keycloak/README.md.
 #   - The three datastores are fully provisioned on `data` only, host-unpublished:
 #       * postgres — two logical DBs (`balance`, `keycloak`) + two least-privilege
 #         login roles, created by infra/postgres/init on first boot. CONNECT is
@@ -26,8 +39,6 @@
 #     step (2-3). See spec 01 § Contracts.
 #
 # What arrives in later steps (do NOT add here early):
-#   - Step 2  (spec 02): `keycloak`            — joins app-public, app-internal, data
-#                        (host-published :8082).
 #   - Step 3  (spec 04): `balance-service`     — joins app-public, app-internal, data.
 #   - Step 3  (spec 05): `analytics-server`    — joins app-internal, data.
 #   - Step 4  (spec 06): `public-kong`         — joins edge-public, app-public.
@@ -157,3 +168,79 @@ services:
       start_period: 20s
     networks:
       - data
+
+  # Identity provider (spec 02). Boots in production mode with the `supercool`
+  # realm imported from tools/keycloak/realm-export.json (mounted read-only), and
+  # stores its state in the `keycloak` Postgres DB provisioned in step 1.
+  #
+  # Issuer resolution (the load-bearing detail, spec 02): KC_HOSTNAME fixes the
+  # frontend URL to http://keycloak.localtest.me:8082, so every token's `issuer`
+  # is http://keycloak.localtest.me:8082/realms/supercool. The browser reaches
+  # that name via public DNS (*.localtest.me -> 127.0.0.1) and the published
+  # 8082; in-container callers reach the SAME name via the compose network alias
+  # below, so the issuer string is byte-identical on both sides. KC_HTTP_PORT is
+  # set to 8082 so the port in the issuer matches from the browser AND containers.
+  keycloak:
+    # Pinned tag (NOT :latest): reproducible-from-zero requires a fixed image.
+    # Reasoned deviation from spec 00's `keycloak:latest` baseline.
+    image: quay.io/keycloak/keycloak:26.7.3
+    restart: unless-stopped
+    command: ["start", "--import-realm"]
+    environment:
+      # --- DB: discrete creds pointing at the `keycloak` DB (spec 01). No full
+      #     JDBC-URL var is introduced (project config preference / spec 02 #4).
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: ${POSTGRES_KEYCLOAK_USER}
+      KC_DB_PASSWORD: ${POSTGRES_KEYCLOAK_PASSWORD}
+      # --- Hostname / issuer. Full URL form (KC 26 hostname v2) fixes scheme,
+      #     host and port for both front- and back-channel, so the issuer is
+      #     identical everywhere. TLS terminates at nginx later, so HTTP is
+      #     enabled here and the internal HTTP port is 8082 to match the issuer.
+      KC_HOSTNAME: http://${KC_HOSTNAME}:${KEYCLOAK_PORT}
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: ${KEYCLOAK_PORT}
+      # --- Health endpoints on the management port (9000) for the healthcheck.
+      KC_HEALTH_ENABLED: "true"
+      # --- Master-realm bootstrap admin (temporary admin account). Injected from
+      #     .env, NEVER committed. Not part of the realm export.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD}
+    volumes:
+      # Config as code (spec 00 §4): realm export mounted read-only into the
+      # import dir; consumed once by `--import-realm` on first boot.
+      - ./tools/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      # The minimal image has no curl/wget, but /bin/sh is bash with /dev/tcp
+      # support. Probe the readiness endpoint on the management port (9000) and
+      # require the JSON status to be UP so the container only flips healthy once
+      # the realm import + DB are actually ready (this gates balance-service in
+      # step 3 via depends_on: service_healthy).
+      test:
+        - "CMD-SHELL"
+        - "exec 3<>/dev/tcp/127.0.0.1/9000; printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '\"status\": \"UP\"' <&3"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    depends_on:
+      # Keycloak needs the `keycloak` DB + role (step 1) before it can migrate.
+      postgres:
+        condition: service_healthy
+    networks:
+      # `data` -> Postgres; `app-public`/`app-internal` -> reachable by both
+      # gateways and both services (spec 00 §2). The alias makes containers on the
+      # app-* nets resolve `keycloak.localtest.me` to this container, matching the
+      # browser-facing issuer host.
+      data:
+      app-public:
+        aliases:
+          - ${KC_HOSTNAME}
+      app-internal:
+        aliases:
+          - ${KC_HOSTNAME}
+    ports:
+      # Only host-published edge besides the nginx front doors (spec 00 §3):
+      # the browser must reach Keycloak for the OIDC login redirect.
+      - "${KEYCLOAK_PORT}:${KEYCLOAK_PORT}"

@@ -96,6 +96,28 @@ compose_net_name() {
     --format '{{.Name}}' 2>/dev/null | head -1
 }
 
+# docker compose wrapper for THIS project that ALWAYS supplies an --env-file.
+# Step 2 added `keycloak` to the spine with `${KEYCLOAK_PORT}` in its `ports:`; any
+# compose subcommand that parses the file (`ps`, `down`, …) now needs that var
+# interpolated or it errors "no port specified" and silently does nothing. This wrapper
+# feeds the runtime env copy (or a throwaway from .env.example) so those calls keep
+# working. It changes no assertion — only makes the mechanics correct as the spine grew.
+DC_FALLBACK_ENV=""
+dc() {
+  local envf="${RUNTIME_ENVFILE:-}"
+  if [ -z "$envf" ] || [ ! -f "$envf" ]; then
+    if [ -z "$DC_FALLBACK_ENV" ] || [ ! -f "$DC_FALLBACK_ENV" ]; then
+      [ -f "$ENV_EXAMPLE" ] && { DC_FALLBACK_ENV="$(mktemp)"; cp "$ENV_EXAMPLE" "$DC_FALLBACK_ENV"; }
+    fi
+    envf="$DC_FALLBACK_ENV"
+  fi
+  if [ -n "$envf" ] && [ -f "$envf" ]; then
+    docker compose -p "$PROJECT" --project-directory "$REPO_ROOT" --env-file "$envf" -f "$COMPOSE" "$@"
+  else
+    docker compose -p "$PROJECT" --project-directory "$REPO_ROOT" -f "$COMPOSE" "$@"
+  fi
+}
+
 # ----------------------------------------------------------------------------------
 # STATIC CHECKS (no daemon required)
 # ----------------------------------------------------------------------------------
@@ -346,7 +368,7 @@ check_health() {
   while :; do
     local pending=0 status_line="" s cid st
     for s in $svcs; do
-      cid="$(docker compose -p "$PROJECT" --project-directory "$REPO_ROOT" -f "$COMPOSE" ps -q "$s" 2>/dev/null | head -1)"
+      cid="$(dc ps -q "$s" 2>/dev/null | head -1)"
       if [ -z "$cid" ]; then status_line="$status_line $s=absent"; pending=1; continue; fi
       st="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null)"
       status_line="$status_line $s=$st"
@@ -451,15 +473,14 @@ run_runtime() {
 
   RUNTIME_ENVFILE="$(mktemp)"; cp "$ENV_EXAMPLE" "$RUNTIME_ENVFILE"
   # Fresh slate for this isolated test project.
-  docker compose -p "$PROJECT" --project-directory "$REPO_ROOT" -f "$COMPOSE" down -v --remove-orphans >/dev/null 2>&1
+  dc down -v --remove-orphans >/dev/null 2>&1
 
   info "bringing up postgres, redis, mongo under project '$PROJECT'"
   local err; err="$(mktemp)"
-  if ! docker compose -p "$PROJECT" --project-directory "$REPO_ROOT" --env-file "$RUNTIME_ENVFILE" \
-        -f "$COMPOSE" up -d --no-build postgres redis mongo >/dev/null 2>"$err"; then
+  if ! dc up -d --no-build postgres redis mongo >/dev/null 2>"$err"; then
     fail "Check 8 — 'docker compose up' failed:"; cat "$err" >&2; rm -f "$err"
     skip "Check 9 — isolation skipped (stack failed to start)"
-    docker compose -p "$PROJECT" --project-directory "$REPO_ROOT" -f "$COMPOSE" down -v --remove-orphans >/dev/null 2>&1
+    dc down -v --remove-orphans >/dev/null 2>&1
     return
   fi
   rm -f "$err"
@@ -468,20 +489,21 @@ run_runtime() {
   check_isolation
 
   info "tearing down project '$PROJECT'"
-  docker compose -p "$PROJECT" --project-directory "$REPO_ROOT" -f "$COMPOSE" down -v --remove-orphans >/dev/null 2>&1
+  dc down -v --remove-orphans >/dev/null 2>&1
 }
 
 # Idempotent cleanup of everything this suite may create; safe to call on any exit.
 global_cleanup() {
-  [ -n "${CONFIG_JSON_FILE:-}" ] && rm -f "$CONFIG_JSON_FILE" 2>/dev/null
-  [ -n "${RUNTIME_ENVFILE:-}" ]  && rm -f "$RUNTIME_ENVFILE" 2>/dev/null
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     docker rm -f "$PROBE_POS" "$PROBE_NEG" >/dev/null 2>&1
     docker network rm "$STANDIN_NET" >/dev/null 2>&1
-    if [ -f "$COMPOSE" ]; then
-      docker compose -p "$PROJECT" --project-directory "$REPO_ROOT" -f "$COMPOSE" down -v --remove-orphans >/dev/null 2>&1
-    fi
+    # dc supplies an env file even when RUNTIME_ENVFILE is unset, so `down` can
+    # interpolate keycloak's ${KEYCLOAK_PORT} and actually tear the project down.
+    [ -f "$COMPOSE" ] && dc down -v --remove-orphans >/dev/null 2>&1
   fi
+  [ -n "${CONFIG_JSON_FILE:-}" ]  && rm -f "$CONFIG_JSON_FILE" 2>/dev/null
+  [ -n "${RUNTIME_ENVFILE:-}" ]   && rm -f "$RUNTIME_ENVFILE" 2>/dev/null
+  [ -n "${DC_FALLBACK_ENV:-}" ]   && rm -f "$DC_FALLBACK_ENV" 2>/dev/null
 }
 
 print_summary() {
