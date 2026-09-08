@@ -41,7 +41,14 @@ derived read model.
 - [ ] `redis-cli ping` and Mongo `ping` succeed from within `data` only.
 - [ ] Volumes persist data across `docker compose down && up` (no `-v`).
 
-## Open questions
+## Resolved
 
-- Redis persistence on/off for the demo (default: off).
-- Keep Keycloak in the same Postgres (default #3) vs its own container.
+- **Redis persistence: ON (`appendonly`/AOF).** Overrides the earlier "off" default.
+  Chosen for reliability of the outbox → Redis Stream transport: the relay marks an
+  outbox row *published* right after `XADD`, so a wiped stream would drop in-flight
+  events the relay will never re-publish, breaking the "never lost" guarantee
+  (`../docs/ARCHITECTURE.md` §7). `redis-data` is therefore a load-bearing volume,
+  not optional. OTP durability is a harmless side effect (codes remain TTL-bound).
+- **Keycloak DB: shared Postgres instance, separate `keycloak` database** (default
+  #3), decided at step 0. Isolation is enforced by **per-role privileges** (the
+  balance app role cannot `CONNECT` to `keycloak`), not by convention.

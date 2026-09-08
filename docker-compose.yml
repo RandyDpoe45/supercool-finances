@@ -5,16 +5,26 @@
 # it GROWS ONE SERVICE PER STEP as the specs are built (see specs/README.md).
 # It is NOT a final integration task — it exists from step 0 and accretes.
 #
-# Current state — Step 0 (spec 00, macro architecture):
+# Current state — Step 1 (spec 01, storage layer):
 #   - The five networks (§2) are declared. Only `data` has members right now; the
 #     four edge/app networks are intentionally empty until later steps add the
 #     services that live on them. Isolation is by network MEMBERSHIP + not
 #     publishing ports — so these are plain bridge networks (no `internal: true`).
-#   - The three datastores come up healthy on `data` only, host-unpublished.
+#   - The three datastores are fully provisioned on `data` only, host-unpublished:
+#       * postgres — two logical DBs (`balance`, `keycloak`) + two least-privilege
+#         login roles, created by infra/postgres/init on first boot. CONNECT is
+#         revoked from PUBLIC and granted only to each DB's owner, so the balance
+#         role cannot reach `keycloak` and vice versa (database-per-service by
+#         privilege, not convention).
+#       * redis    — AUTH (requirepass, injected from env) + AOF persistence
+#         (appendonly yes). redis-data is load-bearing: the outbox -> Stream
+#         transport must survive a Redis restart.
+#       * mongo    — auth on (root user) + an `analytics` DB whose app user has
+#         readWrite on `analytics` only.
+#     Connection-string contracts (POSTGRES_URL/KC_DB_URL/REDIS_URL/MONGO_URL) are
+#     documented in .env.example; no service consumes them until steps 2-3.
 #
 # What arrives in later steps (do NOT add here early):
-#   - Step 1  (spec 01): Postgres init (balance + keycloak DBs, least-priv roles),
-#                        Redis AUTH/namespacing, Mongo auth + `analytics` db.
 #   - Step 2  (spec 02): `keycloak`            — joins app-public, app-internal, data
 #                        (host-published :8082).
 #   - Step 3  (spec 04): `balance-service`     — joins app-public, app-internal, data.
@@ -57,20 +67,31 @@ networks:
 volumes:
   pg-data:      # Postgres: ledger + outbox durability (source of truth).
   mongo-data:   # Mongo: analytics read-model persistence.
-  redis-data:   # Redis: OTP is disposable, so persistence is optional.
+  redis-data:   # Redis: AOF persistence — load-bearing for the outbox -> Stream transport (spec 01).
 
 services:
-  # Source of truth: ledger + outbox (+ Keycloak DB, added in step 1).
+  # Source of truth: ledger + outbox (+ Keycloak DB). The init script under
+  # infra/postgres/init runs once on first boot to create the `balance` and
+  # `keycloak` databases, the two least-privilege login roles, and the
+  # CONNECT-privilege isolation between them (see infra/postgres/README.md).
   postgres:
     image: postgres:16
     restart: unless-stopped
     environment:
-      # Postgres needs a password to boot; all three come from the env file.
+      # Bootstrap superuser (init only); services connect as the least-priv roles.
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      # Least-privilege login roles, consumed by the init script from the env.
+      POSTGRES_BALANCE_USER: ${POSTGRES_BALANCE_USER}
+      POSTGRES_BALANCE_PASSWORD: ${POSTGRES_BALANCE_PASSWORD}
+      POSTGRES_KEYCLOAK_USER: ${POSTGRES_KEYCLOAK_USER}
+      POSTGRES_KEYCLOAK_PASSWORD: ${POSTGRES_KEYCLOAK_PASSWORD}
     volumes:
       - pg-data:/var/lib/postgresql/data
+      # Config as code (spec 00 §4): init scripts mounted read-only, not baked in.
+      # Runs only on an empty data dir (first boot); ignored on subsequent starts.
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # -h 127.0.0.1 forces a TCP probe: the initdb phase opens the Unix socket
       # before the server truly accepts connections, so a socket-only check can
@@ -83,12 +104,21 @@ services:
     networks:
       - data
 
-  # OTP codes + Redis Streams transport. Bare healthy skeleton (AUTH is step 1).
+  # OTP codes + Redis Streams transport. AUTH on (requirepass) + AOF persistence.
   redis:
     image: redis:7
     restart: unless-stopped
+    environment:
+      # redis-cli reads REDISCLI_AUTH automatically, so the healthcheck below
+      # authenticates without ever putting the password on the command line
+      # (a bare `redis-cli ping` would return NOAUTH and flap the container).
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    # AOF + dir come from the committed conf (non-secret); requirepass is injected
+    # from the env here so the secret never lives in a committed file.
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "${REDIS_PASSWORD}"]
     volumes:
       - redis-data:/data
+      - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -98,13 +128,27 @@ services:
     networks:
       - data
 
-  # Analytics read model (analytics-owned). Bare healthy skeleton (auth is step 1).
+  # Analytics read model (analytics-owned). Auth on (root user); the init script
+  # under infra/mongo/init creates the `analytics` DB + an app user scoped to
+  # readWrite on `analytics` only (see infra/mongo/README.md).
   mongo:
     image: mongo:7
     restart: unless-stopped
+    environment:
+      # Setting the root credentials turns on auth in the official image.
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      # DB the init script runs against + the least-privilege app user it creates.
+      MONGO_INITDB_DATABASE: ${MONGO_DB}
+      MONGO_DB: ${MONGO_DB}
+      MONGO_APP_USER: ${MONGO_APP_USER}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD}
     volumes:
       - mongo-data:/data/db
+      # Config as code: app-user provisioning, run once on an empty data dir.
+      - ./infra/mongo/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
+      # ping is allowed pre-auth, so this stays valid with auth enabled.
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
