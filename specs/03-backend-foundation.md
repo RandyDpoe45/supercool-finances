@@ -9,12 +9,14 @@ right is what makes the two services' micro fall into place.
 
 ## Moving parts & conventions
 
-- **Monorepo:** one NestJS workspace with two apps — `apps/balance-service`,
-  `apps/analytics-server` — and shared libs:
-  - `libs/identity` — the gateway-identity guard + service-identity guard.
-  - `libs/events` — the event contract (types) shared by the outbox producer and
-    the consumer.
-  - `libs/config` — validated config loading.
+- **Standalone projects (no shared code):** the two services are **separate,
+  self-contained NestJS projects** in their own folders (`services/balance-service`,
+  `services/analytics-server`) — **not** a shared workspace. Each carries its **own
+  copy** of what it needs — the gateway/service identity guards, config loading, and
+  the transaction **event contract** (types). The event contract is duplicated in
+  both and **kept in sync via the spec**, which is the contract of record. This keeps
+  each folder atomic (it could be its own repo); see `CLAUDE.md`
+  ([ADR-16](../docs/DECISIONS.md#adr-16--self-contained-components-no-shared-code)).
 - **Dependency injection:** components depend on **interfaces (injection tokens)**,
   never concretes. Repositories behind interfaces (`IAccountRepository`,
   `ILedgerRepository`, …); domain services behind interfaces. Concrete TypeORM/
@@ -46,7 +48,8 @@ right is what makes the two services' micro fall into place.
 ## Contracts / interfaces
 
 - The **header contract** (`X-User-Id`, `X-Roles`) between Kong and the services.
-- The **event contract** in `libs/events` (producer in 04, consumer in 05).
+- The **event contract** — defined **independently in each service** (producer in
+  04, consumer in 05), kept in sync via the spec (no shared package).
 - Repository/service interfaces that concrete stores implement.
 
 ## Definition of Done
@@ -59,5 +62,7 @@ right is what makes the two services' micro fall into place.
 
 ## Open questions
 
-- Workspace tool: plain Nest workspace (default) vs Nx.
 - Validation lib: zod vs joi.
+
+**Resolved:** no shared workspace — each service is a standalone project with no
+shared code ([ADR-16](../docs/DECISIONS.md#adr-16--self-contained-components-no-shared-code)).

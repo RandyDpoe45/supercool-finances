@@ -69,14 +69,12 @@ cheapest-to-change moment. If it resists, we go back up the specs.
 
 ## Open decisions (resolve before/within the named spec)
 
-- **ORM + migration tool** (spec 03): **TypeORM or MikroORM** — must support
-  `SELECT ... FOR UPDATE` and `SKIP LOCKED` cleanly (needed by transfers and the
-  relay). Prisma is disfavored here because row-locking needs raw escapes.
-- **Backend monorepo** (spec 03): a single NestJS workspace with shared libs
-  (event contracts, the gateway-identity guard) for the two services — DBs stay
-  separate.
-- **Frontend workspace** (spec 07): shared atomic-design component library across
-  the three SPAs (pnpm/Turborepo/Nx) to avoid triplicated primitives.
+- **Validation lib** (spec 03): zod vs joi.
+
+**Resolved:** ORM = **TypeORM** (needs `SELECT ... FOR UPDATE` / `SKIP LOCKED`).
+Components are **standalone with no shared code** — no backend workspace, no shared
+frontend library; each folder is atomic and shared contracts are duplicated + kept
+in sync via the spec (see `CLAUDE.md` / ADR-16).
 
 ## Reference
 

@@ -16,8 +16,11 @@ transport (06) exist.
 - **Auth:** OIDC **Authorization Code + PKCE** against Keycloak (e.g.
   `react-oidc-context` / `oidc-client-ts`), one Keycloak client per app (spec 02).
   Access token attached to API calls; silent refresh.
-- **Workspace:** a shared component library (pnpm/Turborepo) so atomic primitives
-  and the auth/OIDC wiring aren't triplicated across the three apps.
+- **Standalone apps (no shared code):** each SPA is a **separate, self-contained**
+  project in its own folder with its **own** atomic-design components and OIDC/auth
+  wiring — **no shared component library**. Triplication across the three apps is the
+  accepted price of keeping each folder atomic (it could be its own repo); see
+  `CLAUDE.md` ([ADR-16](../docs/DECISIONS.md#adr-16--self-contained-components-no-shared-code)).
 - **Same-origin APIs:** each app calls its own nginx origin (`/api` or `/admin`),
   so no CORS gymnastics in the browser.
 
