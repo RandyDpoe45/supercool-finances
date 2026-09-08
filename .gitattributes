@@ -1,0 +1,11 @@
+# =============================================================================
+# SuperCool Finances — line-ending normalization (reproducible from zero).
+# Default: normalize text to LF in the repo, check out native per platform.
+# =============================================================================
+* text=auto
+
+# Files that MUST stay LF everywhere, or they break under bash / Docker / compose
+# (a CRLF shell script fails with "$'\r': command not found" on a Windows clone).
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
