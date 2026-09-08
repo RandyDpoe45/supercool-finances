@@ -41,8 +41,11 @@ right is what makes the two services' micro fall into place.
   enforced *in* the query, returning 404 on non-owned (spec 04).
 - **Error model:** one consistent error DTO across services.
 - **Health:** `/internal/health` (liveness + readiness) for compose healthchecks.
-- **Testing conventions:** unit (services with mocked repos), integration (repos
-  against a throwaway Postgres), and the money-safety suites (idempotency,
+- **Testing conventions:** tests live in each service's dedicated **`tests/`
+  folder** (segregated from `src/`) and are judged by **power, not count** — each
+  must be able to fail on a real defect (no coverage-padding). Unit (services with
+  mocked repos), integration (repos against a throwaway Postgres), and the
+  money-safety suites (idempotency,
   concurrency) — defined here, implemented in spec 04.
 
 ## Contracts / interfaces
