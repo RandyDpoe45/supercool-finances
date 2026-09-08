@@ -21,8 +21,9 @@
 #         transport must survive a Redis restart.
 #       * mongo    — auth on (root user) + an `analytics` DB whose app user has
 #         readWrite on `analytics` only.
-#     Connection-string contracts (POSTGRES_URL/KC_DB_URL/REDIS_URL/MONGO_URL) are
-#     documented in .env.example; no service consumes them until steps 2-3.
+#     No connection-string vars are published: .env.example carries discrete
+#     credentials + coordinates, and each service composes its own DSN at its
+#     step (2-3). See spec 01 § Contracts.
 #
 # What arrives in later steps (do NOT add here early):
 #   - Step 2  (spec 02): `keycloak`            — joins app-public, app-internal, data

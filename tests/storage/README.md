@@ -2,8 +2,10 @@
 
 Verification suite for **Step 1 — the storage layer**: PostgreSQL's two databases
 (`balance` + `keycloak`) and least-privilege roles, Redis AUTH + AOF persistence,
-MongoDB auth + app user + the `analytics` db, and the connection-string env
-contracts. It is the acceptance harness for the Definition of Done in
+MongoDB auth + app user + the `analytics` db, and the **discrete-credentials env
+contract** (the storage layer publishes discrete credentials + fixed coordinates,
+**not** pre-assembled connection strings — each consumer composes its own DSN). It
+is the acceptance harness for the Definition of Done in
 [`specs/01-storage.md`](../../specs/01-storage.md).
 
 Checks are written **from the spec**, not from the implementor's files: each asserts
@@ -66,7 +68,7 @@ bash tests/storage/run.sh runtime    # only the daemon checks (5-9)
 | # | Check | Proves (spec 01) |
 |---|---|---|
 | 1 | Neither `postgres`, `redis`, nor `mongo` declares a host `ports:` mapping | DoD "none host-published" (static half). |
-| 2 | `.env.example` documents every contract var (`POSTGRES_URL`, `KC_DB_URL`, `REDIS_URL`, `MONGO_URL` + all role/auth vars), `MONGO_DB=analytics`, and each URL encodes its own database (`POSTGRES_URL`→`balance` **and not** `keycloak`; `KC_DB_URL`→`keycloak`; `MONGO_URL`→`analytics`) | Contracts/interfaces section; supports database-per-service. |
+| 2 | **(a)** `.env.example` documents the **discrete creds/coordinates** each consumer composes its own DSN from — balance role (`POSTGRES_BALANCE_USER`/`_PASSWORD`) + the balance db name `POSTGRES_DB`=`balance`; keycloak role (`POSTGRES_KEYCLOAK_USER`/`_PASSWORD`); `REDIS_PASSWORD`; mongo app user (`MONGO_APP_USER`/`_PASSWORD`) + `MONGO_DB`=`analytics`. **(b)** the contract **invariant**: no tracked file (esp. `.env.example`) publishes a **pre-assembled connection string** — none of `POSTGRES_URL`/`KC_DB_URL`/`REDIS_URL`/`MONGO_URL` is defined, and no committed line embeds credentials in a DSN (`scheme://user:password@host`). | Rewritten Contracts section (discrete creds, not URLs; a credential lives in one place); supports database-per-service. |
 | 3 | Every required `${VAR}` referenced in `docker-compose.yml` is documented in `.env.example` | The Step-1 env additions won't break a fresh clone (extends macro Check 5). |
 | 4 | No placeholder secret **value** from `.env.example` appears in any other tracked file, and infra init scripts set passwords from `$ENV_VAR`, never a bare literal | `CLAUDE.md` no-secrets rule (a committed literal secret is a hard failure). |
 
@@ -85,12 +87,21 @@ bash tests/storage/run.sh runtime    # only the daemon checks (5-9)
 - **Names.** Assertions use the exact Step-1 coordination-contract names
   (`POSTGRES_BALANCE_USER`, `POSTGRES_KEYCLOAK_USER`, `REDIS_PASSWORD`,
   `MONGO_INITDB_ROOT_USERNAME`/`_PASSWORD`, `MONGO_APP_USER`/`_PASSWORD`,
-  `MONGO_DB`, `POSTGRES_URL`/`KC_DB_URL`/`REDIS_URL`/`MONGO_URL`). Runtime
-  credentials are **read from `.env.example`** so a rename is picked up there; the
-  `keycloak` database name is treated as the literal `keycloak` and the `balance`
-  database name is read from `POSTGRES_DB` (default `balance`). If the implementor's
-  names differ, that is a coordination defect — Check 2 flags the undocumented name
-  and the runtime checks report the missing var explicitly.
+  `MONGO_DB`). Connection strings are **not** among them: the storage layer publishes
+  discrete creds + fixed coordinates and each consumer composes its own DSN at its own
+  step, so Check 2 asserts the *absence* of the (removed) `POSTGRES_URL`/`KC_DB_URL`/
+  `REDIS_URL`/`MONGO_URL` vars rather than their contents. Runtime credentials are
+  **read from `.env.example`** so a rename is picked up there; the `keycloak` database
+  name is treated as the literal `keycloak` and the `balance` database name is read
+  from `POSTGRES_DB` (default `balance`). If the implementor's names differ, that is a
+  coordination defect — Check 2 flags the undocumented discrete cred/coordinate and the
+  runtime checks report the missing var explicitly.
+- **Check 2(b) DSN shape.** The invariant flags a `scheme://user:password@host` line
+  with **literal** credentials — the duplicated-secret pattern that was removed. A DSN
+  whose credentials are env-var references (`mongodb://$USER:$PW@host`, as shown in the
+  infra docs) is the *consumer-composes* pattern and is intentionally **not** flagged;
+  the scan excludes `$`/`{`/`%` from the credential characters. The `tests/` tree is
+  excluded from the tracked-file scan because it carries the detection regex itself.
 - **Check 7 reverse leak.** The spec's DoD names only balance→keycloak. This suite
   additionally asserts keycloak→balance is denied, because "database-per-service
   enforced by role privileges" implies both directions. Escalate if only the
@@ -107,9 +118,10 @@ bash tests/storage/run.sh runtime    # only the daemon checks (5-9)
 
 - `bash -n` on both scripts (syntax).
 - Static checks were run against the current repo and against deliberately-broken
-  fixtures (a datastore publishing a port, a missing contract var, `POSTGRES_URL`
-  pointing at `keycloak`, a placeholder password embedded in an init script) — each
-  defect made exactly its targeted check **fail**; see the delivery report.
+  fixtures (a datastore publishing a port, a missing discrete cred/coordinate, a
+  reintroduced `POSTGRES_URL=` var, a committed `scheme://user:password@host` DSN with
+  a literal secret, a placeholder password embedded in an init script) — each defect
+  made exactly its targeted check **fail**; see the delivery report.
 - Runtime checks require the Step-1 compose/init to exist; against the current
   Step-0 skeleton (no AUTH/roles/keycloak db yet) they **fail as intended**, which
   is the point — they pass only once the storage layer is actually delivered.

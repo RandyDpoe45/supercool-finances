@@ -38,9 +38,11 @@ list, so the healthcheck stays valid with auth enabled (no credentials needed).
 
 ## Connection contract
 
-`MONGO_URL` (app user → `analytics`, `authSource=analytics`) is documented in the
-root `.env.example`. The analytics server consumes it in step 3; it uses the
-in-network service name `mongo:27017`.
+No pre-assembled connection URL is published in the env. The **analytics** server
+composes its own DSN in step 3 from `MONGO_APP_USER`/`MONGO_APP_PASSWORD` → the
+`analytics` db (`authSource=analytics`) via the in-network service name
+`mongo:27017`. Keeping the credential out of a committed URL string is deliberate —
+see spec 01 § Contracts.
 
 ## Verifying auth is enforced
 

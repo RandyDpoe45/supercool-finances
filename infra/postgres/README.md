@@ -61,9 +61,13 @@ script only provisions the empty databases, roles, and privileges.
 
 ## Connection contract
 
-`POSTGRES_URL` (balance role → `balance`) and `KC_DB_URL` (keycloak role →
-`keycloak`) are documented in the root `.env.example`. No service consumes them
-yet (steps 2-3). Both use the in-network service name `postgres:5432`.
+No pre-assembled connection URL is published in the env. Each consumer composes its
+own DSN from the discrete credentials + coordinates: the **balance** service from
+`POSTGRES_BALANCE_USER`/`POSTGRES_BALANCE_PASSWORD` → `balance`, and **Keycloak**
+from `POSTGRES_KEYCLOAK_USER`/`POSTGRES_KEYCLOAK_PASSWORD` → `keycloak`, both via the
+in-network service name `postgres:5432`. Consumers arrive in steps 2-3. Keeping the
+credential in one place (not also inside a URL string) is deliberate — see spec 01
+§ Contracts.
 
 ## Verifying the split
 

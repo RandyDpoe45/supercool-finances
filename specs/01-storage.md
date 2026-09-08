@@ -28,10 +28,20 @@ derived read model.
 
 ## Contracts / interfaces
 
-- Connection strings surfaced to services via env only (no service reaches
-  another's store): `POSTGRES_URL` → balance; `REDIS_URL` → balance;
-  `MONGO_URL` → analytics; `KC_DB_URL` → Keycloak.
-- Database-per-service is enforced by role privileges, not just convention.
+- The storage layer surfaces **discrete credentials + fixed coordinates** per store
+  (in-network service name, database name, user, password) via env — it does **not**
+  publish pre-assembled connection strings. Each consuming service composes its own
+  DSN from those parts in its config layer (NestJS `ConfigModule`, validated on
+  boot). This keeps a credential in exactly one place, leaves the URL format to the
+  consumer's driver (TypeORM DSN, JDBC URL, `redis://`, `mongodb://`), and avoids
+  leaning on Compose `env_file` interpolation (which does not exist). Ownership map:
+  - `balance` service → the balance role's creds for the `balance` DB on `postgres`.
+  - `analytics` server → the app-user creds for `analytics` on `mongo`.
+  - `balance` service → `redis` (authenticated by `requirepass`).
+  - Keycloak → the keycloak role's creds for the `keycloak` DB on `postgres`.
+- No service is handed another service's credentials, so no service can reach
+  another's store. Database-per-service is enforced by role privileges (below), not
+  just convention.
 
 ## Definition of Done
 

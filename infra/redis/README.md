@@ -37,9 +37,10 @@ Nothing to configure at the container level; documented here as the contract:
 
 ## Connection contract
 
-`REDIS_URL` (`redis://default:<password>@redis:6379`) is documented in the root
-`.env.example`. The balance service consumes it in step 3; it uses the in-network
-service name `redis:6379`.
+No pre-assembled connection URL is published in the env. The **balance** service
+composes its own client config in step 3 from `REDIS_PASSWORD` (the `default` user)
+via the in-network service name `redis:6379`. Keeping the password out of a
+committed URL string is deliberate — see spec 01 § Contracts.
 
 ## Verifying AUTH is enforced
 

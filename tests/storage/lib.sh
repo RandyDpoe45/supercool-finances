@@ -247,19 +247,33 @@ PY
   fi
 }
 
-# Check 2 (static) — connection-string contracts + every new role/auth var are
-# documented in .env.example, MONGO_DB is `analytics`, and each URL encodes its own
-# database (POSTGRES_URL->balance not keycloak; KC_DB_URL->keycloak; MONGO_URL->analytics).
+# Check 2 (static) — the storage layer surfaces DISCRETE credentials + fixed
+# coordinates, NOT pre-assembled connection strings (spec 01 § Contracts, rewritten).
+# Asserts BOTH halves of the rewritten contract:
+#   (a) .env.example documents the discrete creds/coordinates each consumer composes
+#       its OWN DSN from — balance role (POSTGRES_BALANCE_USER/_PASSWORD) + the balance
+#       db name POSTGRES_DB(=balance); keycloak role (POSTGRES_KEYCLOAK_USER/_PASSWORD);
+#       REDIS_PASSWORD; mongo app user (MONGO_APP_USER/_PASSWORD) + MONGO_DB(=analytics).
+#   (b) the INVARIANT — no tracked file (especially .env.example) publishes a
+#       pre-assembled connection string: none of POSTGRES_URL/KC_DB_URL/REDIS_URL/
+#       MONGO_URL is defined, and no committed line embeds credentials in a DSN
+#       (scheme://user:password@host). This is the assertion that catches someone
+#       reintroducing the removed, duplicated-secret pattern (a credential must live
+#       in exactly ONE place). A DSN that references env vars (mongodb://$USER:$PW@...)
+#       is the consumer-composes pattern, not an embedded secret, so it is NOT flagged.
 # Proves the spec's Contracts section + supports the DoD's database-per-service intent.
 check_contracts() {
-  section "Check 2 (static) — env contracts documented & internally consistent (spec Contracts)"
+  section "Check 2 (static) — discrete creds/coordinates documented; NO pre-assembled DSN published (spec Contracts)"
   [ -f "$ENV_EXAMPLE" ] || { fail ".env.example not found — no contracts documented"; return; }
   [ -z "$PYTHON" ] && { skip "python not available to parse .env.example"; return; }
+  local bad=0
+
+  # (a) discrete creds/coordinates present + (b) applied to .env.example itself:
+  #     no forbidden URL var, no credential-embedding DSN value in the template.
   if "$PYTHON" - "$ENV_EXAMPLE" <<'PY'
 import re, sys
-path = sys.argv[1]
 raw = {}
-for line in open(path, encoding='utf-8'):
+for line in open(sys.argv[1], encoding='utf-8'):
     m = re.match(r'\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$', line.rstrip('\n'))
     if not m: continue
     v = m.group(2).strip()
@@ -267,70 +281,92 @@ for line in open(path, encoding='utf-8'):
         v = v[1:-1]
     raw[m.group(1)] = v
 
-_pat = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}')
-def expand(val, seen=()):
-    def repl(mo):
-        name, default = mo.group(1), mo.group(2)
-        if name in seen: return ''
-        if name in raw:  return expand(raw[name], seen + (name,))
-        return default or ''
-    prev = None
-    while prev != val:
-        prev = val; val = _pat.sub(repl, val)
-    return val
+errors = []
 
+# (a) the discrete credentials + coordinates each consumer needs to build its own DSN.
 required = [
-    "POSTGRES_USER", "POSTGRES_PASSWORD",
-    "POSTGRES_BALANCE_USER", "POSTGRES_BALANCE_PASSWORD",
+    "POSTGRES_BALANCE_USER", "POSTGRES_BALANCE_PASSWORD", "POSTGRES_DB",
     "POSTGRES_KEYCLOAK_USER", "POSTGRES_KEYCLOAK_PASSWORD",
     "REDIS_PASSWORD",
-    "MONGO_INITDB_ROOT_USERNAME", "MONGO_INITDB_ROOT_PASSWORD",
     "MONGO_APP_USER", "MONGO_APP_PASSWORD", "MONGO_DB",
-    "POSTGRES_URL", "KC_DB_URL", "REDIS_URL", "MONGO_URL",
 ]
-errors = []
 missing = [k for k in required if k not in raw]
 if missing:
-    errors.append("undocumented required var(s): " + ", ".join(missing))
+    errors.append("(a) undocumented discrete credential/coordinate(s): " + ", ".join(missing))
 
-bdb = raw.get("POSTGRES_DB", "balance")
-adb = raw.get("MONGO_DB", "")
-if "MONGO_DB" in raw and adb != "analytics":
-    errors.append(f"MONGO_DB is '{adb}', expected 'analytics' (spec: analytics read model)")
+# coordinate VALUES must name the right per-service database (database-per-service).
+if raw.get("POSTGRES_DB", "balance") != "balance":
+    errors.append(f"(a) POSTGRES_DB is '{raw['POSTGRES_DB']}', expected 'balance' (the balance service's db)")
+if "MONGO_DB" in raw and raw["MONGO_DB"] != "analytics":
+    errors.append(f"(a) MONGO_DB is '{raw['MONGO_DB']}', expected 'analytics' (the analytics read model)")
 
-def has_seg(url, name):   # /name at end or before ? — a real path segment
-    return re.search(r'/' + re.escape(name) + r'(\?|$)', url) is not None
+# (b) INVARIANT — the removed pre-assembled URL vars must NOT be reintroduced.
+for u in ("POSTGRES_URL", "KC_DB_URL", "REDIS_URL", "MONGO_URL"):
+    if u in raw:
+        errors.append(f"(b) '{u}' reintroduced — pre-assembled connection strings were removed by contract")
 
-if "POSTGRES_URL" in raw:
-    pu = expand(raw["POSTGRES_URL"])
-    if not has_seg(pu, bdb):
-        errors.append(f"POSTGRES_URL does not target the balance db '/{bdb}': {pu}")
-    if has_seg(pu, "keycloak"):
-        errors.append(f"POSTGRES_URL targets the keycloak db — breaks database-per-service: {pu}")
-if "KC_DB_URL" in raw:
-    kc = expand(raw["KC_DB_URL"])
-    if not has_seg(kc, "keycloak"):
-        errors.append(f"KC_DB_URL does not target the keycloak db '/keycloak': {kc}")
-if "REDIS_URL" in raw:
-    ru = expand(raw["REDIS_URL"])
-    if "redis" not in ru:
-        errors.append(f"REDIS_URL does not reference the 'redis' host: {ru}")
-if "MONGO_URL" in raw:
-    mu = expand(raw["MONGO_URL"])
-    if "mongo" not in mu:
-        errors.append(f"MONGO_URL does not reference the 'mongo' host: {mu}")
-    if adb and not has_seg(mu, adb):
-        errors.append(f"MONGO_URL does not target the '{adb}' db: {mu}")
+# (b) INVARIANT — no VALUE embeds literal credentials in a DSN (scheme://user:pass@host).
+#     $VAR / ${VAR} / %VAR% credential references are excluded from the char class, so a
+#     consumer-composed template is not flagged; only a baked-in literal secret is.
+dsn = re.compile(r'[A-Za-z][A-Za-z0-9+.\-]*://[^/\s@${%]*:[^/\s@${%]+@')
+for k, v in raw.items():
+    if dsn.search(v):
+        errors.append(f"(b) '{k}' embeds credentials in a connection string (scheme://user:pass@host): {v}")
 
 for e in errors:
     print("  " + e)
 if not errors:
-    print("  all contract vars documented; URLs encode their own database")
+    print("  .env.example: discrete creds/coordinates present (balance+keycloak roles, redis, mongo app); no URL var, no embedded-credential DSN")
 sys.exit(1 if errors else 0)
 PY
-  then pass ".env.example documents every contract var; connection strings are internally consistent"
-  else fail ".env.example is missing a contract var or a connection string targets the wrong database"
+  then :
+  else
+    fail ".env.example fails the discrete-credentials contract (missing a cred/coordinate, or a pre-assembled connection string is present)"
+    bad=1
   fi
+
+  # (b) INVARIANT across ALL tracked files: no committed DSN embeds literal credentials
+  #     anywhere (a seed / compose / init file baking in scheme://user:pass@host is a
+  #     leak of the exact pattern the contract removed). The test suite is excluded — it
+  #     carries the detection regex and $VAR-referenced client DSNs, which are not secrets.
+  if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    if "$PYTHON" - "$REPO_ROOT" <<'PY'
+import os, re, subprocess, sys
+root = sys.argv[1]
+dsn = re.compile(r'[A-Za-z][A-Za-z0-9+.\-]*://[^/\s@${%]*:[^/\s@${%]+@')
+try:
+    files = subprocess.run(["git", "-C", root, "ls-files"],
+                           capture_output=True, text=True, check=True).stdout.splitlines()
+except Exception as e:
+    print(f"  could not list tracked files ({e}); (b) verified in .env.example only")
+    sys.exit(0)   # a git hiccup must not fail the check — the .env.example half already ran
+hits = []
+for rel in files:
+    rel = rel.strip().replace('\\', '/')
+    if not rel or rel.startswith('tests/'):   # git ls-files always uses forward slashes
+        continue
+    p = os.path.join(root, rel)
+    try:
+        text = open(p, encoding='utf-8', errors='replace').read()
+    except OSError:
+        continue
+    for i, line in enumerate(text.splitlines(), 1):
+        if dsn.search(line):
+            hits.append(f"{rel}:{i}: {line.strip()}")
+for h in hits:
+    print("  " + h)
+sys.exit(1 if hits else 0)
+PY
+    then :
+    else
+      fail "a committed DSN embeds credentials (scheme://user:password@host) — the contract forbids pre-assembled connection strings"
+      bad=1
+    fi
+  else
+    info "git not available — DSN invariant (b) verified in .env.example only, not across all tracked files"
+  fi
+
+  [ "$bad" -eq 0 ] && pass ".env.example documents the discrete creds/coordinates; no tracked file publishes a pre-assembled connection string"
 }
 
 # Check 3 (static) — every required ${VAR} referenced in docker-compose.yml is
