@@ -21,15 +21,6 @@ Because init runs only on a fresh volume, the script is intentionally
 non-idempotent. A `docker compose down` (without `-v`) keeps the volume, so the
 script does not re-run and the provisioned state persists.
 
-> **⚠️ Upgrading from step 0 — start from a fresh volume.** Init runs *only* on an
-> empty data dir. If you already ran `docker compose up` at step 0, a `pg-data`
-> volume exists holding only the `balance` database — no roles, no `keycloak`, no
-> CONNECT isolation. A step-1 `up` over that stale volume **skips init entirely**,
-> leaving the safety-critical isolation unprovisioned while the healthcheck still
-> goes green. Before the first step-1 `up`, drop the stale volume:
-> `docker compose down -v` (or `docker volume rm supercool-finances_pg-data`). A
-> clean machine (`docker compose up` from zero) is unaffected.
-
 ## Ownership & isolation model (the safety-critical crux)
 
 | Role (env)                | Owns database | Can `CONNECT` to        |

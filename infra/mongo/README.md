@@ -24,13 +24,6 @@ container environment (`process.env`), injected by compose from the git-ignored
 Because init runs only on a fresh volume, the script is non-idempotent by design;
 `docker compose down` without `-v` keeps `mongo-data` and the provisioned state.
 
-> **⚠️ Upgrading from step 0 — start from a fresh volume.** Init runs *only* on an
-> empty data dir. A `mongo-data` volume left from a step-0 `docker compose up` has
-> no `analytics` app user provisioned, and a step-1 `up` over it **skips init**
-> while the healthcheck still goes green. Before the first step-1 `up`, drop the
-> stale volume: `docker compose down -v` (or
-> `docker volume rm supercool-finances_mongo-data`). A clean machine is unaffected.
-
 ## Healthcheck
 
 `mongosh --eval "db.adminCommand('ping')"` — `ping` is on Mongo's pre-auth allowed

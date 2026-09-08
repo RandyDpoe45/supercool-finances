@@ -19,12 +19,6 @@ coordination contract; where a value can legitimately vary it is **read from
 > tested here. Network-level "data only" isolation is proven in
 > [`tests/macro`](../macro/README.md) (Check 9); here we prove the **authenticated**
 > pings work on `data`.
->
-> The suite always starts from a `-v` clean slate (for isolation), so it does **not**
-> cover the step-0→step-1 *stale-volume upgrade* path — where a pre-existing
-> `pg-data`/`mongo-data` volume causes the first-boot init to be skipped. That
-> operational caveat is documented in the infra READMEs
-> (`infra/postgres/README.md`, `infra/mongo/README.md`), not guarded here.
 
 ## Layout
 
