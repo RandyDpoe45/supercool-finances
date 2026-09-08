@@ -5,7 +5,7 @@
 # it GROWS ONE SERVICE PER STEP as the specs are built (see specs/README.md).
 # It is NOT a final integration task — it exists from step 0 and accretes.
 #
-# Current state — Step 2 (spec 02, Keycloak identity provider):
+# Current state — Step 3 (spec 03, balance-service foundation skeleton):
 #   - The five networks (§2) are declared. `data` carries the datastores; `keycloak`
 #     now also joins `app-public`, `app-internal` and `data` (spec 00 §2). The
 #     `edge-*` networks remain empty until step 4 adds the gateways/nginx.
@@ -37,9 +37,19 @@
 #     No connection-string vars are published: .env.example carries discrete
 #     credentials + coordinates, and each service composes its own DSN at its
 #     step (2-3). See spec 01 § Contracts.
+#   - `balance-service` (spec 03, THIS step): the NestJS foundation SKELETON. It
+#     validates its OWN env with zod (fail-fast), runs TypeORM migrations on boot
+#     against the `balance` DB, binds the gateway + service-identity guards per
+#     prefix (/api, /admin, /internal), returns the shared error DTO, and exposes
+#     /internal/health (which backs the healthcheck below). It composes its OWN
+#     Postgres DSN + Redis URL from the discrete creds mapped in via `environment:`
+#     (no *_URL var — discrete-credentials contract, spec 01 § Contracts). Joins
+#     app-public, app-internal, data (spec 00 §2); host-unpublished. The money
+#     DOMAIN (ledger, transfers, OTP, relay) is added in spec 04.
 #
 # What arrives in later steps (do NOT add here early):
-#   - Step 3  (spec 04): `balance-service`     — joins app-public, app-internal, data.
+#   - Step 3  (spec 04): `balance-service`     — EXTENDED with the money domain
+#                        (ledger, transfers, limits, OTP module, outbox relay).
 #   - Step 3  (spec 05): `analytics-server`    — joins app-internal, data.
 #   - Step 4  (spec 06): `public-kong`         — joins edge-public, app-public.
 #                        `internal-kong`       — joins edge-internal, app-internal.
@@ -244,3 +254,52 @@ services:
       # Only host-published edge besides the nginx front doors (spec 00 §3):
       # the browser must reach Keycloak for the OIDC login redirect.
       - "${KEYCLOAK_PORT}:${KEYCLOAK_PORT}"
+
+  # Balance service — NestJS foundation skeleton (spec 03); the money domain is
+  # added in spec 04. Reachable only via a Kong (app-public/app-internal) and its
+  # datastores (data); NEVER host-published (spec 00 §2). The root DISCRETE creds
+  # are mapped into the service's OWN env var names below (it is a self-contained
+  # component — ADR-16 — and composes its own Postgres DSN + Redis URL internally;
+  # no *_URL var, honoring the discrete-credentials contract, spec 01 § Contracts).
+  balance-service:
+    build: ./services/balance-service
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Postgres: the balance app role -> the `balance` DB (least-privilege, spec 01).
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_BALANCE_USER}
+      DB_PASSWORD: ${POSTGRES_BALANCE_PASSWORD}
+      # Redis: composed into a URL internally (used from spec 04 onward).
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      # Shared secret for the /internal service-identity guard.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN}
+    healthcheck:
+      # Node HTTP probe (alpine ships node): fails unless readiness is UP (the
+      # endpoint returns 503 when Postgres is unreachable). GET /internal/health is
+      # exempt from the service-identity guard so the probe needs no credentials.
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "fetch('http://127.0.0.1:3000/internal/health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      # Startup chain (spec 00 §5): datastores + Keycloak healthy before the service
+      # boots and runs its migrations.
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - app-public
+      - app-internal
+      - data
