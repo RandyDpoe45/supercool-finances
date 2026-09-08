@@ -1,0 +1,31 @@
+# =============================================================================
+# SuperCool Finances — root .gitignore
+# NEVER commit real secrets. Only `.env.example` is committed (see negation).
+# =============================================================================
+
+# --- Environment / secrets --------------------------------------------------
+# Ignore every env file (.env, .env.local, .env.production, ...) ...
+.env*
+# ...but keep the committed template:
+!.env.example
+
+# --- Node / build outputs (arrive with services + frontends, steps 3-5) -----
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# --- Logs / debug -----------------------------------------------------------
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- OS / editor cruft ------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
