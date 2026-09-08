@@ -1,0 +1,114 @@
+# =============================================================================
+# SuperCool Finances — Docker Compose spine (the macro artifact).
+#
+# This file is the spine of the whole system: every component plugs into it, and
+# it GROWS ONE SERVICE PER STEP as the specs are built (see specs/README.md).
+# It is NOT a final integration task — it exists from step 0 and accretes.
+#
+# Current state — Step 0 (spec 00, macro architecture):
+#   - The five networks (§2) are declared. Only `data` has members right now; the
+#     four edge/app networks are intentionally empty until later steps add the
+#     services that live on them. Isolation is by network MEMBERSHIP + not
+#     publishing ports — so these are plain bridge networks (no `internal: true`).
+#   - The three datastores come up healthy on `data` only, host-unpublished.
+#
+# What arrives in later steps (do NOT add here early):
+#   - Step 1  (spec 01): Postgres init (balance + keycloak DBs, least-priv roles),
+#                        Redis AUTH/namespacing, Mongo auth + `analytics` db.
+#   - Step 2  (spec 02): `keycloak`            — joins app-public, app-internal, data
+#                        (host-published :8082).
+#   - Step 3  (spec 04): `balance-service`     — joins app-public, app-internal, data.
+#   - Step 3  (spec 05): `analytics-server`    — joins app-internal, data.
+#   - Step 4  (spec 06): `public-kong`         — joins edge-public, app-public.
+#                        `internal-kong`       — joins edge-internal, app-internal.
+#                        `public-nginx`        — joins edge-public   (host-published :8080).
+#                        `internal-nginx`      — joins edge-internal (host-published :8081, demo-only).
+#
+# Startup order (spec 00 §5) is enforced as services arrive via
+#   depends_on: { <dep>: { condition: service_healthy } }
+# The datastores below already expose healthchecks so those conditions attach
+# cleanly with no rework.
+#
+# Host ports are reserved as a macro contract in .env.example
+#   (8080 public-nginx · 8081 internal-nginx · 8082 keycloak) and are wired up
+#   in the steps noted above. Nothing is host-published at step 0.
+#
+# Config: copy .env.example -> .env before `docker compose up`. `.env` is
+# git-ignored; real secrets live only in `.env` / Docker secrets, never committed.
+# =============================================================================
+
+networks:
+  # Customer browser -> public front door.        Members arrive in step 4.
+  edge-public:
+    driver: bridge
+  # Admin browser -> private internal front door.  Members arrive in step 4.
+  edge-internal:
+    driver: bridge
+  # Public gateway -> services it may reach.        Members arrive in steps 2-4.
+  app-public:
+    driver: bridge
+  # Internal gateway -> services it may reach.      Members arrive in steps 2-4.
+  app-internal:
+    driver: bridge
+  # Services -> datastores. The only network with members at step 0.
+  data:
+    driver: bridge
+
+volumes:
+  pg-data:      # Postgres: ledger + outbox durability (source of truth).
+  mongo-data:   # Mongo: analytics read-model persistence.
+  redis-data:   # Redis: OTP is disposable, so persistence is optional.
+
+services:
+  # Source of truth: ledger + outbox (+ Keycloak DB, added in step 1).
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      # Postgres needs a password to boot; all three come from the env file.
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 forces a TCP probe: the initdb phase opens the Unix socket
+      # before the server truly accepts connections, so a socket-only check can
+      # flip healthy too early once depends_on: service_healthy is wired (step 2).
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - data
+
+  # OTP codes + Redis Streams transport. Bare healthy skeleton (AUTH is step 1).
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - data
+
+  # Analytics read model (analytics-owned). Bare healthy skeleton (auth is step 1).
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - data
