@@ -1,0 +1,16 @@
+# Keep the build context minimal and reproducible.
+node_modules
+dist
+coverage
+tests
+docs
+.env
+.env.*
+!.env.example
+*.log
+.git
+.gitignore
+.vscode
+.idea
+Dockerfile
+.dockerignore
