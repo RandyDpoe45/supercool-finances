@@ -9,3 +9,8 @@
 *.sh    text eol=lf
 *.yml   text eol=lf
 *.yaml  text eol=lf
+# Datastore config / init scripts are bind-mounted into Linux containers, so a
+# CRLF checkout on Windows must not leak in (e.g. a stray '\r' on a redis.conf
+# value or a mongosh init script). Keep them LF everywhere.
+*.conf  text eol=lf
+infra/**/init/*.js text eol=lf
