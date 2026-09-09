@@ -19,8 +19,9 @@ derived read model.
   (Keycloak's store, per default #3). Create a least-privilege app role for the
   balance service (owns `balance` only) and a separate role for Keycloak. Password
   via Docker secret / git-ignored env. Healthcheck: `pg_isready`.
-- **Redis** — key-spaces are namespaced: `otp:<txId>` for transaction codes
-  (TTL-managed), stream key `events:transactions` for the outbox transport.
+- **Redis** — key-spaces are namespaced: `otp:<sub>` for the **user-scoped**
+  transaction step-up code (**one active per user**, TTL-managed), stream key
+  `events:transactions` for the outbox transport.
   Persistence optional (`appendonly` off is fine — OTP is disposable). Healthcheck:
   `redis-cli ping`. AUTH enabled.
 - **MongoDB** — database `analytics`. Auth enabled (root + app user). Healthcheck:

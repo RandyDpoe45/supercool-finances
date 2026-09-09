@@ -1,0 +1,411 @@
+# Balance Service — Schema Manifest (Postgres persistence layer)
+#
+# Handoff artifact for the implementor building spec 04's persistence layer.
+# Derived from specs/DATA-MODEL.md (Part 1); that doc + spec 04 remain the
+# contract of record. This file lists WHAT to persist; the implementor decides
+# the TypeORM mapping.
+#
+# Conventions (apply to every entity below):
+#   - Money is `bigint` MINOR UNITS + a `currency` code (FK -> currency.code). Never float.
+#     Currency is normalized in a `currency` table (code, name, minor_unit_scale, symbol);
+#     the prototype seeds MXN only — adding a currency is a data insert, not a migration.
+#   - Columns are snake_case, set explicitly (no global naming strategy) — matches
+#     the scaffold's app-metadata entity.
+#   - Time is `timestamptz` (UTC instants — server stores/serves UTC only; clients
+#     localize to Mexico City time for display). UUID PKs use gen_random_uuid();
+#     `audit_log` uses `bigint GENERATED ALWAYS AS IDENTITY`. `ledger_entry.id` is uuid v4,
+#     ordered by `created_at` (clock_timestamp at insert) for reconstruction.
+#   - Posting is an atomic reducer under the account FOR UPDATE lock: update `balance`
+#     FIRST, then insert the ledger entry (balance_after = the new balance).
+#   - Schema changes ONLY via migrations (synchronize:false), run on boot.
+#   - There is NO Customer table: `owner_id` is a Keycloak `sub` (opaque string),
+#     never an FK — customers live in Keycloak, not this DB.
+#   - Per-attribute constraints (PK / FK / nullable / unique / default / check) are
+#     stated inside each `description`, per the requested manifest format.
+#   - The analytics read model (Mongo) is a separate artifact — it is a single
+#     flattened `transactions` collection fed by the event contract, not relational.
+
+Currency:
+  description: "Reference/lookup table of ISO 4217 currencies. Normalizes the currency of every money-bearing row and carries the metadata needed to interpret minor units. The prototype seeds MXN only; adding a currency is a data insert, not a migration. Table: currency."
+  attributes:
+    code:
+      type: char(3)
+      description: "ISO 4217 alphabetic code, e.g. 'MXN'. Primary key."
+    name:
+      type: varchar
+      description: "Human name, e.g. 'Mexican Peso'. NOT NULL."
+    minor_unit_scale:
+      type: smallint
+      description: "Number of decimal places, e.g. 2 for MXN (amounts are in centavos). NOT NULL. Makes the bigint minor-units interpretation explicit per currency."
+    symbol:
+      type: varchar
+      description: "Display symbol, e.g. '$'. Nullable."
+  relations:
+    accounts: "Account — accounts denominated in this currency (account.currency -> currency.code)."
+    money_rows: "Transaction / LedgerEntry — money rows denominated in this currency."
+    limits: "UserLimits — limit rows denominated in this currency."
+
+Account:
+  description: "A balance-bearing account. Either a customer account (multiple per customer) or an internal system account used as per-rail clearing. Carries the materialized posted `balance`, the materialized `held` total, and per-period spend + transaction-count counters (fixed calendar day/month windows) — all locked and updated in one DB transaction by the posting operation. Available balance is derived (balance - held), never stored. Table: account."
+  attributes:
+    id:
+      type: uuid
+      description: "Primary key (gen_random_uuid())."
+    owner_id:
+      type: varchar
+      description: "Owning customer's Keycloak `sub`. Nullable — NULL for system/clearing accounts. No FK (customers live in Keycloak)."
+    kind:
+      type: enum(customer|system)
+      description: "customer = a customer's account; system = internal clearing/system account. NOT NULL."
+    system_key:
+      type: varchar
+      description: "Stable id for a system account, e.g. 'clearing:rail-outbound'. Nullable — NULL for customer accounts. Partial-unique where kind='system'."
+    currency:
+      type: char(3)
+      description: "ISO currency code, FK -> currency.code. NOT NULL. Prototype seeds MXN only."
+    status:
+      type: enum(active|frozen)
+      description: "active permits movement; frozen blocks debits and credits (set via /admin freeze). NOT NULL, default 'active'."
+    balance:
+      type: bigint
+      description: "Materialized posted balance, minor units — the transactionally-synced projection of the ledger. NOT NULL, default 0. Mutated ONLY by the posting operation. No blanket non-negative CHECK: customer accounts may not overdraft (available >= 0 enforced on debit) but clearing accounts may go negative (net in transit)."
+    held:
+      type: bigint
+      description: "Materialized sum of active (PLACED) holds, minor units. NOT NULL, default 0, CHECK held >= 0. Mutated ONLY by hold operations."
+    spent_today:
+      type: bigint
+      description: "Fixed-window (calendar-day) spend counter, minor units, for the daily amount limit. NOT NULL, default 0. Reset under the row lock when spent_today_date rolls to a new day."
+    count_today:
+      type: bigint
+      description: "Fixed-window (calendar-day) transaction-count counter, for the daily velocity (count) limit. NOT NULL, default 0. Reset with spent_today (same day marker)."
+    spent_today_date:
+      type: date
+      description: "The day the *today* counters refer to. NOT NULL. Fixed-window marker: when it differs from today at debit time, BOTH spent_today and count_today reset."
+    spent_month:
+      type: bigint
+      description: "Fixed-window (calendar-month) spend counter, minor units, for the monthly amount limit. NOT NULL, default 0. Reset when spent_month_date's month rolls."
+    count_month:
+      type: bigint
+      description: "Fixed-window (calendar-month) transaction-count counter, for the monthly velocity (count) limit. NOT NULL, default 0. Reset with spent_month (same month marker)."
+    spent_month_date:
+      type: date
+      description: "First-of-month the *month* counters refer to. NOT NULL. Fixed-window marker resetting BOTH spent_month and count_month."
+    created_at:
+      type: timestamptz
+      description: "Row creation time. NOT NULL, default now()."
+    updated_at:
+      type: timestamptz
+      description: "Last mutation time. NOT NULL, default now()."
+  relations:
+    ledgerEntries: "LedgerEntry — an account has many ledger entries; its per-account ledger and running balance fold."
+    holds: "Hold — an account has many holds; the active (PLACED) ones sum to `held`."
+    debitedTransactions: "Transaction — transactions where this account is the debit (source) leg."
+    creditedTransactions: "Transaction — transactions where this account is the credit (destination) leg."
+
+LedgerEntry:
+  description: "Append-only, double-entry ledger row — the SOURCE OF TRUTH for money movement. Each row is one leg of a transaction: a signed delta against one account plus the resulting `balance_after` (the running fold). Legs of a transaction sum to zero. Never updated or deleted; a reversal appends new entries. Posting is an atomic reducer under the account FOR UPDATE lock: balance is updated FIRST, then this entry is inserted with balance_after = the new balance. Table: ledger_entry."
+  attributes:
+    id:
+      type: uuid
+      description: "Primary key (uuid v4, gen_random_uuid())."
+    transaction_id:
+      type: uuid
+      description: "FK -> transaction.id. The transaction this leg belongs to. NOT NULL."
+    account_id:
+      type: uuid
+      description: "FK -> account.id. The account this leg moves. NOT NULL. Indexed (account_id, created_at) for the per-account ledger and reconstruction order."
+    delta:
+      type: bigint
+      description: "Signed amount, minor units (debit < 0, credit > 0). NOT NULL. Per transaction_id, SUM(delta) = 0."
+    balance_after:
+      type: bigint
+      description: "The account's resulting materialized balance after applying delta (balance_before + delta). NOT NULL."
+    currency:
+      type: char(3)
+      description: "Currency of the entry, FK -> currency.code. NOT NULL."
+    created_at:
+      type: timestamptz
+      description: "Insert instant captured with clock_timestamp() (NOT now()/transaction start), NOT NULL. The reconstruction/ordering key: per-account monotonic because posting holds the account FOR UPDATE (entries for one account are serialized)."
+  relations:
+    transaction: "Transaction — the transaction that groups this and its balancing leg(s)."
+    account: "Account — the account whose balance this entry folds."
+
+Transaction:
+  description: "The header that groups a set of balancing ledger legs into one money movement, carrying its type, lifecycle status, and (denormalized for authz/query) the source/destination accounts. The ledger entries remain authoritative; the header FKs are a convenience. Reversals are new compensating transactions, never mutations. Table: transaction."
+  attributes:
+    id:
+      type: uuid
+      description: "Primary key."
+    type:
+      type: enum(internal|external_outbound|external_inbound)
+      description: "Determines which accounts are the debit/credit legs. NOT NULL."
+    status:
+      type: enum(PENDING|POSTED|FAILED|REVERSED)
+      description: "Lifecycle. EVERY transfer (internal and external outbound) starts PENDING at initiation and is OTP-gated. Internal posts to POSTED on OTP-confirm (no hold; funds checked at confirm under the account lock). External outbound places a hold at initiation and settles it to POSTED on OTP-confirm. NOT NULL."
+    amount:
+      type: bigint
+      description: "Positive magnitude of the movement, minor units. NOT NULL."
+    currency:
+      type: char(3)
+      description: "FK -> currency.code. NOT NULL."
+    debit_account_id:
+      type: uuid
+      description: "FK -> account.id. Source (debited) account. Nullable pre-resolution. Indexed (debit_account_id, created_at) for GET /accounts/:id/transactions."
+    credit_account_id:
+      type: uuid
+      description: "FK -> account.id. Destination (credited) account. External outbound = clearing:rail-outbound; external inbound = the customer account. Nullable pre-resolution."
+    payee_id:
+      type: uuid
+      description: "FK -> external_payee.id. The external beneficiary for external_outbound; NULL otherwise."
+    reverses_transaction_id:
+      type: uuid
+      description: "FK -> transaction.id (self). Set on a reversal transaction to point at the one it compensates; NULL otherwise."
+    initiated_by:
+      type: varchar
+      description: "Keycloak `sub` (customer) or admin `sub` that initiated it. NOT NULL."
+    failure_reason:
+      type: varchar
+      description: "Reason when status=FAILED. Nullable."
+    created_at:
+      type: timestamptz
+      description: "NOT NULL, default now()."
+    posted_at:
+      type: timestamptz
+      description: "When it reached POSTED. Nullable."
+    failed_at:
+      type: timestamptz
+      description: "When it reached FAILED. Nullable."
+  relations:
+    ledgerEntries: "LedgerEntry — the balancing legs that sum to zero for this transaction."
+    hold: "Hold — for external outbound, the reservation placed at initiation and settled/released at resolution (0..1)."
+    debitAccount: "Account — the source account debited (debit_account_id)."
+    creditAccount: "Account — the destination account credited (credit_account_id)."
+    payee: "ExternalPayee — the external beneficiary, for external_outbound (payee_id)."
+    reverses: "Transaction — the prior transaction this one compensates (self-reference, reverses_transaction_id)."
+    idempotencyKey: "IdempotencyKey — the key whose request produced this transaction (0..1)."
+    outboxEvents: "OutboxEvent — the event(s) emitted for this transaction in the same DB transaction."
+
+Hold:
+  description: "One row of the reservation ledger — funds reserved on a customer account for an in-flight external outbound transfer but not yet posted. Append-only lifecycle PLACED -> SETTLED | RELEASED | EXPIRED. Placing increments account.held (available drops); settling converts it to a posted movement (adds the double-entry ledger legs); releasing/expiry returns the funds with NO main-ledger entry. Carries `external_ref` to reconcile against the rail's settlement feed. Kept separate from the main ledger, which records only money that actually moved. Table: hold."
+  attributes:
+    id:
+      type: uuid
+      description: "Primary key."
+    account_id:
+      type: uuid
+      description: "FK -> account.id. The account whose funds are reserved. NOT NULL."
+    transaction_id:
+      type: uuid
+      description: "FK -> transaction.id. The external outbound transaction this hold backs. NOT NULL. The destination payee is reachable via that transaction (no direct payee FK on the hold)."
+    amount:
+      type: bigint
+      description: "Reserved amount, minor units, positive. NOT NULL, CHECK amount > 0. Active (PLACED) holds for an account sum to account.held."
+    status:
+      type: enum(PLACED|SETTLED|RELEASED|EXPIRED)
+      description: "Only PLACED counts toward `held`. NOT NULL, default 'PLACED'."
+    rail:
+      type: varchar
+      description: "The external rail, e.g. 'rail-outbound'. NOT NULL."
+    external_ref:
+      type: varchar
+      description: "The rail's reference for this movement — the handle for settlement/reconciliation. Nullable until assigned by the rail."
+    created_at:
+      type: timestamptz
+      description: "NOT NULL, default now()."
+    expires_at:
+      type: timestamptz
+      description: "When an unsettled hold expires and is auto-released. NOT NULL."
+    settled_at:
+      type: timestamptz
+      description: "When it reached SETTLED. Nullable."
+    released_at:
+      type: timestamptz
+      description: "When it reached RELEASED or EXPIRED. Nullable."
+  relations:
+    account: "Account — the account whose `held` this hold contributes to while PLACED."
+    transaction: "Transaction — the external outbound transaction being reserved."
+
+ExternalPayee:
+  description: "An enrolled external beneficiary a customer can send money to, subject to a cooling-off period before it can receive funds. It is METADATA about the destination (name, rail, masked account ref) — NOT a ledger account; the accounting counter-leg for external money is the rail's clearing account. Table: external_payee."
+  attributes:
+    id:
+      type: uuid
+      description: "Primary key."
+    owner_id:
+      type: varchar
+      description: "Enrolling customer's Keycloak `sub`. NOT NULL. No FK."
+    display_name:
+      type: varchar
+      description: "Human label for the beneficiary. NOT NULL."
+    rail:
+      type: varchar
+      description: "The external rail used to reach it. NOT NULL."
+    destination_ref:
+      type: varchar
+      description: "Masked external account identifier. NOT NULL. Unique with (owner_id, rail)."
+    status:
+      type: enum(pending|active|disabled)
+      description: "Usable as a destination only when 'active'. NOT NULL, default 'pending'."
+    cooling_off_until:
+      type: timestamptz
+      description: "The payee cannot receive money before this instant. NOT NULL. A transfer is rejected unless status='active' AND now() >= cooling_off_until."
+    created_at:
+      type: timestamptz
+      description: "NOT NULL, default now()."
+    activated_at:
+      type: timestamptz
+      description: "When it became active. Nullable."
+  relations:
+    transactions: "Transaction — external outbound transactions targeting this payee."
+
+UserLimits:
+  description: "A configurable set of amount caps and fixed-window transaction-count (velocity) checks applied to transfers. All windows are FIXED calendar periods (day / month), never rolling. Global baseline + per-customer override (customer wins). Table: user_limits (also sidesteps the SQL reserved word LIMIT)."
+  attributes:
+    id:
+      type: uuid
+      description: "Primary key."
+    scope:
+      type: enum(global|customer)
+      description: "global = baseline; customer = per-customer override. NOT NULL. Unique with (scope, owner_id)."
+    owner_id:
+      type: varchar
+      description: "Customer Keycloak `sub` when scope='customer'; NULL when scope='global'. No FK."
+    currency:
+      type: char(3)
+      description: "Currency the caps are denominated in, FK -> currency.code. NOT NULL."
+    per_transaction_max:
+      type: bigint
+      description: "Max amount for a single transfer, minor units. Nullable (NULL = no cap)."
+    daily_max:
+      type: bigint
+      description: "Max cumulative spend in the CURRENT CALENDAR DAY (fixed window, not rolling), minor units. Checked against account.spent_today. Nullable (NULL = no cap)."
+    monthly_max:
+      type: bigint
+      description: "Max cumulative spend in the CURRENT CALENDAR MONTH (fixed window, not rolling), minor units. Checked against account.spent_month. Nullable (NULL = no cap)."
+    daily_count_max:
+      type: integer
+      description: "Velocity: max number of transfers in the CURRENT CALENDAR DAY (fixed window). Checked against account.count_today. Nullable (NULL = no cap)."
+    monthly_count_max:
+      type: integer
+      description: "Velocity: max number of transfers in the CURRENT CALENDAR MONTH (fixed window). Checked against account.count_month. Nullable (NULL = no cap)."
+    created_at:
+      type: timestamptz
+      description: "NOT NULL, default now()."
+    updated_at:
+      type: timestamptz
+      description: "NOT NULL, default now()."
+  relations:
+    account: "Account (logical, not an FK) — resolved against Account.owner_id at check time; a customer-scope row overrides the global row."
+
+OutboxEvent:
+  description: "The transactional outbox. One row is written in the SAME DB transaction as the ledger change it describes; the relay worker polls unpublished rows with SELECT ... FOR UPDATE SKIP LOCKED, XADDs to the Redis stream, then stamps published_at (at-least-once). The row `id` IS the event_id the analytics consumer dedups on. Table: outbox_event."
+  attributes:
+    id:
+      type: uuid
+      description: "Primary key; also the event_id carried to the stream and used for consumer idempotency."
+    transaction_id:
+      type: uuid
+      description: "FK -> transaction.id. The aggregate this event describes. NOT NULL."
+    event_type:
+      type: varchar
+      description: "e.g. 'transaction.posted' | 'transaction.reversed' | 'transaction.failed'. NOT NULL."
+    payload:
+      type: jsonb
+      description: "The full, self-contained event contract (see DATA-MODEL Part 2). NOT NULL."
+    created_at:
+      type: timestamptz
+      description: "NOT NULL, default now()."
+    published_at:
+      type: timestamptz
+      description: "NULL until the relay publishes. The relay poll filters WHERE published_at IS NULL — partial index idx_outbox_unpublished(created_at) WHERE published_at IS NULL."
+  relations:
+    transaction: "Transaction — the money movement this event was emitted for."
+
+AuditLog:
+  description: "Immutable, append-only record of privileged /admin-plane actions (freeze/unfreeze, limit change, reversal approval/execution, simulated inbound). Ordinary customer transactions are NOT written here — the ledger is their audit trail. One row per admin action. The app DB role has no UPDATE/DELETE on this table. Table: audit_log."
+  attributes:
+    id:
+      type: bigint
+      description: "Primary key, GENERATED ALWAYS AS IDENTITY (append-only order)."
+    actor_id:
+      type: varchar
+      description: "Keycloak `sub` of the admin who performed the action. NOT NULL."
+    action:
+      type: varchar
+      description: "The action performed, e.g. 'account.freeze', 'limit.update', 'reversal.execute'. NOT NULL."
+    target_type:
+      type: varchar
+      description: "The kind of entity acted on, e.g. 'account', 'transaction', 'limit'. Nullable."
+    target_id:
+      type: varchar
+      description: "Identifier of the target. Nullable. Polymorphic by (target_type, target_id) — intentionally NOT an FK."
+    metadata:
+      type: jsonb
+      description: "Action-specific detail (before/after values, approval ids, etc.). Nullable."
+    created_at:
+      type: timestamptz
+      description: "NOT NULL, default now()."
+  relations: {}
+
+ApprovalRequest:
+  description: "Persists maker-checker (four-eyes) for balance-affecting admin operations. A maker submits a proposed action; a DIFFERENT checker approves or rejects; only an APPROVED request may be EXECUTED, and execution performs the real operation and writes an audit row. Table: approval_request."
+  attributes:
+    id:
+      type: uuid
+      description: "Primary key."
+    action_type:
+      type: enum(reversal|user_limits_change|adjustment)
+      description: "The kind of admin operation proposed. NOT NULL."
+    payload:
+      type: jsonb
+      description: "The proposed action's parameters — enough to execute it. NOT NULL."
+    status:
+      type: enum(PENDING|APPROVED|REJECTED|EXECUTED)
+      description: "Lifecycle; only APPROVED may transition to EXECUTED. NOT NULL, default 'PENDING'."
+    maker_id:
+      type: varchar
+      description: "Admin `sub` who submitted it. NOT NULL."
+    checker_id:
+      type: varchar
+      description: "Admin `sub` who decided it. NULL until decided. CHECK (checker_id IS NULL OR checker_id <> maker_id) enforces four-eyes."
+    target_transaction_id:
+      type: uuid
+      description: "FK -> transaction.id. The transaction targeted (e.g. a reversal target). Nullable for non-transaction actions."
+    created_at:
+      type: timestamptz
+      description: "NOT NULL, default now()."
+    decided_at:
+      type: timestamptz
+      description: "When approved or rejected. Nullable."
+    executed_at:
+      type: timestamptz
+      description: "When executed. Nullable."
+  relations:
+    targetTransaction: "Transaction — the transaction this request acts on (e.g. reversal target)."
+
+IdempotencyKey:
+  description: "Guarantees a money-moving request is applied at most once. The `key` is client-supplied; a server-computed `request_fingerprint` detects reuse of the same key with different parameters; the linked transaction is the source of truth for regenerating the reply on replay (no stored response snapshot). Keys expire after 24h. Table: idempotency_key."
+  attributes:
+    key:
+      type: varchar
+      description: "Client-supplied Idempotency-Key header value. Part of the COMPOSITE primary key (owner_id, key) — a key is unique per caller, not globally."
+    owner_id:
+      type: varchar
+      description: "Caller's Keycloak `sub`; namespaces the key so callers can't collide or probe each other. NOT NULL. Part of the composite primary key (owner_id, key)."
+    request_fingerprint:
+      type: varchar
+      description: "Server-computed hash of the canonical business tuple (type, source_account_id, destination[payee_id|credit_account_id], amount, currency). On a key hit, a mismatch -> 409 (key reused with different parameters). NOT NULL. Also powers a soft duplicate-suppression window: the same (owner_id, request_fingerprint) within 60s under a DIFFERENT key flags a suspected duplicate requiring an explicit confirmDuplicate override. Index (owner_id, request_fingerprint, created_at) for that lookup."
+    transaction_id:
+      type: uuid
+      description: "FK -> transaction.id. The transaction the request produced; replay regenerates the response from it. Nullable while status='in_progress'; present on every 'completed' key."
+    status:
+      type: enum(in_progress|completed)
+      description: "in_progress guards a concurrent retry mid-flight; completed means the result is replayable. NOT NULL."
+    created_at:
+      type: timestamptz
+      description: "NOT NULL, default now()."
+    expires_at:
+      type: timestamptz
+      description: "created_at + 24h. A retry AFTER this is treated as a fresh request. NOT NULL. Indexed idx_idem_expires(expires_at) for the cleanup sweep (Postgres has no native row TTL)."
+  relations:
+    transaction: "Transaction — the money movement produced under this key; replay regenerates the response from it."

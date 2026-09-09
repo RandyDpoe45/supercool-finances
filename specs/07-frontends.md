@@ -23,6 +23,11 @@ transport (06) exist.
   `CLAUDE.md` ([ADR-16](../docs/DECISIONS.md#adr-16--self-contained-components-no-shared-code)).
 - **Same-origin APIs:** each app calls its own nginx origin (`/api` or `/admin`),
   so no CORS gymnastics in the browser.
+- **Timezone / dates:** the server is **UTC-only**; each app converts UTC↔**Mexico
+  City time (IANA `America/Mexico_City`)** at the edges — parse the ISO-8601 `Z`
+  timestamps for display and convert any user-entered date back to UTC before
+  sending. Date localization and formatting is an **app artifact**; it never leaks
+  server-side (cross-cutting rule 5).
 
 ## The three apps
 

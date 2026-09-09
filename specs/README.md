@@ -29,6 +29,12 @@ earlier one is not worked around — it sends us back up to fix the earlier spec
    seed data loaded. No manual clicking.
 4. **Every spec ends with a Definition of Done** — an observable acceptance check,
    so "does the micro fit?" is testable, not a matter of opinion.
+5. **Time is UTC server-side; clients localize.** Every service **stores and serves
+   time in UTC** (`timestamptz` = UTC instants; APIs emit ISO-8601 with a `Z`
+   offset). All timezone handling — showing and accepting dates in **Mexico City
+   time (IANA `America/Mexico_City`, UTC−6 with no DST since 2022)** — is a
+   **client-app concern only**; no server component localizes, formats, or assumes a
+   non-UTC zone.
 
 ## Spec template
 

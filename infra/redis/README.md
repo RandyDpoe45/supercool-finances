@@ -32,7 +32,7 @@ Nothing to configure at the container level; documented here as the contract:
 
 | Key                    | Purpose                                            |
 |------------------------|----------------------------------------------------|
-| `otp:<txId>`           | Transaction OTP code, TTL-managed, single-use      |
+| `otp:<sub>`            | Transaction step-up code — **one active per user** (user-scoped), TTL-managed, single-use |
 | `events:transactions`  | Redis Stream carrying outbox events to analytics   |
 
 ## Connection contract

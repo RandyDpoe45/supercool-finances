@@ -45,7 +45,7 @@ the threats and their mitigations auditable. Scoped to the design in
 | Money created/lost via float rounding | Integer minor units (or fixed `DECIMAL`) + explicit currency. (ADR-4) |
 | Event stream disagrees with the ledger | Transactional outbox (same-tx write) + at-least-once relay + idempotent consumer. (ADR-5) |
 | Relay double-publishes an event (multiple balance-service instances) | Claim outbox rows with `SELECT ... FOR UPDATE SKIP LOCKED`; idempotent consumer dedups by `event_id`. (ADR-11) |
-| OTP code replayed for a different transfer | Code bound to the specific transaction (amount + destination). (ADR-6) |
+| OTP code replayed for a different transfer | **User-scoped, single-active, single-use OTP**: at most one live code per user, atomically consumed on confirm (`GETDEL`), so a code authorizes exactly one transfer and cannot be reused for another; generating a new code is blocked while one is active. (ADR-6) |
 | OTP code redeemed twice (race) | Atomic single-use consume (`GETDEL`/Lua) + TTL. (ADR-7) |
 | New payee used to exfiltrate funds immediately | Cooling-off period before a newly-enrolled external account can receive money. |
 | Silent drift between ledger and materialized balance | Single posting operation writes both in one tx; reconciliation asserts `sum(ledger delta) == account.balance`; internal accounts net to zero. (ADR-13) |

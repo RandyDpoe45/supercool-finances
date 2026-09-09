@@ -93,8 +93,10 @@ attempting ownership checks at the gateway (it lacks the data).
 
 **Decision.** An append-only, double-entry ledger in Postgres (ACID) is
 authoritative. Balances are derived (optionally materialized, always
-rebuildable). Money is stored as integer minor units + currency. External flows
-route through an internal clearing account.
+rebuildable). Money is stored as integer minor units + a `currency` code, with
+currency **normalized in a `currency` table** (`code`, `minor_unit_scale`, …) so the
+prototype runs single-currency (**MXN**) with the seam open to add more via a data
+insert. External flows route through an internal clearing account.
 
 **Why.** This is the "money is safe" core: immutable history, provable balance,
 no float rounding, double-entry invariant even for external rails.
@@ -128,22 +130,38 @@ likely use Kafka/RabbitMQ for the backbone.
 
 ## ADR-6 — App-level transaction OTP with a separate out-of-band app
 
-**Decision.** Sensitive transfers require a one-time code generated server-side
-at transaction initiation, **bound to the specific transaction** (amount +
-destination). A separate OTP web app with its own login acts as the simulated
-out-of-band channel and reveals the pending code. Default UX is code-entry. OTP is implemented as a
+**Decision.** Sensitive transfers require a one-time code that is **user-scoped**
+(`otp:<sub>`): **at most one active code per user**, single-use (atomic `GETDEL`),
+TTL-bound, and **not** bound to a transaction. It is the user's out-of-band second
+factor for authorizing their own transfers. **Single-use is atomic**, so a code
+authorizes **exactly one** transaction (two confirms with the same code cannot both
+succeed). **Generation is singleton-gated**: a user may generate a code without a
+pending transfer (harmless), but **not while one is already active** — a second
+generation is rejected; the slot frees only when the code is consumed or expires. A
+separate OTP web app with its own login acts as the simulated out-of-band channel and
+reveals the user's current code. Default UX is code-entry. OTP is implemented as a
 bounded module inside the balance service (see ADR-11), not a standalone service.
 
-**Why.** Transaction signing (step-up), not just login. Binding prevents replay
-against a different transfer. A separate authenticated app reads as a true second
-factor; mocking delivery avoids forcing the evaluator into an authenticator app.
+**Why.** Transaction signing (step-up), not just login. **User-scoping** keeps the
+OTP a genuine second factor while being simpler and more robust than per-transaction
+binding: no code↔transaction coupling to get wrong, no proliferation of per-tx keys,
+and a user holds at most one live code (single-use + TTL, so it can't be hoarded or
+replayed). The code's job is to prove *the user* authorizes a confirm; **preventing
+duplicate transfers is a separate concern** handled by the soft fingerprint window +
+idempotency (spec 04), so OTP stays focused on out-of-band proof of the user. A
+separate authenticated app reads as a true second factor; mocking delivery avoids
+forcing the evaluator into an authenticator app.
 
-**Rejected.** Showing the code in the same session/page that consumes it
-(security theater — not a second factor). Forcing a real TOTP app like Authy
-(evaluator friction). Keycloak per-transaction step-up (ACR/LoA) — powerful but
-fiddly to wire for the test; login stays on Keycloak, transaction OTP is
-app-level. TOTP for transaction signing (time-based, cannot bind to a specific
-transaction).
+**Rejected.** **Per-transaction OTP scope** (a code bound to each transaction id):
+couples the code to a specific transaction and lets a user hold multiple concurrent
+live codes — more moving parts, and it still doesn't stop duplicate transfers (that's
+the fingerprint window + idempotency). User-scoping is simpler and keeps the OTP's
+role clean. Showing the code in the same session/page that consumes it (security
+theater — not a second factor). Forcing a real TOTP app like Authy (evaluator
+friction). Keycloak per-transaction step-up (ACR/LoA) — powerful but fiddly to wire
+for the test; login stays on Keycloak, transaction OTP is app-level. TOTP for
+transaction signing (time-based; not server-issued, so it can't be user-scoped /
+single-active the way we want).
 
 ---
 
@@ -290,8 +308,11 @@ spend counters. Every money movement, in **one DB transaction**, appends the
 double-entry `LedgerEntry` rows *and* folds the delta into the affected accounts'
 `balance` and counters — the posting acts as a **reducer**
 (`balance_after = balance_before + delta`), with `balance_after` stored on each
-entry. The ledger remains the source of truth; `balance` is a
-transactionally-synced projection, always rebuildable.
+entry. **Within that transaction the order is balance-then-ledger:** under the
+account `FOR UPDATE` lock, `balance` (and the counters) are updated first, then the
+`LedgerEntry` rows are inserted carrying the resulting `balance_after`. The ledger
+remains the source of truth; `balance` is a transactionally-synced projection,
+always rebuildable.
 
 Concurrency uses **READ COMMITTED + `SELECT ... FOR UPDATE`** on the affected
 account row(s), locked in a **canonical order (by account id)** to avoid
