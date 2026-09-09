@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryRunner } from 'typeorm';
+import { runInTransactionWithRetry } from '../../common/db/run-in-transaction';
 import { addMinor, availableMinor, sumMinor } from '../../common/money/money';
 import { Account } from '../../database/entities/account.entity';
 import { AccountKind, AccountStatus, TransactionStatus } from '../../database/entities/enums';
@@ -35,13 +36,6 @@ import {
   TransactionEventLeg,
   TransactionPostedPayload,
 } from './transaction-event';
-
-/** Postgres SQLSTATE for a detected deadlock — the ONLY error the reducer retries. */
-const DEADLOCK_SQLSTATE = '40P01';
-
-/** Bounded retries on a deadlock (total attempts = 1 + this). Deadlocks are rare given the
- * canonical lock ordering; a small bound absorbs the occasional loser without livelock. */
-const MAX_DEADLOCK_RETRIES = 3;
 
 /** Canonical minor-unit string shapes. A signed integer for a leg delta, an unsigned integer
  * for the amount magnitude. Validated BEFORE any `BigInt()` so a malformed string raises the
@@ -99,26 +93,11 @@ export class PostingService {
     // opposite orders. Ids are already distinct (validated); the Set is defensive.
     const lockOrder = [...new Set(command.legs.map((leg) => leg.accountId))].sort(compareAccountId);
 
-    for (let attempt = 0; ; attempt += 1) {
-      const queryRunner = this.dataSource.createQueryRunner();
-      await queryRunner.connect();
-      await queryRunner.startTransaction('READ COMMITTED');
-      try {
-        const posted = await this.applyPosting(queryRunner, command, txId, lockOrder);
-        await queryRunner.commitTransaction();
-        return posted;
-      } catch (error) {
-        if (queryRunner.isTransactionActive) {
-          await queryRunner.rollbackTransaction();
-        }
-        if (isDeadlock(error) && attempt < MAX_DEADLOCK_RETRIES) {
-          continue;
-        }
-        throw error;
-      } finally {
-        await queryRunner.release();
-      }
-    }
+    // ONE transaction at READ COMMITTED, deadlock-retried, via the shared helper. `txId` and
+    // `lockOrder` are captured up front so they stay stable across retries.
+    return runInTransactionWithRetry(this.dataSource, (queryRunner) =>
+      this.applyPosting(queryRunner, command, txId, lockOrder),
+    );
   }
 
   /** Steps c–g of ADR-13, inside one already-open transaction. */
@@ -329,15 +308,4 @@ function buildPostedPayload(
     legs,
     occurredAt: new Date().toISOString(),
   };
-}
-
-/** True iff the error is (or wraps) a Postgres deadlock (SQLSTATE 40P01). TypeORM surfaces
- * the driver error as `QueryFailedError`; the SQLSTATE lives on the error or its
- * `driverError`, so both are checked. */
-function isDeadlock(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) {
-    return false;
-  }
-  const candidate = error as { code?: unknown; driverError?: { code?: unknown } };
-  return candidate.code === DEADLOCK_SQLSTATE || candidate.driverError?.code === DEADLOCK_SQLSTATE;
 }

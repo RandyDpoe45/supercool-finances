@@ -20,6 +20,8 @@ coordination contract, not from the implementor's code. Each test is designed to
 | `integration/accounts-read.integration.spec.ts` | Spec 04 **domain Step-1** read endpoints over HTTP (real `AppModule` + gateway guard + error filter). **`GET /api/accounts`**: owner scoping / **anti-IDOR** (only the caller's accounts; system account never listed); **AccountDto** shape + money as strings; **available = balance − held** (held>0 / =0 / =balance) with **no float loss near the max bigint**. **`GET /api/accounts/:id/transactions`**: 404 (never 403 / **no existence leak**) for a not-owned or system account, 404 for a missing id; **only that account's ledger legs**, **newest-first** (created_at DESC), **bounded to 100**; `balance_after` intact as strings; malformed `:id` → **400 BAD_REQUEST** | **Yes** (honest-SKIP) | `npm test` |
 | `unit/posting.command.spec.ts` | Spec 04 **domain Step-2** `postTransaction` command guards (**fail BEFORE any DB work**): `new PostingService(mockDataSource, …mockRepos)`, feed a malformed command, assert it rejects with **`InvalidPostingCommandError`** AND `dataSource.createQueryRunner` was **NOT** called (validation is the gate, not a post-tx check). Branches: `<2 legs`; `amount <= 0`; **duplicate account ids** (a dup id would let the second fold overwrite the first — money-relevant); a **zero-delta leg**; deltas **not summing to zero**; a **malformed minor-unit string** (`delta:'1.5'` / `amount:'abc'`); an **amount ≠ moved magnitude**; plus a positive control (a well-formed command PASSES validation and reaches `createQueryRunner`). **No DB, never skipped** | No | `npm test` |
 | `integration/post-transaction.integration.spec.ts` | Spec 04 **domain Step-2** the `postTransaction` atomic reducer (money-safety keystone) over the REAL DI'd service + real Postgres. **Happy path**: internal transfer folds both balances, appends the two double-entry legs (deltas ∓N, `balance_after` = each new balance, legs sum to 0), writes the header **POSTED** + `posted_at`, and exactly **one** unpublished `outbox_event`. **No overdraft / AVAILABLE semantics**: a debit over `available` (with `held>0` so `balance` alone would allow it) is rejected and **nothing is written** (global row-count delta 0); a debit of **exactly** available succeeds (>= not >). **Frozen**: a customer debit on a frozen but well-funded account is rejected (nothing written); crediting a frozen account is allowed. **Currency mismatch**: a leg whose account currency ≠ command currency is rejected (nothing written). **Double-entry**: legs that do not sum to zero (would mint money) are rejected (nothing written). **System exemption**: an inbound-style post drives a `kind='system'` clearing account **negative** with no overdraft error. **CONCURRENCY (DoD keystone)**: N=8 in-process concurrent transfers against A funded for exactly K=5 → exactly K succeed, the surplus reject **insufficient**, A never overdraws (ends 0), B gains exactly K·M, A has exactly K debit legs, and all deltas across the pair net to 0 (`FOR UPDATE` serialization). **Reconciliation**: after a batch, `SUM(ledger delta) == account.balance` per account, all accounts net to 0, and the two customer accounts net to 0 across the `internal` transfers | **Yes** (honest-SKIP) | `npm test` |
+| `unit/fingerprint.spec.ts` | Spec 04 **domain Step-3** the pure `computeFingerprint({type,source,destination,amount,currency})` hash backing key-reuse detection AND the 60s soft-duplicate window: **deterministic** (same tuple → same hash); a stable **64-char lowercase hex** string; **every field** changes the hash; **no delimiter/field-boundary collision** (`type:'a'+source:'b\|c'` ≠ `type:'a\|b'+source:'c'`, catching a naive-concat bug that would false-match two different transfers); source/destination **not interchangeable** (direction matters); **null** source/destination handled (no throw, stable, distinct from non-null and from each other). **No DB, never skipped** | No | `npm test` |
+| `integration/idempotency.integration.spec.ts` | Spec 04 **domain Step-3** `IdempotencyService.execute(params, operation)` over the REAL DI'd service + real Postgres, with a REAL operation closure (an `invocations` counter that inserts a `transaction` row through the passed query runner). **Replay** (DoD "a replayed key moves money once"): same `(ownerId,key)` twice → `invocations === 1`, first `replayed:false` then `replayed:true` with the SAME `transactionId`; exactly one transaction row + one `completed` key row linked to it. **Key reuse**: same key, different `fingerprintInput` → `IdempotencyKeyReuseError` (`IDEMPOTENCY_KEY_REUSED`), operation not re-run, no second movement. **Soft-duplicate**: a different key, same fingerprint, within 60s → `SuspectedDuplicateError` (`SUSPECTED_DUPLICATE`), operation not run, no key row for the blocked key; `confirmDuplicate:true` lets it through; a DIFFERENT fingerprint within the window is NOT suppressed (no false positive); **window boundary** — a same-fingerprint sibling seeded (via `pg.insertIdempotencyKey`) at **−120s is allowed**, at **−10s is suppressed**. **Atomicity**: an operation that inserts then throws → execute rejects, **nothing persists** (no key row, no tx), and the SAME key is then **retryable** (a fresh op runs). **Concurrency**: N=6 concurrent `execute` with the same key → `invocations === 1`, **zero rejections** (no raw `23505` — the claim is `INSERT … ON CONFLICT`), all resolved calls share one `transactionId` (exactly one `replayed:false`, the rest `true`), one tx row + one key row | **Yes** (honest-SKIP) | `npm test` |
 | `integration/repositories-and-seed.integration.spec.ts` | Spec 04 **Step-3 persistence completion**. **Seed migration**: exactly the two clearing/system accounts (`clearing:rail-outbound/-inbound`, `kind=system`, `MXN`, `balance/held=0`, `active`, date markers set); **no over-seed** (system-account count == 2, **zero** `global` `user_limits`); MXN sanity. **Repos (agreed minimal surface, resolved BY TOKEN through the app graph)**: **all 10 `<NAME>_REPOSITORY` tokens bind to a working provider** (`create` + each repo's read method — `findById`, or `findByOwnerAndKey` for IdempotencyKey — guards the full PersistenceModule wiring); Account `create`→`findById`; `findByOwner` owner-scoping (isolation); `findBySystemKey` resolves a seeded clearing account; `lockByIdForUpdate` returns the row **and holds a real FOR UPDATE lock** (concurrent `FOR UPDATE NOWAIT` → 55P03); ExternalPayee `findByOwner` scoping; IdempotencyKey `findByOwnerAndKey` keys on (owner,key); Transaction & LedgerEntry `create`→`findById` | **Yes** (honest-SKIP) | `npm test` |
 
 Discovery is already wired by the scaffold: `jest.config.ts` matches
@@ -85,6 +87,21 @@ framework-agnostic error classes (`InsufficientFundsError` / `AccountFrozenError
 `CurrencyMismatchError` / `AccountNotFoundError` / `InvalidPostingCommandError`; currently
 `src/modules/posting/posting.errors.ts`) so a rejection can be classified by `instanceof`
 (and the pure command-guard unit suite asserts on `InvalidPostingCommandError` directly).
+
+For domain Step-3 it wires the **idempotency wrapper**: `getIdempotencyService()` resolves the
+`IdempotencyService` **class** (currently `src/modules/idempotency/idempotency.service.ts`) so
+the integration suite can `app.get(...)` the REAL DI'd instance and drive
+`execute(params, operation)` against Postgres with a real operation closure. `getDomainErrors()`
+also resolves the two idempotency errors (`IdempotencyKeyReuseError` code
+`IDEMPOTENCY_KEY_REUSED`, `SuspectedDuplicateError` code `SUSPECTED_DUPLICATE`; currently
+`src/modules/idempotency/idempotency.errors.ts`) — the suite asserts on the stable `code` AND
+the resolved class. `getComputeFingerprint()` **best-effort** resolves the PURE
+`computeFingerprint(input)` hash (currently `src/modules/idempotency/fingerprint.ts`); the
+fingerprint unit suite is written because it resolves — had it not, fingerprint behaviour would
+be covered only via the integration soft-duplicate cases. The observed implementation matches
+the spec-derived contract exactly (ON-CONFLICT claim → concurrent losers block then replay;
+`IdempotencyInProgressError` is documented as never externally observable), so no contract
+mismatch was flagged.
 Unlike the other resolvers it does **not** throw when a class is absent: the money-safety
 proofs gate on **observable state** (the tx rolled back — no ledger/tx/outbox rows, balances
 unchanged), and the error *kind* is a secondary signal that falls back to a `code`/message
@@ -102,7 +119,12 @@ vocabulary (incl. `LOCK_NOT_AVAILABLE` 55P03 for the FOR UPDATE proof),
 Schema specs bind a one-line `withRollback = (fn) => withRollbackOn(ds, fn)` to their
 resolved DataSource. `insertLedgerEntry(q, overrides)` (added for the domain-read suite)
 inserts one ledger leg (MXN by default; `transaction_id`/`account_id` supplied by the
-caller; pass `created_at` to control statement ordering). **Note:** the Step-3 repo tests do NOT use `withRollback` — a
+caller; pass `created_at` to control statement ordering).
+`insertIdempotencyKey(q, overrides)` (added for the domain Step-3 suite) inserts one
+`idempotency_key` row with a **settable `created_at`** — the seam the soft-duplicate WINDOW
+test uses to plant a same-fingerprint sibling inside/outside the 60s window (pass the exact
+`request_fingerprint` the service computes for a tuple, e.g. one read back from a real
+`execute`). **Note:** the Step-3 repo tests do NOT use `withRollback` — a
 DI'd repo uses its own auto-commit connection, so a separate QueryRunner tx cannot
 wrap it; those tests use random ids and clean up their committed rows in `afterEach`.
 
@@ -244,3 +266,18 @@ wrap it; those tests use random ids and clean up their committed rows in `afterE
     reducer exempts by account **kind**, not by a hard-coded clearing `system_key` allowlist.
     If the exemption is instead keyed on the specific seeded keys, switch the seed to the
     real `clearing:rail-inbound` account and reset its balance in teardown.
+11. **Domain Step-3: `execute` signature + error names/codes are the spec-derived contract**
+    (resolved via `getIdempotencyService` / `getDomainErrors`): `execute(params, operation)` →
+    `{ transactionId, replayed }`; `IDEMPOTENCY_KEY_REUSED` / `SUSPECTED_DUPLICATE`. Confirmed
+    to match `src/modules/idempotency`. The **concurrency** proof asserts ALL N calls resolve
+    (0 rejections, one `replayed:false`, the rest `true`) — this is the ON-CONFLICT "losers
+    block then replay" contract; an implementation that instead rejected losers with a raw
+    `23505` or an `IdempotencyInProgressError` would (correctly) fail it. If a design ever
+    chooses to surface an in-progress error to concurrent callers, that assertion is the
+    tripwire — reconcile the contract rather than loosen the test.
+12. **The fingerprint is owner-independent (used by the window test).** The soft-duplicate
+    hash is over `{type,source,destination,amount,currency}` only (owner is the LOOKUP scope,
+    not part of the hash). The window boundary test relies on this: it reads the fingerprint
+    the service computed for a tuple under a scratch owner, then seeds same-fingerprint
+    siblings under fresh owners with a backdated `created_at`. If the fingerprint ever
+    incorporated the owner, that read-and-reseed step would need the same owner.

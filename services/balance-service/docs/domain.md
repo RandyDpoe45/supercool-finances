@@ -12,9 +12,11 @@ per step:
 - **Step 2 — the `postTransaction` reducer** ([below](#the-posttransaction-reducer-step-2)):
   the single balance-mutating operation, plus the domain-error base and the
   transaction-aware repository seam that land with the first write path.
+- **Step 3 — idempotency & soft-duplicate**
+  ([below](#idempotency--soft-duplicate-step-3)): the generic at-most-once wrapper +
+  60s duplicate-suppression, and the shared transaction-with-deadlock-retry helper.
 
-Holds, limits, idempotency, OTP, transfers, and the outbox relay still arrive in later
-steps.
+Holds, limits, OTP, transfers, and the outbox relay still arrive in later steps.
 
 ## Module structure
 
@@ -216,10 +218,13 @@ All arithmetic is exact `BigInt` via `common/money` (`sumMinor`) — never `Numb
 5. **Outbox:** exactly **one** `OutboxEvent` in the same tx (transactional outbox, ADR-5),
    then `commit`.
 
-On any throw the tx is **rolled back** (guarded by `isTransactionActive`) and the query
-runner is always **released**. **Only a deadlock** (SQLSTATE `40P01`, matched on the error
-or its `driverError`) is retried — bounded to `MAX_DEADLOCK_RETRIES` (3) additional
-attempts, each in a fresh transaction; every other error propagates.
+The transaction/retry mechanics are the shared **`runInTransactionWithRetry`** helper
+(`src/common/db/run-in-transaction.ts`, [below](#shared-transaction--deadlock-retry-helper)):
+on any throw the tx is **rolled back** (guarded by `isTransactionActive`) and the query
+runner is always **released**; **only a deadlock** (SQLSTATE `40P01`, matched on the error or
+its `driverError`) is retried — bounded to 3 additional attempts, each in a fresh
+transaction; every other error propagates. `applyPosting` is the `fn` run inside it, so
+`txId`/`lockOrder` (captured up front) stay stable across retries.
 
 ### Per-leg rules (`checkAndFold`)
 
@@ -303,9 +308,110 @@ TransactionPostedPayload {
 The payload types are declared as `type` aliases (not interfaces) so they satisfy the
 entity's `Record<string, unknown>` column without an explicit index signature.
 
+## Idempotency & soft-duplicate (step 3)
+
+`src/modules/idempotency/` — a **generic at-most-once wrapper** for money-moving requests
+(spec 04 Transfers), **decoupled from posting**: any operation can run under an
+`Idempotency-Key` with 60s soft duplicate-suppression. It has **no HTTP surface** this step;
+`IdempotencyModule` (`imports: [PersistenceModule]`, provides + exports `IdempotencyService`)
+is a **service-only feature module**, imported **transitionally by `AppModule`** until the
+transfers surface consumes it (step 4).
+
+| File | Role |
+|---|---|
+| `idempotency.module.ts` | Provides/exports `IdempotencyService`; imports `PersistenceModule`. |
+| `idempotency.service.ts` | The `execute(params, operation)` wrapper + its replay/claim flow. |
+| `fingerprint.ts` | Pure `computeFingerprint(input)` — `sha256` hex over the canonical business tuple. |
+| `idempotency.errors.ts` | The domain errors (extend `DomainError`). |
+
+### The `execute` contract
+
+```
+execute(params, operation): Promise<{ transactionId: string; replayed: boolean }>
+
+params = {
+  ownerId: string;
+  key: string;                          // the client Idempotency-Key
+  fingerprintInput: { type; source: string|null; destination: string|null; amount; currency };
+  confirmDuplicate?: boolean;           // override a suspected soft-duplicate
+}
+operation = (queryRunner) => Promise<{ transactionId: string }>   // the movement, run IN-TX
+```
+
+`replayed` is `true` when a prior completed result was returned (money moved 0 additional
+times) and `false` when the operation ran fresh.
+
+### One-transaction atomicity model
+
+Everything runs in **ONE transaction** (READ COMMITTED) via the shared
+[`runInTransactionWithRetry`](#shared-transaction--deadlock-retry-helper) helper, so a
+deadlock retries and **any error rolls back the key claim together with the movement** — a
+failed attempt leaves **no** key behind and stays fully retryable. The flow:
+
+1. **Fingerprint** — `computeFingerprint(fingerprintInput)` once, outside the (retryable) tx.
+2. **Replay check** — `findByOwnerAndKeyInTx(ownerId, key)`. If a row exists: fingerprint
+   mismatch → `IdempotencyKeyReuseError`; `completed` (with its linked transaction) → return
+   `{ transactionId, replayed: true }`; else → `IdempotencyInProgressError` (defensive).
+3. **Soft-duplicate** (skipped when `confirmDuplicate`) — `findRecentByFingerprintInTx`
+   (same owner + fingerprint, `created_at > now − 60s`, a DIFFERENT key). A hit →
+   `SuspectedDuplicateError` (a **soft** block: an identical payment is legitimately valid, so
+   the caller may re-issue with `confirmDuplicate`).
+   Note this is a **committed-sibling heuristic**: it reliably catches a *sequential* resubmit
+   (the first request already committed), but under `READ COMMITTED` two truly simultaneous
+   requests with different keys can't see each other's uncommitted claim, so a sub-second
+   concurrent new-key double-submit may slip through. That's acceptable — the idempotency key
+   is the hard at-most-once control; soft-duplicate is defense-in-depth. Don't over-trust it.
+4. **Claim** — `claimInTx` (`INSERT … ON CONFLICT DO NOTHING`), `status = in_progress`,
+   `expires_at = now + 24h`. If the claim returns **false** (a concurrent caller won the race
+   between steps 2 and 4), re-read and resolve exactly as step 2.
+5. **Operate** — `const { transactionId } = await operation(queryRunner)` (the movement, in
+   the same tx).
+6. **Complete** — `markCompletedInTx(ownerId, key, transactionId)`; the wrapper commits and
+   returns `{ transactionId, replayed: false }`.
+
+### The `ON CONFLICT` claim resolves the upsert caveat
+
+The composite PK `(owner_id, key)` is **client-supplied**, so `create()`/`.save()` would
+**UPSERT** — silently overwriting a concurrent holder instead of failing (see
+[persistence.md](./persistence.md)). `claimInTx` instead does an explicit
+`INSERT … ON CONFLICT ("owner_id","key") DO NOTHING RETURNING "key"`; a returned row means
+**this** call inserted (claimed), zero means a holder already exists. Under READ COMMITTED a
+second concurrent claim **blocks on the claim row lock** until the first tx commits (→
+`completed`, the second replays) or rolls back (→ gone, the second claims). Because of that
+lock-wait, a committed `in_progress` is **never externally observable** — which is why the
+in-progress paths are labeled defensive (kept for safety, not an expected outcome).
+
+### Domain errors
+
+Framework-agnostic classes extending `common/errors/domain-error.ts` `DomainError`, each with
+a stable `code` and no HTTP coupling (mapping deferred to the transfers endpoint step):
+
+| Class | `code` | Meaning |
+|---|---|---|
+| `SuspectedDuplicateError` | `SUSPECTED_DUPLICATE` | Identical request under a different key within 60s (soft; confirmable). |
+| `IdempotencyKeyReuseError` | `IDEMPOTENCY_KEY_REUSED` | Same key, different request parameters (fingerprint mismatch). |
+| `IdempotencyInProgressError` | `IDEMPOTENCY_IN_PROGRESS` | A request with this key is in progress (defensive). |
+
+### Shared transaction + deadlock-retry helper
+
+`src/common/db/run-in-transaction.ts` `runInTransactionWithRetry(dataSource, fn, opts?)` is
+the single seam every money-mutating operation opens its transaction through: create + connect
+a `QueryRunner`, `startTransaction` (default `READ COMMITTED`), run `fn`, commit; on a deadlock
+(`40P01`, via `isDeadlockError`) roll back and retry in a fresh tx (bounded, default 3); on any
+other error roll back and rethrow; **always** release. Both `IdempotencyService.execute` and
+`PostingService.postTransaction` use it — the latter a **behavior-preserving** refactor of its
+former inline loop (same isolation, retry bound, rollback/release, and deadlock detection).
+
+### Deferred to step 4 (transfers)
+
+The DoD proof that a **replayed `Idempotency-Key` moves money once** end-to-end is exercised
+when the transfers surface wires `execute` around `postTransaction` (the `operation`) behind
+`POST /api/transfers`. This step delivers the reusable wrapper and its unit-level guarantees;
+no endpoint yet.
+
 ## Not in this slice (later steps)
 
-Idempotency + soft-duplicate suppression, internal transfers + OTP, holds + external
-outbound, the outbox **relay worker**, limits + external payees, and admin ops +
-maker-checker + external rails. Statement pagination beyond the first page is likewise
-deferred — the read slice returns only the most recent `STATEMENT_PAGE_LIMIT` legs.
+Internal transfers + OTP, holds + external outbound, the outbox **relay worker**, limits +
+external payees, and admin ops + maker-checker + external rails. Statement pagination beyond
+the first page is likewise deferred — the read slice returns only the most recent
+`STATEMENT_PAGE_LIMIT` legs.

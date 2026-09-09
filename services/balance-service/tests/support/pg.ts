@@ -130,3 +130,27 @@ export async function insertLedgerEntry(
     ...overrides,
   });
 }
+
+/**
+ * One `idempotency_key` row with a settable `created_at` — the seam the soft-duplicate
+ * WINDOW test needs to plant a prior sibling inside/outside the 60s window. Composite PK is
+ * `(owner_id, key)`; `request_fingerprint` is the hash the 60s lookup keys on (pass the exact
+ * value the service computes for a given tuple — e.g. one read back from a real `execute`),
+ * `status` defaults `completed`, `transaction_id` is nullable, and `expires_at` defaults to
+ * created_at + 24h. `created_at`/`expires_at` accept ISO strings so a test can backdate them.
+ */
+export async function insertIdempotencyKey(
+  q: any,
+  overrides: Record<string, unknown> = {},
+): Promise<any> {
+  const now = Date.now();
+  return insertRow(q, 'idempotency_key', {
+    owner_id: `sub-${randomUUID()}`,
+    key: `key-${randomUUID()}`,
+    request_fingerprint: `fp-${randomUUID()}`,
+    status: 'completed',
+    created_at: new Date(now).toISOString(),
+    expires_at: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
+    ...overrides,
+  });
+}
