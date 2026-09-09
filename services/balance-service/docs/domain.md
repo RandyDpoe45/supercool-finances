@@ -15,8 +15,11 @@ per step:
 - **Step 3 — idempotency & soft-duplicate**
   ([below](#idempotency--soft-duplicate-step-3)): the generic at-most-once wrapper +
   60s duplicate-suppression, and the shared transaction-with-deadlock-retry helper.
+- **Step 4a — OTP module + Redis client**
+  ([below](#otp-module--redis-client-step-4a)): the user-scoped one-time code service
+  (singleton gate + single-use), and the global lifecycle-managed Redis client it uses.
 
-Holds, limits, OTP, transfers, and the outbox relay still arrive in later steps.
+Holds, limits, transfers, and the outbox relay still arrive in later steps.
 
 ## Module structure
 
@@ -423,9 +426,92 @@ when the transfers surface wires `execute` around `postTransaction` (the `operat
 `POST /api/transfers`. This step delivers the reusable wrapper and its unit-level guarantees;
 no endpoint yet.
 
+## OTP module + Redis client (step 4a)
+
+The user-scoped second factor for authorizing a user's **own** transfers (spec 04 OTP
+module). This step delivers the **capability only** — the OTP service and its Redis client.
+The generate/confirm endpoints, the `GET /api/pending-authorizations` route, and the transfer
+lifecycle that consumes a code all land in **step 4b**; there is **no HTTP surface** here.
+
+### Redis client
+
+`src/redis/` — a single lifecycle-managed **ioredis** client bound behind the `REDIS_CLIENT`
+Symbol token, mirroring the `src/database/` infra layout (parallel to `DatabaseModule`).
+`RedisModule` is **`@Global`**, so it is imported **once** in `AppModule` and the token is
+resolvable everywhere: the OTP service uses it now, and the step-6 outbox relay reuses the
+**same** client.
+
+| File | Role |
+|---|---|
+| `redis/redis.tokens.ts` | The `REDIS_CLIENT` Symbol token — consumers inject the connection via it, never construct their own. |
+| `redis/redis.module.ts` | `@Global` module: `useFactory` builds the client from the injected `AppConfig` (`config.redis.url`); implements `OnModuleDestroy` to `quit()` on shutdown. |
+
+Boot-resilience choices (the non-obvious *why*):
+
+- **`lazyConnect: true`** — no socket is opened until the first command. Booting `AppModule`
+  while Redis is down neither connects nor throws, so any test/boot that creates `AppModule`
+  without a live Redis stays green.
+- **`'error'` handler attached in the factory** — ioredis emits `'error'` on connection
+  trouble; an unhandled EventEmitter `'error'` is *thrown* and would crash the process. The
+  handler swallows it (ioredis owns reconnect/backoff), so a transient outage degrades
+  commands, not the process. Command-level failures still reject their own promises.
+- **`maxRetriesPerRequest: null`** — never hard-cap retries of a queued command across a
+  reconnect.
+- **`onModuleDestroy() → client.quit()`** (guarded with `.catch(() => 'OK')`) — a graceful
+  QUIT that won't surface as a rejected `app.close()` if Redis is unreachable at shutdown.
+  Safe on a never-connected lazy client too (ioredis does a transient connect then
+  disconnects; still resolves).
+
+### OTP module
+
+`src/modules/otp/` — follows the module layout convention: the module root holds only
+`otp.module.ts`; the service lives under `service/` (interface + `OTP_SERVICE` token in
+`service/interfaces/`, the concrete class in `service/impl/`, the domain error at the
+`service/` root so `service/interfaces/` never imports from `impl/`). It is a **service-only
+feature module** — it binds `{ provide: OTP_SERVICE, useClass: OtpService }` and **exports**
+the token, and is imported **transitionally by `AppModule`** until the transfers surface module
+consumes it (step 4b). It does **not** import `RedisModule` (that module is `@Global`).
+
+| File | Role |
+|---|---|
+| `otp.module.ts` | Binds `{ provide: OTP_SERVICE, useClass: OtpService }`, exports the token. No controller. |
+| `service/interfaces/otp.service.interface.ts` | `IOtpService` + the `OTP_SERVICE` token + `OtpGenerationResult`. |
+| `service/errors.ts` | `OtpAlreadyActiveError` (`OTP_ALREADY_ACTIVE`), extends `DomainError`. |
+| `service/impl/otp.service.ts` | `OtpService implements IOtpService` — the generate/consume logic, plus the `OTP_CODE_LENGTH` / `OTP_TTL_SECONDS` constants. |
+
+**Key & constants.** Codes are stored at `otp:<sub>` (`sub` = the user id), **at most one
+active per user**. `OTP_CODE_LENGTH = 6` (6-digit numeric) and `OTP_TTL_SECONDS = 300`
+(5-minute TTL) are **prototype defaults, not env-configurable yet**.
+
+**Code generation.** A code is minted from a CSPRNG — `crypto.randomInt(0, 10 ** 6)` zero-
+padded to 6 digits — never `Math.random`.
+
+**Singleton gate (`generate`).** The write itself is the gate:
+`SET otp:<sub> <code> EX 300 NX`. `NX` stores only when no code exists; a **`null`** reply
+means the slot is already taken → the service throws `OtpAlreadyActiveError`. A user MAY
+generate without a pending transfer (harmless), but never a **second** code while one is live.
+The slot frees only when the code is **consumed** (GETDEL) or its **TTL expires**. Doing the
+gate as an atomic `SET NX` (not read-then-write) means two concurrent generations cannot both
+win.
+
+**Single-use (`consume`).** Verification and consumption are one atomic `GETDEL`:
+`getdel(otp:<sub>)` reads and deletes in a single command, then the service compares the stored
+value to the supplied code with a constant-time compare (`crypto.timingSafeEqual`, guarded on
+equal Buffer length first since it throws on mismatch). `consume` returns `true` iff an active
+code existed **and** matched. Because two confirmations of the same code cannot both find it
+(one gets the value, the other gets `null`), a code authorizes **exactly one** transaction.
+
+**Wrong-code-still-consumes consequence.** The `GETDEL` deletes **unconditionally** —
+*any* active code is burned even when the supplied code is wrong. This is deliberate: it caps a
+code at **one** confirmation attempt (no brute-force oracle) at the cost of a mistyped code
+forcing the user to generate a new one. The service therefore never early-returns before the
+`GETDEL`; the delete must stay atomic and unconditional.
+
 ## Not in this slice (later steps)
 
-Internal transfers + OTP, holds + external outbound, the outbox **relay worker**, limits +
+Internal transfers + the OTP HTTP surface (step 4b: `POST /api/transfers`,
+`POST /api/transfers/:id/confirm`, `GET /api/pending-authorizations`, wiring `IOtpService`
+into the transfer lifecycle), holds + external outbound, the outbox **relay worker**, limits +
 external payees, and admin ops + maker-checker + external rails. Statement pagination beyond
 the first page is likewise deferred — the read slice returns only the most recent
 `STATEMENT_PAGE_LIMIT` legs.

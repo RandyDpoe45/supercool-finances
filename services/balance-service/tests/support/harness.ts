@@ -590,6 +590,94 @@ export function getDomainErrors(): ResolvedDomainErrors {
   };
 }
 
+// ---- OTP module (spec 04 "OTP module", Step-4a: Redis-backed, service-only) -------------
+// The Redis-backed user-scoped OTP capability. Resolved through the same single-seam
+// convention as everything else: the running instance by TOKEN through the app graph
+// (integration), and the CLASS for the pure unit spec that `new`s it with a fake Redis.
+
+const OTP_SERVICE_IMPL_CANDIDATES = [
+  `${SRC}/modules/otp/service/impl/otp.service`,
+  `${SRC}/modules/otp/impl/otp.service`,
+  `${SRC}/modules/otp/otp.service`,
+  `${SRC}/modules/otp/service/otp.service`,
+];
+
+/** `OTP_SERVICE` — the DI token the OtpModule binds the OtpService to (resolved by token,
+ *  never by class, post interface/impl split). Reuses the shared service-token probe. */
+export function getOtpServiceToken(): symbol {
+  return resolveServiceToken('OTP_SERVICE', 'otp');
+}
+
+/**
+ * The `OtpService` CLASS, for the pure unit spec: `new OtpService(fakeRedis)` (DI decorators
+ * are inert under plain instantiation). Scanned with `findExportAcross`; if the implementor
+ * moves/renames it, add the path/export HERE — the single coordination point.
+ */
+export function getOtpService(): any {
+  const cls = findExportAcross(OTP_SERVICE_IMPL_CANDIDATES, ['OtpService']);
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the OtpService class. If the implementor named/placed ` +
+        `it differently, add the path/export to tests/support/harness.ts:getOtpService — the ` +
+        `single coordination point.`,
+    );
+  }
+  return cls;
+}
+
+/** `REDIS_CLIENT` — the DI token the RedisModule binds the shared ioredis client to (the
+ *  integration suite resolves it from the app graph for real assertions/cleanup). */
+export function getRedisClientToken(): symbol {
+  return resolveOrThrow(
+    'the REDIS_CLIENT DI token',
+    [
+      `${SRC}/redis/redis.tokens`,
+      `${SRC}/redis/redis.module`,
+      `${SRC}/redis`,
+      `${SRC}/common/redis/redis.tokens`,
+    ],
+    ['REDIS_CLIENT'],
+  );
+}
+
+/**
+ * BEST-EFFORT resolution of the OTP tuning constants (`OTP_CODE_LENGTH` = 6, `OTP_TTL_SECONDS`
+ * = 300) exported from the impl. Does NOT throw when absent: the code-length / ttl assertions
+ * fall back to structural bounds (`code.length >= 4`, `ttlSeconds > 0`) when a constant is not
+ * exported here.
+ */
+export function getOtpConstants(): { OTP_CODE_LENGTH?: number; OTP_TTL_SECONDS?: number } {
+  const candidates = [
+    ...OTP_SERVICE_IMPL_CANDIDATES,
+    `${SRC}/modules/otp/otp.constants`,
+    `${SRC}/modules/otp/service/otp.constants`,
+    `${SRC}/modules/otp/service/interfaces/otp.service.interface`,
+  ];
+  return {
+    OTP_CODE_LENGTH: findExportAcross(candidates, ['OTP_CODE_LENGTH']),
+    OTP_TTL_SECONDS: findExportAcross(candidates, ['OTP_TTL_SECONDS']),
+  };
+}
+
+/**
+ * BEST-EFFORT resolution of the `OtpAlreadyActiveError` domain error class (code
+ * `OTP_ALREADY_ACTIVE`) so the singleton-gate rejection can be classified by `instanceof`.
+ * Does NOT throw when absent — the proofs gate on the stable `.code`, with the class as a
+ * secondary (exact) signal when it is exported.
+ */
+export function getOtpAlreadyActiveError(): any | undefined {
+  return findExportAcross(
+    [
+      `${SRC}/modules/otp/service/errors`,
+      `${SRC}/modules/otp/otp.errors`,
+      `${SRC}/modules/otp/errors`,
+      ...OTP_SERVICE_IMPL_CANDIDATES,
+      `${SRC}/modules/otp`,
+    ],
+    ['OtpAlreadyActiveError', 'OtpActiveError', 'OtpAlreadyActive'],
+  );
+}
+
 /**
  * Best-effort TCP reachability probe for the honest-SKIP integration gate. Resolves
  * true iff a TCP connection to host:port opens within `timeoutMs`. Never throws.
