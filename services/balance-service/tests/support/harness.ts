@@ -226,6 +226,43 @@ export function getRepositoryToken(tokenName: string, fileBase: string): symbol 
 }
 
 /**
+ * The pure available-balance money helper — `availableBalance(balance, held) => string`,
+ * computing `(BigInt(balance) - BigInt(held)).toString()` (BigInt math, NEVER Number, so
+ * minor-unit values beyond 2^53 do not lose precision). Scanned across the plausible
+ * domain-layer locations with `findExportAcross` (so a barrel that lacks the export does
+ * not shadow the per-file one). If the implementor puts it elsewhere or names it
+ * differently, add the path/export here — this is the single coordination point.
+ */
+export function getAvailableBalance(): (balance: string, held: string) => string {
+  const fn = findExportAcross(
+    [
+      `${SRC}/modules/api/money`,
+      `${SRC}/modules/api/money.util`,
+      `${SRC}/modules/api/available-balance`,
+      `${SRC}/modules/api/accounts/money`,
+      `${SRC}/modules/api/accounts/available-balance`,
+      `${SRC}/modules/api/dto/account.dto`,
+      `${SRC}/common/money/money`,
+      `${SRC}/common/money`,
+      `${SRC}/common/money/available-balance`,
+      `${SRC}/common/money.util`,
+      `${SRC}/common/money.ts`,
+      `${SRC}/domain/money`,
+    ],
+    ['availableBalance', 'computeAvailable', 'deriveAvailable'],
+  );
+  if (fn === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the available-balance money helper ` +
+        `(availableBalance / computeAvailable / deriveAvailable). If the implementor put ` +
+        `it elsewhere, add the path/export to tests/support/harness.ts:getAvailableBalance ` +
+        `— the single coordination point.`,
+    );
+  }
+  return fn as (balance: string, held: string) => string;
+}
+
+/**
  * Best-effort TCP reachability probe for the honest-SKIP integration gate. Resolves
  * true iff a TCP connection to host:port opens within `timeoutMs`. Never throws.
  */

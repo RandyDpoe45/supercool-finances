@@ -12,6 +12,11 @@ export interface IAccountRepository {
   create(data: DeepPartial<Account>): Promise<Account>;
   /** All accounts owned by a customer (`owner_id`); a customer may have several. */
   findByOwner(ownerId: string): Promise<Account[]>;
+  /** Single account scoped to its owner — ownership is enforced INSIDE the query
+   * (`WHERE id = :id AND owner_id = :sub`); a non-owned or missing row resolves `null`
+   * so the caller returns 404, never 403 (anti-IDOR / BOLA, ADR-3). System accounts
+   * (`owner_id` NULL) never match a customer `ownerId`. */
+  findByIdAndOwner(id: string, ownerId: string): Promise<Account | null>;
   /** Resolves a seeded system/clearing account by its stable `system_key`. */
   findBySystemKey(systemKey: string): Promise<Account | null>;
   /** `SELECT ... FOR UPDATE` on the account row — the concurrency primitive posting relies
