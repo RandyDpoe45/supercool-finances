@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, QueryRunner, Repository } from 'typeorm';
-import { Transaction } from '../entities/transaction.entity';
-import { ITransactionRepository } from './transaction.repository.interface';
+import { Transaction } from '../../entities/transaction.entity';
+import { ITransactionRepository } from '../interfaces/transaction.repository.interface';
 
 /** TypeORM implementation of {@link ITransactionRepository}, bound to
  * `TRANSACTION_REPOSITORY` in {@link PersistenceModule}. */

@@ -1,5 +1,5 @@
 import { DeepPartial, QueryRunner } from 'typeorm';
-import { Account } from '../entities/account.entity';
+import { Account } from '../../entities/account.entity';
 
 /** DI token for {@link IAccountRepository}. Consumers depend on the interface, never the
  * concrete TypeORM implementation (ADR: depend on interfaces/tokens). */

@@ -4,16 +4,17 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
-import { Account } from '../../database/entities/account.entity';
-import { LedgerEntry } from '../../database/entities/ledger-entry.entity';
+import { Account } from '../../../database/entities/account.entity';
+import { LedgerEntry } from '../../../database/entities/ledger-entry.entity';
 import {
   ACCOUNT_REPOSITORY,
   IAccountRepository,
-} from '../../database/repositories/account.repository.interface';
+} from '../../../database/repositories/interfaces/account.repository.interface';
 import {
   ILedgerEntryRepository,
   LEDGER_ENTRY_REPOSITORY,
-} from '../../database/repositories/ledger-entry.repository.interface';
+} from '../../../database/repositories/interfaces/ledger-entry.repository.interface';
+import { IAccountsService } from '../interfaces/accounts.service.interface';
 
 /** Upper bound on ledger legs returned by one statement read. The underlying query
  * MUST stay bounded — an account's history is unbounded, so it is never scanned whole. */
@@ -39,7 +40,7 @@ function assertOwnerScope(ownerId: string): void {
  * DTO serialization is a transport concern applied at the controller boundary.
  */
 @Injectable()
-export class AccountsService {
+export class AccountsService implements IAccountsService {
   constructor(
     @Inject(ACCOUNT_REPOSITORY) private readonly accounts: IAccountRepository,
     @Inject(LEDGER_ENTRY_REPOSITORY) private readonly ledger: ILedgerEntryRepository,

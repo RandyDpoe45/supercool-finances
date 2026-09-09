@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, QueryRunner, Repository } from 'typeorm';
-import { OutboxEvent } from '../entities/outbox-event.entity';
-import { IOutboxEventRepository } from './outbox-event.repository.interface';
+import { OutboxEvent } from '../../entities/outbox-event.entity';
+import { IOutboxEventRepository } from '../interfaces/outbox-event.repository.interface';
 
 /** TypeORM implementation of {@link IOutboxEventRepository}, bound to
  * `OUTBOX_EVENT_REPOSITORY` in {@link PersistenceModule}. */

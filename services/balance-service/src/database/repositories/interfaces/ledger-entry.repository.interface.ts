@@ -1,5 +1,5 @@
 import { DeepPartial, QueryRunner } from 'typeorm';
-import { LedgerEntry } from '../entities/ledger-entry.entity';
+import { LedgerEntry } from '../../entities/ledger-entry.entity';
 
 /** DI token for {@link ILedgerEntryRepository}. */
 export const LEDGER_ENTRY_REPOSITORY = Symbol('LEDGER_ENTRY_REPOSITORY');

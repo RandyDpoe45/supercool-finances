@@ -1,12 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, QueryRunner, Repository } from 'typeorm';
-import { IdempotencyStatus } from '../entities/enums';
-import { IdempotencyKey } from '../entities/idempotency-key.entity';
+import { IdempotencyStatus } from '../../entities/enums';
+import { IdempotencyKey } from '../../entities/idempotency-key.entity';
 import {
   IdempotencyClaim,
   IIdempotencyKeyRepository,
-} from './idempotency-key.repository.interface';
+} from '../interfaces/idempotency-key.repository.interface';
 
 /** TypeORM implementation of {@link IIdempotencyKeyRepository}, bound to
  * `IDEMPOTENCY_KEY_REPOSITORY` in {@link PersistenceModule}. Keyed on the composite PK. */

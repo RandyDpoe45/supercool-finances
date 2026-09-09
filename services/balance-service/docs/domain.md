@@ -26,13 +26,17 @@ The accounts feature follows the **controller-surface convention** (see
 [`CLAUDE.md` § Controller surfaces](../../../CLAUDE.md#controller-surfaces)): the feature
 module provides + exports the service and owns its surface controller file, while the `/api`
 surface registry ({@link ApiModule}, `src/modules/api/api.module.ts`) **declares** the
-controller and imports the feature module for the service.
+controller and imports the feature module for the service. The service also follows the
+**interface/impl separation** convention
+([`CLAUDE.md`](../../../CLAUDE.md#interface--implementation-separation)): interface + token in
+`interfaces/`, concrete class in `impl/`, consumers inject the token.
 
 | File | Role |
 |---|---|
-| `accounts.module.ts` | Feature module: `imports: [PersistenceModule]`, `providers`+`exports: [AccountsService]`. **No controllers of its own.** |
-| `accounts-api.controller.ts` | `AccountsApiController`, `@Controller('api')` — the two read routes; **declared by `ApiModule`**; calls the service (entities) then serializes to DTOs. |
-| `accounts.service.ts` | Owner-scoped reads (returns **entities**) + `assertOwnerScope` + `STATEMENT_PAGE_LIMIT`. |
+| `accounts.module.ts` | Feature module: `imports: [PersistenceModule]`, binds `{ provide: ACCOUNTS_SERVICE, useClass: AccountsService }`, `exports: [ACCOUNTS_SERVICE]`. **No controllers of its own.** |
+| `interfaces/accounts.service.interface.ts` | `IAccountsService` + the `ACCOUNTS_SERVICE` Symbol token. |
+| `impl/accounts.service.ts` | `AccountsService implements IAccountsService` — owner-scoped reads (returns **entities**) + `assertOwnerScope` + `STATEMENT_PAGE_LIMIT`. |
+| `accounts-api.controller.ts` | `AccountsApiController`, `@Controller('api')` — the two read routes; **declared by `ApiModule`**; injects `@Inject(ACCOUNTS_SERVICE) accounts: IAccountsService`, calls it (entities) then serializes to DTOs. |
 | `accounts.serializer.ts` | Pure explicit-whitelist serializers `serializeAccount` / `serializeStatementEntry` (entity→DTO). |
 | `dto/account.dto.ts` | `AccountDto` — customer view of an account (the wire contract). |
 | `dto/statement-entry.dto.ts` | `StatementEntryDto` — one ledger leg of a statement (the wire contract). |
@@ -142,16 +146,17 @@ limit.
 is the **single operation all balance mutations funnel through** (ADR-13), so the
 append-only ledger and the materialized `balance` can never diverge. It has **no HTTP
 surface** this step; the transfers / holds / admin layers (later steps) build a command
-and call it. `PostingModule` (`imports: [PersistenceModule]`, provides + **exports**
-`PostingService`) is a **service-only feature module** — with no controller yet, it is
-imported **transitionally by `AppModule`** so `PostingService` is resolvable in the graph.
-Under the controller-surface convention it moves under its consuming surface module once a
-controller uses it (the transfers `-api` controller, step 4).
+and call it. `PostingModule` binds the reducer behind the `POSTING_SERVICE` token
+(interface/impl split) and **exports** it; it is a **service-only feature module** — with no
+controller yet, it is imported **transitionally by `AppModule`** so the service is resolvable
+in the graph. Under the controller-surface convention it moves under its consuming surface
+module once a controller uses it (the transfers `-api` controller, step 4).
 
 | File | Role |
 |---|---|
-| `posting.module.ts` | Provides/exports `PostingService`; imports `PersistenceModule`. |
-| `posting.service.ts` | The reducer + its private helpers (`applyPosting`, `checkAndFold`, `validateCommand`). |
+| `posting.module.ts` | Binds `{ provide: POSTING_SERVICE, useClass: PostingService }`, exports the token; imports `PersistenceModule`. |
+| `interfaces/posting.service.interface.ts` | `IPostingService` + the `POSTING_SERVICE` Symbol token. |
+| `impl/posting.service.ts` | `PostingService implements IPostingService` — the reducer + its private helpers (`applyPosting`, `checkAndFold`, `validateCommand`). |
 | `post-transaction.command.ts` | `PostTransactionCommand` / `PostingLeg` — the **domain** input (not a wire DTO). |
 | `posting.errors.ts` | The concrete posting domain errors (extend `DomainError`). |
 | `transaction-event.ts` | The balance-service **copy** of the transaction-event payload contract. |
@@ -313,14 +318,15 @@ entity's `Record<string, unknown>` column without an explicit index signature.
 `src/modules/idempotency/` — a **generic at-most-once wrapper** for money-moving requests
 (spec 04 Transfers), **decoupled from posting**: any operation can run under an
 `Idempotency-Key` with 60s soft duplicate-suppression. It has **no HTTP surface** this step;
-`IdempotencyModule` (`imports: [PersistenceModule]`, provides + exports `IdempotencyService`)
-is a **service-only feature module**, imported **transitionally by `AppModule`** until the
-transfers surface consumes it (step 4).
+`IdempotencyModule` binds the service behind the `IDEMPOTENCY_SERVICE` token (interface/impl
+split) and **exports** it; it is a **service-only feature module**, imported **transitionally
+by `AppModule`** until the transfers surface consumes it (step 4).
 
 | File | Role |
 |---|---|
-| `idempotency.module.ts` | Provides/exports `IdempotencyService`; imports `PersistenceModule`. |
-| `idempotency.service.ts` | The `execute(params, operation)` wrapper + its replay/claim flow. |
+| `idempotency.module.ts` | Binds `{ provide: IDEMPOTENCY_SERVICE, useClass: IdempotencyService }`, exports the token; imports `PersistenceModule`. |
+| `interfaces/idempotency.service.interface.ts` | `IIdempotencyService` + the `IDEMPOTENCY_SERVICE` token, plus the shared `IdempotencyParams` / `IdempotentOperation` / `IdempotencyOutcome` types (kept here so the interface never imports from `impl/`). |
+| `impl/idempotency.service.ts` | `IdempotencyService implements IIdempotencyService` — the `execute(params, operation)` wrapper + its replay/claim flow. |
 | `fingerprint.ts` | Pure `computeFingerprint(input)` — `sha256` hex over the canonical business tuple. |
 | `idempotency.errors.ts` | The domain errors (extend `DomainError`). |
 

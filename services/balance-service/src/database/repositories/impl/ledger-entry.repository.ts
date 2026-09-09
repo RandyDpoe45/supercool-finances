@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, QueryRunner, Repository } from 'typeorm';
-import { LedgerEntry } from '../entities/ledger-entry.entity';
-import { ILedgerEntryRepository } from './ledger-entry.repository.interface';
+import { LedgerEntry } from '../../entities/ledger-entry.entity';
+import { ILedgerEntryRepository } from '../interfaces/ledger-entry.repository.interface';
 
 /** TypeORM implementation of {@link ILedgerEntryRepository}, bound to
  * `LEDGER_ENTRY_REPOSITORY` in {@link PersistenceModule}. */

@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, Repository } from 'typeorm';
-import { Hold } from '../entities/hold.entity';
-import { IHoldRepository } from './hold.repository.interface';
+import { Hold } from '../../entities/hold.entity';
+import { IHoldRepository } from '../interfaces/hold.repository.interface';
 
 /** TypeORM implementation of {@link IHoldRepository}, bound to `HOLD_REPOSITORY` in
  * {@link PersistenceModule}. */

@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, QueryRunner, Repository } from 'typeorm';
-import { Account } from '../entities/account.entity';
-import { IAccountRepository } from './account.repository.interface';
+import { Account } from '../../entities/account.entity';
+import { IAccountRepository } from '../interfaces/account.repository.interface';
 
 /** TypeORM implementation of {@link IAccountRepository}, bound to `ACCOUNT_REPOSITORY` in
  * {@link PersistenceModule}. No domain logic — persistence primitives only. */

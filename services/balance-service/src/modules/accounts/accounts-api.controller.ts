@@ -1,15 +1,16 @@
-import { Controller, Get, Param, ParseUUIDPipe } from '@nestjs/common';
+import { Controller, Get, Inject, Param, ParseUUIDPipe } from '@nestjs/common';
 import { Identity } from '../../common/identity/identity.decorator';
 import { RequestIdentity } from '../../common/identity/request-identity';
 import { serializeAccount, serializeStatementEntry } from './accounts.serializer';
-import { AccountsService } from './accounts.service';
+import { ACCOUNTS_SERVICE, IAccountsService } from './interfaces/accounts.service.interface';
 import { AccountDto } from './dto/account.dto';
 import { StatementEntryDto } from './dto/statement-entry.dto';
 
 /**
  * Customer-plane account reads — the accounts feature's `/api` surface controller. It is
  * DECLARED by {@link ApiModule} (the `/api` surface registry), while the {@link
- * AccountsModule} feature module provides + exports the {@link AccountsService} it injects.
+ * AccountsModule} feature module provides + exports the accounts service behind the
+ * `ACCOUNTS_SERVICE` token, which this controller injects as the `IAccountsService` interface.
  *
  * Under the global `/api` prefix, so the {@link GatewayIdentityGuard} has already required
  * the Kong `X-User-Id` and populated the identity — the caller id is taken from
@@ -18,7 +19,7 @@ import { StatementEntryDto } from './dto/statement-entry.dto';
  */
 @Controller('api')
 export class AccountsApiController {
-  constructor(private readonly accounts: AccountsService) {}
+  constructor(@Inject(ACCOUNTS_SERVICE) private readonly accounts: IAccountsService) {}
 
   @Get('accounts')
   async listAccounts(@Identity() identity: RequestIdentity): Promise<{ accounts: AccountDto[] }> {

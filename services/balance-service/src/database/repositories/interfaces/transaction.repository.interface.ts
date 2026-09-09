@@ -1,5 +1,5 @@
 import { DeepPartial, QueryRunner } from 'typeorm';
-import { Transaction } from '../entities/transaction.entity';
+import { Transaction } from '../../entities/transaction.entity';
 
 /** DI token for {@link ITransactionRepository}. */
 export const TRANSACTION_REPOSITORY = Symbol('TRANSACTION_REPOSITORY');

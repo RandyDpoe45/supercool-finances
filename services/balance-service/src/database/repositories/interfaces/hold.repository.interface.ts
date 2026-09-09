@@ -1,5 +1,5 @@
 import { DeepPartial } from 'typeorm';
-import { Hold } from '../entities/hold.entity';
+import { Hold } from '../../entities/hold.entity';
 
 /** DI token for {@link IHoldRepository}. */
 export const HOLD_REPOSITORY = Symbol('HOLD_REPOSITORY');

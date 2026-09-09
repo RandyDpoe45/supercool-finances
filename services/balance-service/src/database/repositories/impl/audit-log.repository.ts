@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, Repository } from 'typeorm';
-import { AuditLog } from '../entities/audit-log.entity';
-import { IAuditLogRepository } from './audit-log.repository.interface';
+import { AuditLog } from '../../entities/audit-log.entity';
+import { IAuditLogRepository } from '../interfaces/audit-log.repository.interface';
 
 /** TypeORM implementation of {@link IAuditLogRepository}, bound to `AUDIT_LOG_REPOSITORY`
  * in {@link PersistenceModule}. */

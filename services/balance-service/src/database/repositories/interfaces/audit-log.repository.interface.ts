@@ -1,5 +1,5 @@
 import { DeepPartial } from 'typeorm';
-import { AuditLog } from '../entities/audit-log.entity';
+import { AuditLog } from '../../entities/audit-log.entity';
 
 /** DI token for {@link IAuditLogRepository}. */
 export const AUDIT_LOG_REPOSITORY = Symbol('AUDIT_LOG_REPOSITORY');

@@ -1,6 +1,6 @@
 import { DeepPartial, QueryRunner } from 'typeorm';
-import { IdempotencyStatus } from '../entities/enums';
-import { IdempotencyKey } from '../entities/idempotency-key.entity';
+import { IdempotencyStatus } from '../../entities/enums';
+import { IdempotencyKey } from '../../entities/idempotency-key.entity';
 
 /** DI token for {@link IIdempotencyKeyRepository}. */
 export const IDEMPOTENCY_KEY_REPOSITORY = Symbol('IDEMPOTENCY_KEY_REPOSITORY');

@@ -1,19 +1,25 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryRunner } from 'typeorm';
-import { runInTransactionWithRetry } from '../../common/db/run-in-transaction';
-import { IdempotencyStatus } from '../../database/entities/enums';
-import { IdempotencyKey } from '../../database/entities/idempotency-key.entity';
+import { runInTransactionWithRetry } from '../../../common/db/run-in-transaction';
+import { IdempotencyStatus } from '../../../database/entities/enums';
+import { IdempotencyKey } from '../../../database/entities/idempotency-key.entity';
 import {
   IDEMPOTENCY_KEY_REPOSITORY,
   IIdempotencyKeyRepository,
-} from '../../database/repositories/idempotency-key.repository.interface';
-import { computeFingerprint, FingerprintInput } from './fingerprint';
+} from '../../../database/repositories/interfaces/idempotency-key.repository.interface';
+import { computeFingerprint } from '../fingerprint';
 import {
   IdempotencyInProgressError,
   IdempotencyKeyReuseError,
   SuspectedDuplicateError,
-} from './idempotency.errors';
+} from '../idempotency.errors';
+import {
+  IdempotencyOutcome,
+  IdempotencyParams,
+  IdempotentOperation,
+  IIdempotencyService,
+} from '../interfaces/idempotency.service.interface';
 
 /** Soft duplicate-suppression window: an identical request under a DIFFERENT key seen within
  * this window is a suspected double-submit (spec 04 Transfers). */
@@ -21,26 +27,6 @@ const SOFT_DUPLICATE_WINDOW_MS = 60_000;
 
 /** Idempotency keys expire 24h after creation (the cleanup sweep prunes them). */
 const KEY_TTL_MS = 24 * 60 * 60 * 1000;
-
-/** Inputs to {@link IdempotencyService.execute}. */
-export interface IdempotencyParams {
-  ownerId: string;
-  key: string;
-  fingerprintInput: FingerprintInput;
-  /** When true, override a suspected soft-duplicate and proceed (an explicit confirm). */
-  confirmDuplicate?: boolean;
-}
-
-/** The wrapped money movement: runs INSIDE the wrapper's transaction and returns the id of
- * the transaction it posted. */
-export type IdempotentOperation = (queryRunner: QueryRunner) => Promise<{ transactionId: string }>;
-
-/** Outcome of {@link IdempotencyService.execute}: the resulting transaction id and whether
- * this call replayed a prior result (money moved 0 additional times) or performed it fresh. */
-export interface IdempotencyOutcome {
-  transactionId: string;
-  replayed: boolean;
-}
 
 /**
  * A GENERIC at-most-once wrapper for money-moving requests (spec 04 Transfers), decoupled from
@@ -56,7 +42,7 @@ export interface IdempotencyOutcome {
  * defensive.
  */
 @Injectable()
-export class IdempotencyService {
+export class IdempotencyService implements IIdempotencyService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     @Inject(IDEMPOTENCY_KEY_REPOSITORY) private readonly keys: IIdempotencyKeyRepository,

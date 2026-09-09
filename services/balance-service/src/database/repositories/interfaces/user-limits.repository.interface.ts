@@ -1,5 +1,5 @@
 import { DeepPartial } from 'typeorm';
-import { UserLimits } from '../entities/user-limits.entity';
+import { UserLimits } from '../../entities/user-limits.entity';
 
 /** DI token for {@link IUserLimitsRepository}. */
 export const USER_LIMITS_REPOSITORY = Symbol('USER_LIMITS_REPOSITORY');

@@ -12,26 +12,26 @@ import { AuditLog } from './entities/audit-log.entity';
 import { ApprovalRequest } from './entities/approval-request.entity';
 import { IdempotencyKey } from './entities/idempotency-key.entity';
 
-import { ACCOUNT_REPOSITORY } from './repositories/account.repository.interface';
-import { AccountRepository } from './repositories/account.repository';
-import { LEDGER_ENTRY_REPOSITORY } from './repositories/ledger-entry.repository.interface';
-import { LedgerEntryRepository } from './repositories/ledger-entry.repository';
-import { TRANSACTION_REPOSITORY } from './repositories/transaction.repository.interface';
-import { TransactionRepository } from './repositories/transaction.repository';
-import { HOLD_REPOSITORY } from './repositories/hold.repository.interface';
-import { HoldRepository } from './repositories/hold.repository';
-import { EXTERNAL_PAYEE_REPOSITORY } from './repositories/external-payee.repository.interface';
-import { ExternalPayeeRepository } from './repositories/external-payee.repository';
-import { USER_LIMITS_REPOSITORY } from './repositories/user-limits.repository.interface';
-import { UserLimitsRepository } from './repositories/user-limits.repository';
-import { OUTBOX_EVENT_REPOSITORY } from './repositories/outbox-event.repository.interface';
-import { OutboxEventRepository } from './repositories/outbox-event.repository';
-import { AUDIT_LOG_REPOSITORY } from './repositories/audit-log.repository.interface';
-import { AuditLogRepository } from './repositories/audit-log.repository';
-import { APPROVAL_REQUEST_REPOSITORY } from './repositories/approval-request.repository.interface';
-import { ApprovalRequestRepository } from './repositories/approval-request.repository';
-import { IDEMPOTENCY_KEY_REPOSITORY } from './repositories/idempotency-key.repository.interface';
-import { IdempotencyKeyRepository } from './repositories/idempotency-key.repository';
+import { ACCOUNT_REPOSITORY } from './repositories/interfaces/account.repository.interface';
+import { AccountRepository } from './repositories/impl/account.repository';
+import { LEDGER_ENTRY_REPOSITORY } from './repositories/interfaces/ledger-entry.repository.interface';
+import { LedgerEntryRepository } from './repositories/impl/ledger-entry.repository';
+import { TRANSACTION_REPOSITORY } from './repositories/interfaces/transaction.repository.interface';
+import { TransactionRepository } from './repositories/impl/transaction.repository';
+import { HOLD_REPOSITORY } from './repositories/interfaces/hold.repository.interface';
+import { HoldRepository } from './repositories/impl/hold.repository';
+import { EXTERNAL_PAYEE_REPOSITORY } from './repositories/interfaces/external-payee.repository.interface';
+import { ExternalPayeeRepository } from './repositories/impl/external-payee.repository';
+import { USER_LIMITS_REPOSITORY } from './repositories/interfaces/user-limits.repository.interface';
+import { UserLimitsRepository } from './repositories/impl/user-limits.repository';
+import { OUTBOX_EVENT_REPOSITORY } from './repositories/interfaces/outbox-event.repository.interface';
+import { OutboxEventRepository } from './repositories/impl/outbox-event.repository';
+import { AUDIT_LOG_REPOSITORY } from './repositories/interfaces/audit-log.repository.interface';
+import { AuditLogRepository } from './repositories/impl/audit-log.repository';
+import { APPROVAL_REQUEST_REPOSITORY } from './repositories/interfaces/approval-request.repository.interface';
+import { ApprovalRequestRepository } from './repositories/impl/approval-request.repository';
+import { IDEMPOTENCY_KEY_REPOSITORY } from './repositories/interfaces/idempotency-key.repository.interface';
+import { IdempotencyKeyRepository } from './repositories/impl/idempotency-key.repository';
 
 /**
  * Binds each aggregate's repository interface (token) to its TypeORM implementation and

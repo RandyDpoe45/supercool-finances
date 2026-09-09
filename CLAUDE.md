@@ -156,6 +156,15 @@ Harness rules:
 - A **service-only feature module** (no controller yet) is imported by its consuming
   surface module — or **transitionally by `AppModule`** until a controller consumes it.
 
+## Interface / implementation separation
+
+- **Any interface + implementation pair (repositories and services) lives in sibling
+  `interfaces/` (the interface + its DI token) and `impl/` (the concrete class)
+  subfolders.** Consumers depend on the **interface via its Symbol token**, never the
+  concrete class; the dependency points **impl → interface**, never the reverse (an
+  interface must not import from `impl/`). (The foundation `src/health/` module predates
+  this convention and is left as-is.)
+
 ## Repository layout (monorepo)
 
 Each app is **self-contained and atomic** in its own folder: **no cross-folder

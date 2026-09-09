@@ -1,5 +1,5 @@
 import { DeepPartial } from 'typeorm';
-import { ExternalPayee } from '../entities/external-payee.entity';
+import { ExternalPayee } from '../../entities/external-payee.entity';
 
 /** DI token for {@link IExternalPayeeRepository}. */
 export const EXTERNAL_PAYEE_REPOSITORY = Symbol('EXTERNAL_PAYEE_REPOSITORY');

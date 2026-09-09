@@ -1,5 +1,5 @@
 import { DeepPartial } from 'typeorm';
-import { ApprovalRequest } from '../entities/approval-request.entity';
+import { ApprovalRequest } from '../../entities/approval-request.entity';
 
 /** DI token for {@link IApprovalRequestRepository}. */
 export const APPROVAL_REQUEST_REPOSITORY = Symbol('APPROVAL_REQUEST_REPOSITORY');

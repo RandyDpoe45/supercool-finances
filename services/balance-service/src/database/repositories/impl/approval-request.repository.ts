@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, Repository } from 'typeorm';
-import { ApprovalRequest } from '../entities/approval-request.entity';
-import { IApprovalRequestRepository } from './approval-request.repository.interface';
+import { ApprovalRequest } from '../../entities/approval-request.entity';
+import { IApprovalRequestRepository } from '../interfaces/approval-request.repository.interface';
 
 /** TypeORM implementation of {@link IApprovalRequestRepository}, bound to
  * `APPROVAL_REQUEST_REPOSITORY` in {@link PersistenceModule}. */

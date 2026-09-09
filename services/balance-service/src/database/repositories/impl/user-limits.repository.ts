@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, Repository } from 'typeorm';
-import { UserLimits } from '../entities/user-limits.entity';
-import { IUserLimitsRepository } from './user-limits.repository.interface';
+import { UserLimits } from '../../entities/user-limits.entity';
+import { IUserLimitsRepository } from '../interfaces/user-limits.repository.interface';
 
 /** TypeORM implementation of {@link IUserLimitsRepository}, bound to
  * `USER_LIMITS_REPOSITORY` in {@link PersistenceModule}. */

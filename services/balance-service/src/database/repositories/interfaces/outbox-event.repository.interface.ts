@@ -1,5 +1,5 @@
 import { DeepPartial, QueryRunner } from 'typeorm';
-import { OutboxEvent } from '../entities/outbox-event.entity';
+import { OutboxEvent } from '../../entities/outbox-event.entity';
 
 /** DI token for {@link IOutboxEventRepository}. */
 export const OUTBOX_EVENT_REPOSITORY = Symbol('OUTBOX_EVENT_REPOSITORY');

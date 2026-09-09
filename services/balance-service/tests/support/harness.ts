@@ -212,6 +212,11 @@ export function getRepositoryToken(tokenName: string, fileBase: string): symbol 
       `${SRC}/database/repositories/${fileBase}.repository`,
       `${SRC}/database/repositories/${fileBase}.repository.interface`,
       `${SRC}/database/repositories/${fileBase}/${fileBase}.repository`,
+      // interface/impl split refactor (balance-interface-impl-split): the interface + the
+      // `<NAME>_REPOSITORY` token live under a sibling `interfaces/` folder (impl moves to
+      // `impl/`). Old paths kept above so resolution is robust to either layout.
+      `${SRC}/database/repositories/interfaces/${fileBase}.repository.interface`,
+      `${SRC}/database/repositories/interfaces/${fileBase}.repository`,
     ],
     [tokenName],
   );
@@ -319,6 +324,7 @@ export function getAccountsService(): any {
   const cls = findExportAcross(
     [
       `${SRC}/modules/accounts/accounts.service`,
+      `${SRC}/modules/accounts/impl/accounts.service`,
       `${SRC}/modules/accounts/account.service`,
       `${SRC}/modules/api/accounts.service`,
     ],
@@ -350,6 +356,8 @@ export function getPostingService(): any {
       `${SRC}/modules/ledger/posting.service`,
       `${SRC}/modules/ledger/ledger.service`,
       `${SRC}/modules/posting/posting.service`,
+      `${SRC}/modules/posting/impl/posting.service`,
+      `${SRC}/modules/ledger/impl/ledger.service`,
       `${SRC}/modules/transactions/posting.service`,
       `${SRC}/modules/transactions/transactions.service`,
       `${SRC}/modules/transfers/posting.service`,
@@ -396,6 +404,7 @@ export function getIdempotencyService(): any {
   const cls = findExportAcross(
     [
       `${SRC}/modules/idempotency/idempotency.service`,
+      `${SRC}/modules/idempotency/impl/idempotency.service`,
       `${SRC}/modules/transfers/idempotency.service`,
       `${SRC}/modules/posting/idempotency.service`,
       `${SRC}/common/idempotency/idempotency.service`,
@@ -413,6 +422,52 @@ export function getIdempotencyService(): any {
     );
   }
   return cls;
+}
+
+/**
+ * Service DI TOKENS. Post interface/impl split each module binds
+ * `{ provide: <SERVICE_TOKEN>, useClass: <ServiceClass> }` and exports the TOKEN, so the
+ * running instance must be resolved from the app graph BY TOKEN (`app.get(<TOKEN>)`) —
+ * `app.get(<Class>)` no longer resolves (the provider is keyed by the Symbol, not the class).
+ * These mirror `getRepositoryToken`'s multi-path `findExportAcross` style. The CLASS resolvers
+ * (`getPostingService` / `getIdempotencyService` / `getAccountsService`) remain for the pure
+ * unit specs that `new` the service directly.
+ */
+function resolveServiceToken(tokenName: string, moduleBase: string): symbol {
+  const token = findExportAcross(
+    [
+      `${SRC}/modules/${moduleBase}/interfaces/${moduleBase}.service.interface`,
+      `${SRC}/modules/${moduleBase}/interfaces/${moduleBase}.service.tokens`,
+      `${SRC}/modules/${moduleBase}/${moduleBase}.service.interface`,
+      `${SRC}/modules/${moduleBase}/${moduleBase}.tokens`,
+      `${SRC}/modules/${moduleBase}`,
+    ],
+    [tokenName],
+  );
+  if (token === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the ${tokenName} DI token (module '${moduleBase}'). ` +
+        `If the implementor put it elsewhere, add the path/export to ` +
+        `tests/support/harness.ts:resolveServiceToken — the single coordination point.`,
+    );
+  }
+  return token as symbol;
+}
+
+/** `POSTING_SERVICE` — the DI token the PostingModule binds the reducer to. */
+export function getPostingServiceToken(): symbol {
+  return resolveServiceToken('POSTING_SERVICE', 'posting');
+}
+
+/** `IDEMPOTENCY_SERVICE` — the DI token the IdempotencyModule binds the wrapper to. */
+export function getIdempotencyServiceToken(): symbol {
+  return resolveServiceToken('IDEMPOTENCY_SERVICE', 'idempotency');
+}
+
+/** `ACCOUNTS_SERVICE` — the DI token the AccountsModule binds the read service to (added for
+ *  completeness/consistency; no spec resolves it by token yet). */
+export function getAccountsServiceToken(): symbol {
+  return resolveServiceToken('ACCOUNTS_SERVICE', 'accounts');
 }
 
 export interface FingerprintInput {

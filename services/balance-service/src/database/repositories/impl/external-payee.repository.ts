@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, Repository } from 'typeorm';
-import { ExternalPayee } from '../entities/external-payee.entity';
-import { IExternalPayeeRepository } from './external-payee.repository.interface';
+import { ExternalPayee } from '../../entities/external-payee.entity';
+import { IExternalPayeeRepository } from '../interfaces/external-payee.repository.interface';
 
 /** TypeORM implementation of {@link IExternalPayeeRepository}, bound to
  * `EXTERNAL_PAYEE_REPOSITORY` in {@link PersistenceModule}. */
