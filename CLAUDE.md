@@ -141,6 +141,21 @@ Harness rules:
   **Derived / presentation fields** (e.g. a computed balance, an ISO timestamp) are
   computed **at serialize time from shared helpers**, never stored on the entity.
 
+## Controller surfaces
+
+- The **`api` / `admin` / `internal` modules are the per-surface registries**: each
+  **declares** the controllers for its prefix and **imports the feature modules** for the
+  services those controllers inject.
+- **Feature modules provide + export services** and own the controller files, one per
+  surface, named `<name>-<surface>.controller.ts` (class `<Name><Surface>Controller`,
+  e.g. `accounts-api.controller.ts` → `AccountsApiController`).
+- A feature defines **only the surface controllers it needs** — most just `-api`; add
+  `-admin` / `-internal` only when the feature requires that surface. **Not every module
+  has all three.**
+- **`AppModule` composes from the surface modules + infra**, not from feature modules.
+- A **service-only feature module** (no controller yet) is imported by its consuming
+  surface module — or **transitionally by `AppModule`** until a controller consumes it.
+
 ## Repository layout (monorepo)
 
 Each app is **self-contained and atomic** in its own folder: **no cross-folder
