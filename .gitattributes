@@ -14,3 +14,13 @@
 # value or a mongosh init script). Keep them LF everywhere.
 *.conf  text eol=lf
 infra/**/init/*.js text eol=lf
+
+# Service source (NestJS, steps 3+). Kept LF everywhere: it is copied into the
+# Linux images at `docker build`, and the lint gate (prettier, endOfLine=lf) runs
+# it on every platform — a CRLF checkout on Windows must not fail lint or bake
+# '\r' into a built image. Native-per-platform (the default above) does not hold
+# for these.
+*.ts    text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.json  text eol=lf
