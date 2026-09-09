@@ -20,20 +20,27 @@ steps.
 
 `src/modules/accounts/` — the `Accounts` domain module.
 
+The accounts feature follows the **controller-surface convention** (see
+[`CLAUDE.md` § Controller surfaces](../../../CLAUDE.md#controller-surfaces)): the feature
+module provides + exports the service and owns its surface controller file, while the `/api`
+surface registry ({@link ApiModule}, `src/modules/api/api.module.ts`) **declares** the
+controller and imports the feature module for the service.
+
 | File | Role |
 |---|---|
-| `accounts.module.ts` | `imports: [PersistenceModule]`; declares the controller, provides the service. |
-| `accounts.controller.ts` | `@Controller('api')` — the two read routes; calls the service (entities) then serializes to DTOs. |
+| `accounts.module.ts` | Feature module: `imports: [PersistenceModule]`, `providers`+`exports: [AccountsService]`. **No controllers of its own.** |
+| `accounts-api.controller.ts` | `AccountsApiController`, `@Controller('api')` — the two read routes; **declared by `ApiModule`**; calls the service (entities) then serializes to DTOs. |
 | `accounts.service.ts` | Owner-scoped reads (returns **entities**) + `assertOwnerScope` + `STATEMENT_PAGE_LIMIT`. |
 | `accounts.serializer.ts` | Pure explicit-whitelist serializers `serializeAccount` / `serializeStatementEntry` (entity→DTO). |
 | `dto/account.dto.ts` | `AccountDto` — customer view of an account (the wire contract). |
 | `dto/statement-entry.dto.ts` | `StatementEntryDto` — one ledger leg of a statement (the wire contract). |
 
-`PersistenceModule` was merged unwired (no consumer). Importing it in `AccountsModule`,
-and adding `AccountsModule` to `AppModule.imports`, is **what finally wires it into the
-running app graph**. `DatabaseModule` already establishes the default TypeORM connection
-and runs migrations on boot; `PersistenceModule`'s `forFeature(...)` reuses that same
-connection — no second connection, no migration change.
+`PersistenceModule` is imported by `AccountsModule`; `AccountsModule` is reached from the
+graph via `ApiModule` (which `AppModule` imports), so the accounts feature is wired into the
+running app **through its surface registry**, not directly by `AppModule`. `DatabaseModule`
+already establishes the default TypeORM connection and runs migrations on boot;
+`PersistenceModule`'s `forFeature(...)` reuses that same connection — no second connection,
+no migration change.
 
 ## Endpoints
 
@@ -49,7 +56,7 @@ Lists **only the caller's own** accounts (`owner_id = userId`). The repo's
 
 - **200** → `{ accounts: AccountDto[] }`
 - `AccountDto`: `{ id, currency, status, kind, balance, held, available }` — all strings.
-  - Path: `AccountsController.listAccounts` → `AccountsService.listOwnedAccounts(userId)`
+  - Path: `AccountsApiController.listAccounts` → `AccountsService.listOwnedAccounts(userId)`
     (returns `Account[]`) → `IAccountRepository.findByOwner(userId)`; the controller maps
     each entity through `serializeAccount`.
 
@@ -64,7 +71,7 @@ The per-account statement (that account's ledger legs), **newest-first, bounded*
 - **200** → `{ accountId: string; entries: StatementEntryDto[] }`
 - `StatementEntryDto`: `{ id, transactionId, delta, balanceAfter, currency, createdAt }`
   (`createdAt` is an ISO-8601 UTC string).
-  - Path: `AccountsController.getAccountTransactions` →
+  - Path: `AccountsApiController.getAccountTransactions` →
     `AccountsService.getAccountStatement(id, userId)` (returns `{ account, entries }`) →
     `IAccountRepository.findByIdAndOwner(id, userId)` (ownership check) →
     `ILedgerEntryRepository.findByAccount(id, STATEMENT_PAGE_LIMIT)`; the controller maps
@@ -98,7 +105,7 @@ concern applied at the controller boundary** (repo-wide convention — see
 - `AccountsService` returns `Account` / `LedgerEntry` (and `{ account, entries }`) — it
   owns the authz (`assertOwnerScope`, ownership check → 404) and the bound, but never the
   wire shape.
-- `AccountsController` maps each entity through an **explicit-whitelist serializer** in
+- `AccountsApiController` maps each entity through an **explicit-whitelist serializer** in
   `accounts.serializer.ts` (`serializeAccount`, `serializeStatementEntry`) before
   responding. The serializers are **pure, plain functions** (no `@Injectable`).
 - The serializers **list output fields explicitly and never spread the entity**, so
@@ -134,7 +141,10 @@ is the **single operation all balance mutations funnel through** (ADR-13), so th
 append-only ledger and the materialized `balance` can never diverge. It has **no HTTP
 surface** this step; the transfers / holds / admin layers (later steps) build a command
 and call it. `PostingModule` (`imports: [PersistenceModule]`, provides + **exports**
-`PostingService`) is wired into `AppModule`.
+`PostingService`) is a **service-only feature module** — with no controller yet, it is
+imported **transitionally by `AppModule`** so `PostingService` is resolvable in the graph.
+Under the controller-surface convention it moves under its consuming surface module once a
+controller uses it (the transfers `-api` controller, step 4).
 
 | File | Role |
 |---|---|

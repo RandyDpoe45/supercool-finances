@@ -7,21 +7,27 @@ import { requestIdMiddleware } from './common/request-context/request-id.middlew
 import { AppConfigModule } from './config/config.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
-import { AccountsModule } from './modules/accounts/accounts.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { ApiModule } from './modules/api/api.module';
 import { InternalModule } from './modules/internal/internal.module';
 import { PostingModule } from './modules/posting/posting.module';
 
 /**
- * Root module. The identity guards and the error filter are bound GLOBALLY
- * (APP_GUARD / APP_FILTER) so no endpoint can skip them — each guard scopes itself
- * to its own prefix (`/api`+`/admin` vs `/internal`). Order matters only in that
- * both guards run for every request; each returns early for foreign prefixes.
+ * Root module. It composes the app from the three per-surface registry modules
+ * ({@link ApiModule} `/api`, {@link AdminModule} `/admin`, {@link InternalModule}
+ * `/internal`) plus infrastructure (config, database, health) — the controller-surface
+ * convention (see CLAUDE.md § Controller surfaces). Feature modules (e.g. accounts) are NOT
+ * imported here directly: they are reached through the surface module that declares their
+ * controllers (accounts via {@link ApiModule}), which exports nothing to AppModule.
  *
- * The request-id correlation middleware is applied HERE (not in main.ts) so the
- * guarantee holds whenever AppModule is booted — including tests that create the
- * module without main.ts. The error DTO's `requestId` depends on it.
+ * The identity guards and the error filter are bound GLOBALLY (APP_GUARD / APP_FILTER) so no
+ * endpoint can skip them — each guard scopes itself to its own prefix (`/api`+`/admin` vs
+ * `/internal`). Order matters only in that both guards run for every request; each returns
+ * early for foreign prefixes.
+ *
+ * The request-id correlation middleware is applied HERE (not in main.ts) so the guarantee
+ * holds whenever AppModule is booted — including tests that create the module without
+ * main.ts. The error DTO's `requestId` depends on it.
  */
 @Module({
   imports: [
@@ -29,7 +35,10 @@ import { PostingModule } from './modules/posting/posting.module';
     DatabaseModule,
     HealthModule,
     ApiModule,
-    AccountsModule,
+    // PostingModule is a SERVICE-ONLY feature module (no controller yet). It is imported here
+    // transitionally so PostingService is resolvable in the graph; it moves under its
+    // consuming surface module once a controller uses it (the transfers `-api` controller,
+    // step 4).
     PostingModule,
     AdminModule,
     InternalModule,

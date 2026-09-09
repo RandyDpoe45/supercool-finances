@@ -7,14 +7,17 @@ import { AccountDto } from './dto/account.dto';
 import { StatementEntryDto } from './dto/statement-entry.dto';
 
 /**
- * Customer-plane account reads. Under the global `/api` prefix, so the
- * {@link GatewayIdentityGuard} has already required the Kong `X-User-Id` and populated
- * the identity — the caller id is taken from `@Identity()`, never the body/query. The
- * service returns entities; the controller serializes them to DTOs at this boundary so no
- * raw entity ever reaches the wire.
+ * Customer-plane account reads — the accounts feature's `/api` surface controller. It is
+ * DECLARED by {@link ApiModule} (the `/api` surface registry), while the {@link
+ * AccountsModule} feature module provides + exports the {@link AccountsService} it injects.
+ *
+ * Under the global `/api` prefix, so the {@link GatewayIdentityGuard} has already required
+ * the Kong `X-User-Id` and populated the identity — the caller id is taken from
+ * `@Identity()`, never the body/query. The service returns entities; the controller
+ * serializes them to DTOs at this boundary so no raw entity ever reaches the wire.
  */
 @Controller('api')
-export class AccountsController {
+export class AccountsApiController {
   constructor(private readonly accounts: AccountsService) {}
 
   @Get('accounts')
