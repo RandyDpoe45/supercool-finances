@@ -4,10 +4,17 @@ The money core built on the [foundation](./README.md) and [persistence
 layer](./persistence.md). This page records **what was built**; the design of record is
 [`specs/04-balance-service.md`](../../../specs/04-balance-service.md).
 
-This is the **first, read-only slice**: two customer account reads, the domain module
-structure, and the money helper they need. No money movement, no locks, no holds, no
-OTP — those arrive in later steps. Domain-specific errors (a base class) also arrive
-with the first write path; this slice uses standard Nest exceptions only.
+The layer is built **bottom-up**, one scope-sized step per PR. This page grows a section
+per step:
+
+- **Step 1 — read surface** (below): two customer account reads, the domain module
+  structure, and the money helper they need. No money movement, no locks.
+- **Step 2 — the `postTransaction` reducer** ([below](#the-posttransaction-reducer-step-2)):
+  the single balance-mutating operation, plus the domain-error base and the
+  transaction-aware repository seam that land with the first write path.
+
+Holds, limits, idempotency, OTP, transfers, and the outbox relay still arrive in later
+steps.
 
 ## Module structure
 
@@ -120,9 +127,175 @@ concern applied at the controller boundary** (repo-wide convention — see
 (100) caps it; there is no unbounded variant, since an account's history grows without
 limit.
 
+## The `postTransaction` reducer (step 2)
+
+`src/modules/posting/` — the money-safety **keystone**. `PostingService.postTransaction`
+is the **single operation all balance mutations funnel through** (ADR-13), so the
+append-only ledger and the materialized `balance` can never diverge. It has **no HTTP
+surface** this step; the transfers / holds / admin layers (later steps) build a command
+and call it. `PostingModule` (`imports: [PersistenceModule]`, provides + **exports**
+`PostingService`) is wired into `AppModule`.
+
+| File | Role |
+|---|---|
+| `posting.module.ts` | Provides/exports `PostingService`; imports `PersistenceModule`. |
+| `posting.service.ts` | The reducer + its private helpers (`applyPosting`, `checkAndFold`, `validateCommand`). |
+| `post-transaction.command.ts` | `PostTransactionCommand` / `PostingLeg` — the **domain** input (not a wire DTO). |
+| `posting.errors.ts` | The concrete posting domain errors (extend `DomainError`). |
+| `transaction-event.ts` | The balance-service **copy** of the transaction-event payload contract. |
+
+### The command
+
+`PostTransactionCommand` is a fully-formed, balancing movement to apply atomically:
+
+```
+PostTransactionCommand {
+  type: TransactionType;                 // internal | external_outbound | external_inbound
+  currency: string;                      // e.g. 'MXN'
+  amount: string;                        // positive magnitude, minor units (bigint-as-string)
+  legs: PostingLeg[];                    // signed deltas; must sum to zero
+  initiatedBy: string;                   // actor recorded on the header
+  payeeId?: string | null;
+  reversesTransactionId?: string | null;
+}
+PostingLeg { accountId: string; delta: string }   // signed minor-units; '-'=debit, '+'=credit
+```
+
+The transaction id is generated **up front** (`randomUUID()`) so the legs and the outbox
+row reference it without a DB round-trip.
+
+### Validation (before any DB work)
+
+`validateCommand` throws `InvalidPostingCommandError` unless: `currency` is present; there
+are **≥ 2 legs**; every minor-unit string is **well-formed** (each `delta` a signed integer
+`/^-?\d+$/`, `amount` an unsigned integer `/^\d+$/`); `amount > 0`; account ids are
+**distinct**; **no zero-delta** leg; `Σ delta === 0` (double-entry); and `amount` **equals
+the moved magnitude** (the sum of the positive-delta legs). Two of these are hardening:
+
+- **Shape first.** The string-shape checks run **before any `BigInt()`**, so a malformed
+  value (`'1.5'`, `'abc'`) yields this domain error rather than a raw `SyntaxError` that
+  would later render a generic 500. All downstream `BigInt()` calls (the fold,
+  `deriveDebitCredit`) are therefore safe.
+- **`amount` must not lie.** Balances and the ledger fold from the legs, so a wrong `amount`
+  is not a money-safety breach — but it would land in the transaction header and the
+  analytics outbox payload. The cross-check (declared `amount` == total moved magnitude)
+  keeps the emitted magnitude honest, for the 2-leg case and any balanced multi-leg.
+
+All arithmetic is exact `BigInt` via `common/money` (`sumMinor`) — never `Number`/float.
+
+### Mechanics (ADR-13)
+
+**One DB transaction, READ COMMITTED.** Steps c–g run inside it:
+
+1. **Lock** every affected account `FOR UPDATE` via `IAccountRepository.lockByIdForUpdate`,
+   in **canonical ascending account-id order**. A single lock order across all posts is
+   what removes the classic two-transfer opposite-order deadlock. A missing account →
+   `AccountNotFoundError`.
+2. **Check + fold** each leg against its locked account (`checkAndFold`, see rules below),
+   computing `balance_after = balance_before + delta` (`addMinor`).
+3. **Header first:** one `Transaction` row, status `POSTED`, `postedAt = now`, with
+   `debit`/`credit` account ids derived from a clean 2-leg pair (negative leg = debit,
+   positive = credit); **null** for both when the legs are not one such pair. The header is
+   inserted **before** the ledger and outbox rows because both FK their `transaction_id` to
+   it — the parent must exist first. The up-front `txId` lets this happen without a
+   round-trip.
+4. **Balance-then-ledger** under the lock: `updateBalanceInTx` sets the account `balance`
+   (and `updated_at`) **first**, then `LedgerEntry.insertInTx` appends the leg carrying the
+   resulting `balance_after`. `created_at` is **not** set — the `clock_timestamp()` default
+   is the per-account reconstruction ordering key.
+5. **Outbox:** exactly **one** `OutboxEvent` in the same tx (transactional outbox, ADR-5),
+   then `commit`.
+
+On any throw the tx is **rolled back** (guarded by `isTransactionActive`) and the query
+runner is always **released**. **Only a deadlock** (SQLSTATE `40P01`, matched on the error
+or its `driverError`) is retried — bounded to `MAX_DEADLOCK_RETRIES` (3) additional
+attempts, each in a fresh transaction; every other error propagates.
+
+### Per-leg rules (`checkAndFold`)
+
+- **Currency:** every leg's account currency must equal `command.currency`, else
+  `CurrencyMismatchError`.
+- **Customer debit** (`kind === 'customer'`, `delta < 0`): a **frozen** account →
+  `AccountFrozenError`; and the debit magnitude must be covered by
+  **`available = balance − held`** (`availableMinor`) — `available < -delta` →
+  `InsufficientFundsError`. Because the row is locked and `available` subtracts existing
+  `held`, this is the single-row overdraft invariant.
+- **System accounts** (`kind === 'system'`, the per-rail clearing accounts) are **exempt**
+  from the frozen and funds checks — a clearing balance may legitimately go negative (net
+  in transit). Credits (`delta > 0`) are never funds-checked.
+
+### Deferred scope (NOT in the reducer yet)
+
+Per-period **spend-counter / limit** updates (step 7), **hold / `held`** mutation (step 5),
+and **idempotency-key** handling (step 3) are intentionally absent — but the funds check
+**does** subtract existing `held` when computing `available`, so it is already
+hold-aware. No endpoints, OTP, or transfer lifecycle here.
+
+### Transaction-aware repository seam
+
+Mirroring the `lockByIdForUpdate(queryRunner, …)` precedent, the reducer's writes join its
+transaction through **tx-aware repository methods** that operate via `queryRunner.manager`
+(the auto-commit `create` / `findById` methods are untouched, and no new DI tokens are
+added):
+
+| Method | Effect |
+|---|---|
+| `IAccountRepository.updateBalanceInTx(qr, id, newBalance)` | Targeted `UPDATE balance (+ updated_at)`. |
+| `ILedgerEntryRepository.insertInTx(qr, data)` | Append one ledger leg (`created_at` left to default). |
+| `ITransactionRepository.insertInTx(qr, data)` | Insert the transaction header. |
+| `IOutboxEventRepository.insertInTx(qr, data)` | Insert the outbox row (same tx). |
+
+Each `insertInTx` uses `manager.save(manager.create(Entity, data))` so DB-generated columns
+(`id`, `created_at`) come back merged onto the returned entity; the ledger/outbox PKs are
+DB-generated and the transaction id is a freshly-generated UUID, so every call can only
+ever **INSERT**.
+
+### Domain errors
+
+Framework-agnostic error classes with **no** `@nestjs/common` coupling — the money rules
+live in the service, not in transport. A small cross-cutting base
+`common/errors/domain-error.ts` `DomainError` carries a stable machine-readable `code`
+(distinct from any HTTP status); the posting errors extend it:
+
+| Class | `code` | Meaning |
+|---|---|---|
+| `InvalidPostingCommandError` | `INVALID_POSTING_COMMAND` | Malformed command (shape / balancing). |
+| `AccountNotFoundError` | `ACCOUNT_NOT_FOUND` | A leg references a missing account. |
+| `InsufficientFundsError` | `INSUFFICIENT_FUNDS` | Customer debit exceeds `available`. |
+| `AccountFrozenError` | `ACCOUNT_FROZEN` | Debit on a frozen customer account. |
+| `CurrencyMismatchError` | `CURRENCY_MISMATCH` | Leg account currency ≠ transaction currency. |
+
+**Deferred HTTP mapping.** The global `AllExceptionsFilter` currently derives `code` from
+the HTTP status, so a `DomainError` reaching it today would render a generic 500. Mapping
+each domain `code` to a status (e.g. `INSUFFICIENT_FUNDS` → 422, `ACCOUNT_FROZEN` → 409,
+`ACCOUNT_NOT_FOUND` → 404, `INVALID_POSTING_COMMAND` → 400) is done at the **endpoint step**
+when the write routes first throw these — there is no HTTP surface for the reducer yet.
+
+### Outbox payload (provisional transaction-event contract)
+
+`transaction-event.ts` holds the **balance-service's own copy** of the transaction-event
+shape (per ADR-16 — the analytics server keeps an independent copy; the **spec** is the
+contract of record that keeps them in sync). It is **provisional** for this step; the relay
+and consumer steps may refine it, tracked via the spec. `event_type` is
+`transaction.posted`; the `jsonb` `payload` is:
+
+```
+TransactionPostedPayload {
+  txId: string;
+  type: TransactionType;
+  currency: string;
+  amount: string;                 // positive magnitude, minor units
+  legs: { accountId: string; delta: string; balanceAfter: string }[];
+  occurredAt: string;             // ISO-8601 UTC
+}
+```
+
+The payload types are declared as `type` aliases (not interfaces) so they satisfy the
+entity's `Record<string, unknown>` column without an explicit index signature.
+
 ## Not in this slice (later steps)
 
-Money movement (`postTransaction`, the single balance-mutating reducer), holds, limits,
-OTP, transfers, the outbox relay, admin ops, and a domain-error base class. Statement
-pagination beyond the first page is likewise deferred — this slice returns only the most
-recent `STATEMENT_PAGE_LIMIT` legs.
+Idempotency + soft-duplicate suppression, internal transfers + OTP, holds + external
+outbound, the outbox **relay worker**, limits + external payees, and admin ops +
+maker-checker + external rails. Statement pagination beyond the first page is likewise
+deferred — the read slice returns only the most recent `STATEMENT_PAGE_LIMIT` legs.

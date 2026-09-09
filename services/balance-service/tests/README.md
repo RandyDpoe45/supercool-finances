@@ -18,6 +18,8 @@ coordination contract, not from the implementor's code. Each test is designed to
 | `unit/accounts.serializer.spec.ts` | Spec 04 **domain Step-1** controller-boundary serializers (`serializeAccount` / `serializeStatementEntry`): **whitelist / anti-leak** — feed a FULL entity (incl. `ownerId`, `spent*`, `systemKey`, timestamps, `accountId`) and assert the DTO carries **EXACTLY** the contract keys and leaks none of the sensitive ones; `available = balance − held` via BigInt (no float loss near 2^63); held=0 / held=balance edges; a `Date` `createdAt` rendered as its **ISO-8601 string**. **No DB, never skipped** | No | `npm test` |
 | `unit/accounts.service.spec.ts` | Spec 04 **domain Step-1** `AccountsService` owner-scope guard (**anti-IDOR, fail-closed**): `new AccountsService(mockRepos)` with `jest.fn()` repos; `listOwnedAccounts` and `getAccountStatement` with an **empty / blank** `ownerId` **reject** (500-class) **and never call the repo** (fails closed BEFORE any query); positive control — a real `ownerId` passes the guard and runs the owner-scoped lookup (bounded page limit). **No DB, never skipped** | No | `npm test` |
 | `integration/accounts-read.integration.spec.ts` | Spec 04 **domain Step-1** read endpoints over HTTP (real `AppModule` + gateway guard + error filter). **`GET /api/accounts`**: owner scoping / **anti-IDOR** (only the caller's accounts; system account never listed); **AccountDto** shape + money as strings; **available = balance − held** (held>0 / =0 / =balance) with **no float loss near the max bigint**. **`GET /api/accounts/:id/transactions`**: 404 (never 403 / **no existence leak**) for a not-owned or system account, 404 for a missing id; **only that account's ledger legs**, **newest-first** (created_at DESC), **bounded to 100**; `balance_after` intact as strings; malformed `:id` → **400 BAD_REQUEST** | **Yes** (honest-SKIP) | `npm test` |
+| `unit/posting.command.spec.ts` | Spec 04 **domain Step-2** `postTransaction` command guards (**fail BEFORE any DB work**): `new PostingService(mockDataSource, …mockRepos)`, feed a malformed command, assert it rejects with **`InvalidPostingCommandError`** AND `dataSource.createQueryRunner` was **NOT** called (validation is the gate, not a post-tx check). Branches: `<2 legs`; `amount <= 0`; **duplicate account ids** (a dup id would let the second fold overwrite the first — money-relevant); a **zero-delta leg**; deltas **not summing to zero**; a **malformed minor-unit string** (`delta:'1.5'` / `amount:'abc'`); an **amount ≠ moved magnitude**; plus a positive control (a well-formed command PASSES validation and reaches `createQueryRunner`). **No DB, never skipped** | No | `npm test` |
+| `integration/post-transaction.integration.spec.ts` | Spec 04 **domain Step-2** the `postTransaction` atomic reducer (money-safety keystone) over the REAL DI'd service + real Postgres. **Happy path**: internal transfer folds both balances, appends the two double-entry legs (deltas ∓N, `balance_after` = each new balance, legs sum to 0), writes the header **POSTED** + `posted_at`, and exactly **one** unpublished `outbox_event`. **No overdraft / AVAILABLE semantics**: a debit over `available` (with `held>0` so `balance` alone would allow it) is rejected and **nothing is written** (global row-count delta 0); a debit of **exactly** available succeeds (>= not >). **Frozen**: a customer debit on a frozen but well-funded account is rejected (nothing written); crediting a frozen account is allowed. **Currency mismatch**: a leg whose account currency ≠ command currency is rejected (nothing written). **Double-entry**: legs that do not sum to zero (would mint money) are rejected (nothing written). **System exemption**: an inbound-style post drives a `kind='system'` clearing account **negative** with no overdraft error. **CONCURRENCY (DoD keystone)**: N=8 in-process concurrent transfers against A funded for exactly K=5 → exactly K succeed, the surplus reject **insufficient**, A never overdraws (ends 0), B gains exactly K·M, A has exactly K debit legs, and all deltas across the pair net to 0 (`FOR UPDATE` serialization). **Reconciliation**: after a batch, `SUM(ledger delta) == account.balance` per account, all accounts net to 0, and the two customer accounts net to 0 across the `internal` transfers | **Yes** (honest-SKIP) | `npm test` |
 | `integration/repositories-and-seed.integration.spec.ts` | Spec 04 **Step-3 persistence completion**. **Seed migration**: exactly the two clearing/system accounts (`clearing:rail-outbound/-inbound`, `kind=system`, `MXN`, `balance/held=0`, `active`, date markers set); **no over-seed** (system-account count == 2, **zero** `global` `user_limits`); MXN sanity. **Repos (agreed minimal surface, resolved BY TOKEN through the app graph)**: **all 10 `<NAME>_REPOSITORY` tokens bind to a working provider** (`create` + each repo's read method — `findById`, or `findByOwnerAndKey` for IdempotencyKey — guards the full PersistenceModule wiring); Account `create`→`findById`; `findByOwner` owner-scoping (isolation); `findBySystemKey` resolves a seeded clearing account; `lockByIdForUpdate` returns the row **and holds a real FOR UPDATE lock** (concurrent `FOR UPDATE NOWAIT` → 55P03); ExternalPayee `findByOwner` scoping; IdempotencyKey `findByOwnerAndKey` keys on (owner,key); Transaction & LedgerEntry `create`→`findById` | **Yes** (honest-SKIP) | `npm test` |
 
 Discovery is already wired by the scaffold: `jest.config.ts` matches
@@ -69,6 +71,24 @@ plausible locations; currently `src/modules/accounts/accounts.serializer.ts`).
 `getAccountsService()` resolves the `AccountsService` class the same way (currently
 `src/modules/accounts/accounts.service.ts`) so a pure unit test can instantiate it with
 mock repos.
+
+For domain Step-2 it wires the **posting reducer**: `getPostingService()` resolves the
+`PostingService` **class** (scanned across the plausible domain locations; currently
+`src/modules/posting/posting.service.ts`) so the integration suite can `app.get(...)` the
+REAL DI'd instance and drive `postTransaction(command)` against Postgres. The command shape
+is the spec-derived domain contract `{ type, currency, amount, legs: [{accountId, delta}],
+initiatedBy, payeeId?, reversesTransactionId? }` (`amount`/`delta` are bigint minor-unit
+**strings**; currently `src/modules/posting/post-transaction.command.ts`) — if the
+implementor's keys diverge, the command builder in the spec is the coordination point
+(escalate, don't conform). `getDomainErrors()` **best-effort** resolves the reducer's
+framework-agnostic error classes (`InsufficientFundsError` / `AccountFrozenError` /
+`CurrencyMismatchError` / `AccountNotFoundError` / `InvalidPostingCommandError`; currently
+`src/modules/posting/posting.errors.ts`) so a rejection can be classified by `instanceof`
+(and the pure command-guard unit suite asserts on `InvalidPostingCommandError` directly).
+Unlike the other resolvers it does **not** throw when a class is absent: the money-safety
+proofs gate on **observable state** (the tx rolled back — no ledger/tx/outbox rows, balances
+unchanged), and the error *kind* is a secondary signal that falls back to a `code`/message
+match. Add the module path here if the implementor relocates them.
 
 ## Shared DB helpers: `support/pg.ts`
 
@@ -142,6 +162,26 @@ wrap it; those tests use random ids and clean up their committed rows in `afterE
   overdraft-safe `postTransaction` will build on; the end-to-end concurrency invariant
   is tested where that logic lands (spec 04 DoD).
 
+- **Command validation is proven PURELY** in `unit/posting.command.spec.ts` (the guards run
+  before any DB work), and the money-relevant rejections (legs-not-summing-to-zero,
+  currency-mismatch) are ALSO proven end-to-end with atomic-rollback in the integration
+  suite. Guards that require a locked account (frozen, insufficient funds, account-not-found,
+  currency vs the locked row) can only be proven against a real DB and live only in the
+  integration suite.
+- **`40P01` deadlock-retry is intentionally NOT tested.** The reducer acquires account locks
+  in canonical ascending id order, so two `postTransaction` calls on the same accounts always
+  lock in the same order — a lock-ordering deadlock between them is not inducible through the
+  public API (the concurrency proof confirms clean serialization, not deadlock). The
+  `isDeadlock`/retry-bound helper is module-private (not exported), so a pure unit test of it
+  would need a production change (an export), which is out of scope for the test writer — the
+  note stands in per the testing discipline's "if a meaningful test can't be written, say why."
+- **`postTransaction` atomicity is proven by GLOBAL row-count deltas.** The rejection tests
+  snapshot `count(*)` of `ledger_entry` / `transaction` / `outbox_event` / `hold` before the
+  call and assert an unchanged count after — a header-independent, leak-proof "nothing was
+  committed" check that holds because the integration run is serialized (`maxWorkers:1`) and
+  each test cleans up. If that serialization is ever removed, these deltas would need
+  per-transaction scoping instead.
+
 ## Escalations / assumptions (confirm with the developer)
 
 1. **Error `code` vocabulary is now asserted** (`UNAUTHORIZED`/`FORBIDDEN`/`NOT_FOUND`/
@@ -185,3 +225,22 @@ wrap it; those tests use random ids and clean up their committed rows in `afterE
    void or takes a different DTO, those two fail with a clear message — escalate to
    reconcile the contract. `bigint` money fields surface as JS strings (documented in
    docs/persistence.md), so numeric checks use `Number(...)`.
+8. **Domain Step-2: `postTransaction` command shape + reducer entry point are the
+   spec-derived contract**, resolved through `harness.getPostingService` /
+   `getDomainErrors` and the command builder in `post-transaction.integration.spec.ts`. The
+   command keys (`type`, `currency`, `amount`, `legs:[{accountId,delta}]`, `initiatedBy`,
+   `payeeId?`, `reversesTransactionId?`) and the method name `postTransaction` come from the
+   spec/ADR-13, not the impl; the suite confirmed they match `src/modules/posting`. If they
+   diverge later, the harness/command builder is the single edit point — escalate rather
+   than conform a proof to a wrong shape.
+9. **Frozen account may still be CREDITED (interpretation).** The spec says "customer
+   *debits* from a frozen account are rejected"; the suite asserts a frozen account can be
+   the *credit* leg of a transfer (receiving money is not a debit). If the product intent is
+   that a freeze blocks *all* activity on the account, that test is the tripwire — confirm
+   the intended freeze semantics with the developer.
+10. **System exemption is keyed on `kind='system'`.** The exemption proof seeds its own
+    throwaway `kind='system'` account (random `system_key`) rather than mutating the two
+    migration-seeded clearing accounts, so it stays isolated/cleanable. This assumes the
+    reducer exempts by account **kind**, not by a hard-coded clearing `system_key` allowlist.
+    If the exemption is instead keyed on the specific seeded keys, switch the seed to the
+    real `clearing:rail-inbound` account and reset its balance in teardown.

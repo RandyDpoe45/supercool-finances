@@ -22,4 +22,9 @@ export interface IAccountRepository {
   /** `SELECT ... FOR UPDATE` on the account row — the concurrency primitive posting relies
    * on. MUST run inside the given queryRunner's active transaction. */
   lockByIdForUpdate(queryRunner: QueryRunner, id: string): Promise<Account | null>;
+  /** Targeted UPDATE of the materialized `balance` (and `updated_at`) for one account,
+   * joined to the given queryRunner's transaction. The posting reducer calls this under the
+   * account's `FOR UPDATE` lock, BEFORE inserting the ledger entry (balance-then-ledger,
+   * ADR-13). `newBalance` is a canonical minor-unit string. */
+  updateBalanceInTx(queryRunner: QueryRunner, id: string, newBalance: string): Promise<void>;
 }
