@@ -35,6 +35,16 @@ import { Test } from '@nestjs/testing';
 
 import { getAppModule, tcpProbe } from '../support/harness';
 import { completeRawEnv } from '../support/env.fixture';
+import {
+  PG,
+  TODAY,
+  MONTH_START,
+  withRollback as withRollbackOn,
+  insertRow,
+  insertAccount,
+  expectPgError,
+  seedTestCurrency,
+} from '../support/pg';
 
 const ENABLED = process.env.BALANCE_INTEGRATION === '1';
 
@@ -51,15 +61,6 @@ const DB_PORT = Number(process.env.DB_PORT || '5432');
 // describe.skip when not opted in -> tests show as skipped, not passed.
 const suite = ENABLED ? describe : describe.skip;
 
-// ---- Postgres error codes (SQLSTATE) the manifest's constraints must raise --------
-const PG = {
-  NOT_NULL: '23502',
-  FK_VIOLATION: '23503',
-  UNIQUE_VIOLATION: '23505',
-  CHECK_VIOLATION: '23514',
-  INVALID_ENUM_TEXT: '22P02', // "invalid input value for enum ...": proves a NATIVE enum type
-} as const;
-
 // ---- Enum types + labels, straight from DATA-MODEL.md "Enumerations" (Step-1 five)
 const EXPECTED_ENUMS: Record<string, string[]> = {
   account_kind: ['customer', 'system'],
@@ -68,16 +69,6 @@ const EXPECTED_ENUMS: Record<string, string[]> = {
   transaction_status: ['PENDING', 'POSTED', 'FAILED', 'REVERSED'],
   payee_status: ['pending', 'active', 'disabled'],
 };
-
-// Window markers the manifest marks NOT NULL but promises no default for; supply
-// them explicitly so "defaults" assertions test ONLY the defaults the manifest
-// actually promises (balance/held/status/spent_*), never an unpromised date default.
-const TODAY = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-const MONTH_START = TODAY.slice(0, 8) + '01'; // YYYY-MM-01
-
-function pgCode(e: any): string | undefined {
-  return e?.driverError?.code ?? e?.code;
-}
 
 suite('balance schema — Step 1 constraints (integration, needs Postgres)', () => {
   let app: INestApplication;
@@ -125,64 +116,8 @@ suite('balance schema — Step 1 constraints (integration, needs Postgres)', () 
     if (app) await app.close();
   });
 
-  // Run `fn` inside a transaction that is ALWAYS rolled back (idempotent re-runs).
-  async function withRollback(fn: (q: any) => Promise<void>): Promise<void> {
-    const q = ds.createQueryRunner();
-    await q.connect();
-    await q.startTransaction();
-    try {
-      await fn(q);
-    } finally {
-      try {
-        await q.rollbackTransaction();
-      } catch {
-        /* a transaction aborted by an expected constraint failure still rolls back */
-      }
-      await q.release();
-    }
-  }
-
-  // Parameterised INSERT ... RETURNING * (avoids quoting/injection); returns the row.
-  async function insertRow(q: any, table: string, row: Record<string, unknown>): Promise<any> {
-    const cols = Object.keys(row);
-    const colList = cols.map((c) => `"${c}"`).join(', ');
-    const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
-    const sql = `INSERT INTO "${table}" (${colList}) VALUES (${placeholders}) RETURNING *`;
-    const res = await q.query(sql, Object.values(row));
-    return res[0];
-  }
-
-  // Assert a statement is rejected by Postgres with a specific SQLSTATE.
-  async function expectPgError(p: Promise<unknown>, sqlstate: string): Promise<void> {
-    try {
-      await p;
-    } catch (e) {
-      const code = pgCode(e);
-      expect(code).toBe(sqlstate);
-      return;
-    }
-    throw new Error(
-      `expected the statement to be rejected with SQLSTATE ${sqlstate}, but it succeeded`,
-    );
-  }
-
-  // A throwaway currency inserted inside the rolled-back tx, so constraint tests are
-  // decoupled from whether the MXN seed lives in a migration (that is tested on its own).
-  async function seedTestCurrency(q: any, code = 'TST'): Promise<string> {
-    await insertRow(q, 'currency', { code, name: 'Test Currency', minor_unit_scale: 2 });
-    return code;
-  }
-
-  // A valid customer account (all NOT-NULL-without-default columns provided).
-  async function insertAccount(q: any, overrides: Record<string, unknown> = {}): Promise<any> {
-    return insertRow(q, 'account', {
-      kind: 'customer',
-      currency: 'TST',
-      spent_today_date: TODAY,
-      spent_month_date: MONTH_START,
-      ...overrides,
-    });
-  }
+  // Shared helpers (tests/support/pg.ts) bound to this suite's resolved DataSource.
+  const withRollback = (fn: (q: any) => Promise<void>) => withRollbackOn(ds, fn);
 
   // ---- Structure: tables, enum types, seed, indexes -------------------------------
 

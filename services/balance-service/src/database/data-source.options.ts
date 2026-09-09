@@ -6,8 +6,15 @@ import { Account } from './entities/account.entity';
 import { ExternalPayee } from './entities/external-payee.entity';
 import { Transaction } from './entities/transaction.entity';
 import { LedgerEntry } from './entities/ledger-entry.entity';
+import { Hold } from './entities/hold.entity';
+import { UserLimits } from './entities/user-limits.entity';
+import { OutboxEvent } from './entities/outbox-event.entity';
+import { AuditLog } from './entities/audit-log.entity';
+import { ApprovalRequest } from './entities/approval-request.entity';
+import { IdempotencyKey } from './entities/idempotency-key.entity';
 import { CreateAppMetadata1725000000000 } from './migrations/1725000000000-CreateAppMetadata';
 import { CreateBalanceCore1788825600000 } from './migrations/1788825600000-CreateBalanceCore';
+import { CreateBalanceSatellites1788912000000 } from './migrations/1788912000000-CreateBalanceSatellites';
 
 /**
  * Single source of truth for the TypeORM DataSource options, shared by the Nest
@@ -24,8 +31,25 @@ export function buildDataSourceOptions(config: AppConfig): DataSourceOptions {
   return {
     type: 'postgres',
     url: config.postgres.dsn,
-    entities: [AppMetadata, Currency, Account, ExternalPayee, Transaction, LedgerEntry],
-    migrations: [CreateAppMetadata1725000000000, CreateBalanceCore1788825600000],
+    entities: [
+      AppMetadata,
+      Currency,
+      Account,
+      ExternalPayee,
+      Transaction,
+      LedgerEntry,
+      Hold,
+      UserLimits,
+      OutboxEvent,
+      AuditLog,
+      ApprovalRequest,
+      IdempotencyKey,
+    ],
+    migrations: [
+      CreateAppMetadata1725000000000,
+      CreateBalanceCore1788825600000,
+      CreateBalanceSatellites1788912000000,
+    ],
     migrationsRun: true,
     synchronize: false,
     logging: config.nodeEnv === 'development' ? ['error', 'warn', 'migration'] : ['error'],

@@ -1,19 +1,22 @@
-# Balance Service — Persistence layer (spec 04, step 1: the money spine)
+# Balance Service — Persistence layer (spec 04)
 
-This document describes the **first slice** of the balance service's Postgres schema:
-the FK-self-contained **money spine**. The design of record is
+This document describes the balance service's Postgres schema. The design of record is
 [`specs/DATA-MODEL.md`](../../../specs/DATA-MODEL.md) (Part 1) +
 [`specs/balance-schema.yaml`](../../../specs/balance-schema.yaml); this page records
 **what was built and the mapping decisions**, so a reader/reviewer does not have to
-reverse-engineer them from the migration.
+reverse-engineer them from the migrations.
 
 Schema changes are **migration-only** (`synchronize: false`, `migrationsRun: true` —
 see [foundation docs](./README.md#migrations-on-boot)). Entities and migrations are
 referenced **by class** in `src/database/data-source.options.ts`, never by glob.
 
-## What this step includes (and what it defers)
+## Tables & migrations
 
-**Included** — five tables + the native enum types they use:
+The schema is built in two ordered migrations, each self-contained:
+
+**Step 1 — `CreateBalanceCore1788825600000`** (`…/migrations/1788825600000-CreateBalanceCore.ts`)
+— the FK-self-contained **money spine**. Creates the enum types and tables in FK
+dependency order and seeds MXN.
 
 | Table | Role |
 |---|---|
@@ -23,13 +26,22 @@ referenced **by class** in `src/database/data-source.options.ts`, never by glob.
 | `transaction` | Header grouping the balancing ledger legs of one movement. |
 | `ledger_entry` | Append-only double-entry ledger — the source of truth for money movement. |
 
-**Deferred to step 2** (not in this migration): `hold`, `user_limits`, `outbox_event`,
-`audit_log`, `approval_request`, `idempotency_key`.
+**Step 2 — `CreateBalanceSatellites1788912000000`** (`…/migrations/1788912000000-CreateBalanceSatellites.ts`)
+— the six **satellites** that hang off the spine. Every FK points to a Step-1 table
+(`account`, `transaction`, `currency`) or to nothing (`audit_log`), so the six are
+created in any internal order.
 
-Migration: `CreateBalanceCore1788825600000`
-(`src/database/migrations/1788825600000-CreateBalanceCore.ts`). It creates the enum
-types and tables in FK dependency order and seeds MXN; `down()` drops the tables in
-reverse order and removes the enum types.
+| Table | Role |
+|---|---|
+| `hold` | Reservation ledger for in-flight external outbound funds; only PLACED counts toward `account.held`. |
+| `user_limits` | Global baseline + per-customer override amount caps (per-tx, daily, monthly). |
+| `outbox_event` | Transactional outbox; row `id` IS the analytics `event_id`. |
+| `audit_log` | Immutable log of privileged `/admin` actions (identity PK). |
+| `approval_request` | Maker-checker four-eyes for balance-affecting admin ops. |
+| `idempotency_key` | At-most-once replay safety; composite PK `(owner_id, key)`. |
+
+Each migration's `down()` drops its tables (any order for the satellites; reverse FK
+order for the spine) then removes its enum types — a clean inverse.
 
 ## Enumerations — native Postgres enum types
 
@@ -46,15 +58,18 @@ truth — TypeORM never creates it (synchronize is off).
 | `transaction_type` | `internal`, `external_outbound`, `external_inbound` | `transaction.type` |
 | `transaction_status` | `PENDING`, `POSTED`, `FAILED`, `REVERSED` | `transaction.status` |
 | `payee_status` | `pending`, `active`, `disabled` | `external_payee.status` (default `pending`) |
-
-The step-2 enums (`hold_status`, `user_limits_scope`, `approval_action`,
-`approval_status`, `idempotency_status`) are intentionally **not** created yet.
+| `hold_status` | `PLACED`, `SETTLED`, `RELEASED`, `EXPIRED` | `hold.status` (default `PLACED`) |
+| `user_limits_scope` | `global`, `customer` | `user_limits.scope` |
+| `approval_action` | `reversal`, `user_limits_change`, `adjustment` | `approval_request.action_type` |
+| `approval_status` | `PENDING`, `APPROVED`, `REJECTED`, `EXECUTED` | `approval_request.status` (default `PENDING`) |
+| `idempotency_status` | `in_progress`, `completed` | `idempotency_key.status` |
 
 ## Money & type mapping decisions
 
 - **Money is `bigint` minor units + a `currency` code — never float.** Every
   money-bearing column (`account.balance`/`held`/`spent_today`/`spent_month`,
-  `transaction.amount`, `ledger_entry.delta`/`balance_after`) is `bigint`.
+  `transaction.amount`, `ledger_entry.delta`/`balance_after`, `hold.amount`,
+  `user_limits.per_transaction_max`/`daily_max`/`monthly_max`) is `bigint`.
 - **bigint → JS `string`.** TypeORM surfaces `bigint` as a JS `string` because a JS
   `number` cannot hold the full int64 range without precision loss. The entity fields
   are therefore typed `string`; **do not** do float/`Number` arithmetic on them (use
@@ -113,11 +128,64 @@ not a migration.
 - `idx_ledger_account_created (account_id, created_at)` — per-account ledger fold +
   reconstruction order.
 
+### Satellites (step 2)
+
+**`hold`** — reservation ledger
+- FKs (NOT NULL): `account_id` → `account.id` (`fk_hold_account`), `transaction_id` →
+  `transaction.id` (`fk_hold_transaction`).
+- `amount bigint NOT NULL`, `chk_hold_amount_positive` (`amount > 0`). `status` defaults
+  `PLACED`; `external_ref` nullable until the rail assigns it.
+- Lifecycle PLACED → SETTLED | RELEASED | EXPIRED (append-only). Only PLACED counts toward
+  `account.held`; `SUM(amount) WHERE status='PLACED'` per account == `account.held`.
+- `idx_hold_account_placed (account_id) WHERE status = 'PLACED'` — a partial index (**not**
+  named in the manifest; added deliberately). Reason: the held-sum reconciliation invariant
+  and every hold operation read the *active* holds of one account; this partial index scopes
+  exactly to that hot set and stays tiny (PLACED holds only).
+
+**`user_limits`** — global baseline + per-customer override
+- `currency` → `currency.code` (`fk_user_limits_currency`, NOT NULL). Caps
+  (`per_transaction_max`, `daily_max`, `monthly_max`) are `bigint`, **nullable = no cap**.
+- `uq_user_limits_scope UNIQUE NULLS NOT DISTINCT (scope, owner_id)` (Postgres 16). The
+  `NULLS NOT DISTINCT` is load-bearing: a plain unique treats NULLs as distinct and would
+  allow **many** `global` rows (owner_id NULL); `NULLS NOT DISTINCT` makes two global rows
+  collide, enforcing the single global row. `currency` is deliberately **not** in the key
+  (matches the manifest). Resolution: customer row wins over global; missing → global.
+- Table name is `user_limits` to avoid the SQL reserved word `LIMIT`.
+
+**`outbox_event`** — transactional outbox
+- `transaction_id` → `transaction.id` (`fk_outbox_transaction`, NOT NULL); `payload jsonb`.
+- `id` IS the `event_id` the analytics consumer dedups on.
+- `idx_outbox_unpublished (created_at) WHERE published_at IS NULL` — partial index for the
+  relay poll (claimed `FOR UPDATE SKIP LOCKED`, stamped `published_at` when published).
+
+**`audit_log`** — immutable admin-action log
+- `id bigint GENERATED ALWAYS AS IDENTITY` PK (append-only order; DB-generated, mapped via
+  `@PrimaryGeneratedColumn`). `actor_id`, `action` NOT NULL; `metadata jsonb` nullable.
+- `(target_type, target_id)` is a **polymorphic** pointer — intentionally **not** an FK.
+- Append-only, **convention-only** — see the note below.
+
+**`approval_request`** — maker-checker four-eyes
+- `target_transaction_id` → `transaction.id` (`fk_approval_target_transaction`, nullable
+  for non-transaction actions). `payload jsonb NOT NULL`; `status` defaults `PENDING`.
+- `chk_approval_four_eyes` (`checker_id IS NULL OR checker_id <> maker_id`) backstops the
+  service-side guarded transition — the DB check can only fire once a checker is set.
+- Only `APPROVED` may transition to `EXECUTED` (enforced in the service).
+
+**`idempotency_key`** — at-most-once replay safety
+- **Composite PK `(owner_id, key)`** (`pk_idempotency_key`) — a key is unique per caller,
+  not globally, so callers can't collide or probe each other. `transaction_id` →
+  `transaction.id` (`fk_idem_transaction`, nullable while `in_progress`).
+- `request_fingerprint` is the server-computed hash of the canonical business tuple.
+- `idx_idem_expires (expires_at)` — the 24h cleanup sweep (Postgres has no row TTL).
+- `idx_idem_fingerprint (owner_id, request_fingerprint, created_at)` — the 60s soft
+  duplicate-suppression lookup (distinct keys, same request).
+
 ## Append-only enforcement is convention-only at this step (by design)
 
-`ledger_entry` (and later `audit_log`) is **append-only** — never `UPDATE`/`DELETE`, a
-reversal appends new rows. **At this step that is enforced by convention only.** There
-is intentionally **no** DB-level trigger and **no** `REVOKE` on the table:
+Both `ledger_entry` (a reversal appends new rows) and `audit_log` (one row per admin
+action) are **append-only** — never `UPDATE`/`DELETE`. **At this step that is enforced by
+convention only.** There is intentionally **no** DB-level trigger and **no** `REVOKE` on
+either table:
 
 - The balance service connects to Postgres as the **schema owner**, so a `REVOKE` against
   that same role would be meaningless (the owner can always regrant / bypass).
@@ -126,5 +194,5 @@ is intentionally **no** DB-level trigger and **no** `REVOKE` on the table:
   approved by the developer — **not an oversight**. A reviewer should not read the
   absent guard as a missing constraint; it is scheduled hardening, tracked separately.
 
-Until then, append-only is upheld by the domain layer funnelling all mutations through
-the single posting operation (spec 04, later steps).
+Until then, append-only is upheld by the domain layer: ledger mutations funnel through
+the single posting operation, and audit rows are only ever inserted (spec 04, later steps).
