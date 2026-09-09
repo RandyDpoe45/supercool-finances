@@ -12,6 +12,7 @@ coordination contract, not from the implementor's code. Each test is designed to
 | `e2e/identity-and-error-model.e2e-spec.ts` | **Gateway identity guard**, **admin role**, **service identity guard**, prefix self-scoping, **mixed-case prefix fails closed** (case-bypass regression), **error DTO** + code vocabulary + correlation id, **5xx genericization / no info leak** | No | `npm run test:e2e` |
 | `e2e/health.e2e-spec.ts` | **`/internal/health`** liveness-vs-readiness body, **503 on readiness failure**, service-token **carve-out** | No | `npm run test:e2e` |
 | `integration/health-and-migration.integration.spec.ts` | Real DB readiness UP + **sample migration ran on boot** in `balance` | **Yes** (honest-SKIP) | `npm test` |
+| `integration/schema-constraints.integration.spec.ts` | Spec 04 **Step-1 schema is DB-enforced**: 5 tables + 5 native enum types exist (with exact labels); **MXN seeded @ scale 2**; FK enforcement (bad currency / bad tx / bad account); native-enum rejection; **CHECK held>=0** (INSERT+UPDATE) with **no blanket balance>=0** (negative clearing balance allowed); **spent_today_date/spent_month_date NOT NULL, no default** (23502 when omitted — decision #5); partial **uq_account_system_key**; **uq_payee** triple; column defaults (account balance/held/status/spent_*, payee status=pending, `ledger_entry.created_at` from clock); the named indexes exist with their partial predicates | **Yes** (honest-SKIP) | `npm test` |
 
 Discovery is already wired by the scaffold: `jest.config.ts` matches
 `tests/**/*.spec.ts` (unit + the integration spec, which self-skips) and
@@ -67,6 +68,16 @@ edit and it throws an actionable error naming what is missing. The seam it wires
   tracking table with >=1 executed row + >=1 non-tracking application table) rather
   than hard-coding `app_metadata`, so it proves the DoD without coupling to the
   sample table's name. Pass `SAMPLE_MIGRATION_TABLE` to pin the exact name.
+- **`schema-constraints` proves only DB-enforced invariants.** Domain invariants the
+  schema does not (and should not) enforce are deferred to the domain-logic steps
+  that own them, not asserted here: `SUM(ledger_entry.delta) = 0` per `transaction_id`
+  (double-entry), `balance_after = balance_before + delta` (the posting fold),
+  `sum(ledger delta) = account.balance`, `sum(active holds) = account.held`, the
+  overdraft rule (`available >= 0` on customer debits), and the fixed-window counter
+  resets. Those are `postTransaction`/reconciliation behaviours (spec 04 DoD), tested
+  where that logic lands. This suite asserts the schema is a correct *foundation* for
+  them (tables, enums, FKs, the `held >= 0` and non-blanket-`balance` checks, the
+  uniqueness/defaults/indexes the manifest specifies).
 
 ## Escalations / assumptions (confirm with the developer)
 

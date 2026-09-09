@@ -3,8 +3,10 @@
 The shared NestJS skeleton the money domain (spec 04) is built on. This document
 describes **only the foundation**: config + DSN composition, the DI/interface
 pattern, the two identity guards, prefix routing, the error model, migrations on
-boot, and the supply-chain posture. The ledger/transfers/OTP/relay domain is **not**
-here — it arrives in [spec 04](../../../specs/04-balance-service.md).
+boot, and the supply-chain posture. The ledger/transfers/OTP/relay domain arrives in
+[spec 04](../../../specs/04-balance-service.md); its **persistence layer** (the
+Postgres schema — tables, enum types, constraints, indexes) is documented separately
+in [`persistence.md`](./persistence.md).
 
 This service is a **self-contained component** ([ADR-16](../../../docs/DECISIONS.md#adr-16--self-contained-components-no-shared-code)):
 no cross-folder imports, no shared code. It could be extracted to its own repo.
@@ -81,7 +83,10 @@ same shape.
   the same list works under ts-node (dev) and compiled JS (prod).
 - The sample migration `CreateAppMetadata1725000000000` creates `app_metadata` and
   seeds a `schema_version` row — just enough to prove the pipeline runs against the
-  `balance` DB. No domain tables (spec 04).
+  `balance` DB.
+- The domain schema starts with `CreateBalanceCore1788825600000` (the spec-04 money
+  spine: `currency`, `account`, `external_payee`, `transaction`, `ledger_entry` + their
+  native enum types) — see [`persistence.md`](./persistence.md).
 - `database/data-source.ts` is a **CLI-only** entry (`migration:generate/run/revert`
   scripts). It has an import-time side effect and must never be imported by the app
   module graph.
