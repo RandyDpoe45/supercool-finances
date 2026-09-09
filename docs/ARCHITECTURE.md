@@ -295,8 +295,8 @@ is auditable.
   double-entry movement, failure/expiry releases it. `Hold` rows carry an external
   reference for later settlement/reconciliation against the rail
   ([ADR-14](DECISIONS.md#adr-14--holds--settlement)).
-- **Limits:** configurable per-transaction, daily/monthly caps, and **velocity**
-  checks. New external payees have a **cooling-off period** before they can
+- **Limits:** configurable per-transaction and daily/monthly **amount** caps (fixed
+  calendar windows). New external payees have a **cooling-off period** before they can
   receive money.
 - **Reconciliation job:** periodically asserts `sum(ledger) == balances` and that
   internal accounts net to zero.

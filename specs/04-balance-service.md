@@ -50,7 +50,7 @@ whole prompt is about — correctness here is the deliverable.
     **and** the period counters, the funds check (against `available = balance −
     held`), the ledger/hold append, the balance/held update, and the limit-counter
     update all happen under that one lock — covering both the
-    single-row overdraft invariant and the multi-row limit/velocity invariants
+    single-row overdraft invariant and the multi-row limit invariants
     without SERIALIZABLE. Retry only on the rare deadlock (`40P01`). See
     [ADR-13](../docs/DECISIONS.md#adr-13--concurrency--balance-projection).
   - **Lifecycle:** `PENDING → POSTED → FAILED / REVERSED`; reversals are
@@ -69,10 +69,10 @@ whole prompt is about — correctness here is the deliverable.
   `LedgerEntry`); **releasing/expiry** returns the funds (hold→`RELEASED`,
   `held−`) with no main-ledger entry. Kept separate from the main ledger, which
   records only money that actually moved.
-- **Limits** — a per-transaction cap plus **fixed calendar-window** daily/monthly
-  caps (amount) and daily/monthly **velocity** caps (tx-count) — **no rolling
-  windows**; checked against the account's fixed-window counters (`spent_*` / `count_*`)
-  under the row lock. Configurable (global baseline + per-customer override).
+- **Limits** — a per-transaction cap plus **fixed calendar-window** daily and monthly
+  **amount** caps — **no rolling windows** and no count-based velocity; checked against
+  the account's fixed-window spend counters (`spent_today` / `spent_month`) under the
+  row lock. Configurable (global baseline + per-customer override).
 - **External payees** — enrollment with a **cooling-off period** before a new payee
   can receive money.
 - **OTP module** (bounded; [ADR-11](../docs/DECISIONS.md#adr-11--service-boundaries--data-ownership))

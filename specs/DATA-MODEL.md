@@ -77,11 +77,9 @@ erDiagram
         bigint balance "materialized posted projection (minor units)"
         bigint held "sum of active holds (minor units)"
         bigint spent_today "amount · fixed day window"
-        bigint count_today "tx-count · fixed day window"
-        date spent_today_date "day-window marker (resets both today counters)"
+        date spent_today_date "day-window marker (resets spent_today)"
         bigint spent_month "amount · fixed month window"
-        bigint count_month "tx-count · fixed month window"
-        date spent_month_date "month-window marker (resets both month counters)"
+        date spent_month_date "month-window marker (resets spent_month)"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -147,8 +145,6 @@ erDiagram
         bigint per_transaction_max
         bigint daily_max "amount cap · fixed day window"
         bigint monthly_max "amount cap · fixed month window"
-        int daily_count_max "tx-count cap · fixed day window"
-        int monthly_count_max "tx-count cap · fixed month window"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -224,11 +220,10 @@ erDiagram
 - `held >= 0`; customer-account debits require `available >= amount` (overdraft
   invariant). Clearing accounts may go negative (net in transit) — **no** blanket
   `balance >= 0` check.
-- **Fixed-window** period counters (calendar day / calendar month, **not** rolling):
-  `spent_today`/`count_today` reset when `spent_today_date <> today`, and
-  `spent_month`/`count_month` reset when `spent_month_date`'s month rolls — all lazily,
-  under the row lock. The date fields are the window markers governing **both** the
-  amount and the tx-count counters.
+- **Fixed-window** spend counters (calendar day / calendar month, **not** rolling):
+  `spent_today` resets when `spent_today_date <> today`, and `spent_month` resets when
+  `spent_month_date`'s month rolls — lazily, under the row lock. The date fields are
+  the window markers.
 - Indexes: `idx_account_owner (owner_id) WHERE kind = 'customer'`; unique
   `uq_account_system_key (system_key) WHERE kind = 'system'`.
 
@@ -278,12 +273,10 @@ erDiagram
 **`user_limits`** — global + per-customer config.
 - Unique `uq_user_limits_scope (scope, owner_id)` (one global row per currency; one per
   customer). Resolution: customer row wins over global; missing → global.
-- **All windows are fixed calendar periods, never rolling:** `daily_max` /
-  `daily_count_max` apply to the current **day**, `monthly_max` / `monthly_count_max`
-  to the current **month** — checked against the account's fixed-window counters
-  (`spent_today`/`count_today`, `spent_month`/`count_month`) under the same row lock.
-  `per_transaction_max` is per-movement. **Velocity is a fixed-window tx-count**
-  (`*_count_max`), not a sliding window.
+- **All windows are fixed calendar periods, never rolling:** `daily_max` applies to
+  the current **day** and `monthly_max` to the current **month** — checked against the
+  account's fixed-window spend counters (`spent_today`, `spent_month`) under the same
+  row lock. `per_transaction_max` is per-movement. (No count-based velocity limit.)
 
 **`outbox_event`** — transactional outbox ([ADR-5](../docs/DECISIONS.md#adr-5--transactional-outbox-postgres--redis-streams-transport)).
 - Written in the **same tx** as the ledger change; `id` is the `event_id` the
@@ -339,10 +332,10 @@ erDiagram
 2. **`ledger_entry.id` is `uuid` (v4).** Ordering for statements/reconstruction is by
    `created_at` (captured at insert with `clock_timestamp()`), per-account monotonic
    under the posting lock. No DB-sequence PK.
-3. **Limits use fixed calendar windows, never rolling.** `daily_*` = the day,
-   `monthly_*` = the month; **velocity is a fixed-window tx-count** (`daily_count_max`
-   / `monthly_count_max`) checked against the account's `count_today` / `count_month`
-   counters. The rolling `(max_count, window_seconds)` model is dropped.
+3. **Limits are amount caps over fixed calendar windows.** `per_transaction_max`,
+   `daily_max` (the day) and `monthly_max` (the month) — checked against the account's
+   `spent_today` / `spent_month` counters. No rolling windows and **no count-based
+   velocity** limit.
 4. **`transaction` keeps the denormalized debit/credit header FKs** for authz/query
    speed; the ledger stays authoritative.
 5. **Posting is a reducer, atomic, balance-then-ledger.** Under the account lock:

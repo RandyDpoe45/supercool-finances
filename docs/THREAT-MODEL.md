@@ -29,7 +29,7 @@ the threats and their mitigations auditable. Scoped to the design in
 | **Repudiation** | User or admin denies making a transaction/change. | Immutable audit log; maker-checker on admin money ops; transaction OTP ties an action to a step-up. (ADR-8) |
 | **Information disclosure** | Resource enumeration via id probing. | `404` (not `403`) for non-owned resources. (ADR-3) |
 | **Information disclosure** | Secrets in code/logs. | Env/Docker secrets (Vault in prod); no secrets in logs; correlation ids, not PII, in traces. |
-| **Denial of service** | Credential stuffing / transfer flooding / bot abuse. | Rate limiting at both gateways (tighter on auth + money); attempt lockout on OTP; captcha stub on client; velocity limits in the domain. |
+| **Denial of service** | Credential stuffing / transfer flooding / bot abuse. | Rate limiting at both gateways (tighter on auth + money); attempt lockout on OTP; captcha stub on client; daily/monthly amount limits in the domain. |
 | **Denial of service** | Admin plane exposed to public attackers. | Physically separate internal gateway on a non-public network. (ADR-1) |
 | **Elevation of privilege** | Customer token reaching admin endpoints. | Route allowlist + role/scope checks per gateway; admin gateway rejects non-admin tokens. (ADR-1, ADR-2) |
 | **Elevation of privilege** | Service-to-service endpoints (`/internal`) reached from outside. | No gateway routes `/internal` (prefix-scoped, default-deny allowlists); services additionally require service identity on `/internal`, never a user JWT. (ADR-12) |

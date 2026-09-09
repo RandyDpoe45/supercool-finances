@@ -318,7 +318,7 @@ Concurrency uses **READ COMMITTED + `SELECT ... FOR UPDATE`** on the affected
 account row(s), locked in a **canonical order (by account id)** to avoid
 deadlocks. Because the funds check, ledger append, balance update, and
 limit-counter update all occur under that one row lock, the single-row overdraft
-invariant *and* the multi-row limit/velocity invariants hold **without
+invariant *and* the multi-row limit invariants hold **without
 SERIALIZABLE**. Retry only on the rare deadlock (`40P01`).
 
 **Why.**

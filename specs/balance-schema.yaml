@@ -46,7 +46,7 @@ Currency:
     limits: "UserLimits — limit rows denominated in this currency."
 
 Account:
-  description: "A balance-bearing account. Either a customer account (multiple per customer) or an internal system account used as per-rail clearing. Carries the materialized posted `balance`, the materialized `held` total, and per-period spend + transaction-count counters (fixed calendar day/month windows) — all locked and updated in one DB transaction by the posting operation. Available balance is derived (balance - held), never stored. Table: account."
+  description: "A balance-bearing account. Either a customer account (multiple per customer) or an internal system account used as per-rail clearing. Carries the materialized posted `balance`, the materialized `held` total, and per-period fixed-window spend counters (calendar day/month) — all locked and updated in one DB transaction by the posting operation. Available balance is derived (balance - held), never stored. Table: account."
   attributes:
     id:
       type: uuid
@@ -75,21 +75,15 @@ Account:
     spent_today:
       type: bigint
       description: "Fixed-window (calendar-day) spend counter, minor units, for the daily amount limit. NOT NULL, default 0. Reset under the row lock when spent_today_date rolls to a new day."
-    count_today:
-      type: bigint
-      description: "Fixed-window (calendar-day) transaction-count counter, for the daily velocity (count) limit. NOT NULL, default 0. Reset with spent_today (same day marker)."
     spent_today_date:
       type: date
-      description: "The day the *today* counters refer to. NOT NULL. Fixed-window marker: when it differs from today at debit time, BOTH spent_today and count_today reset."
+      description: "The day spent_today refers to. NOT NULL. Fixed-window marker: when it differs from today at debit time, spent_today resets."
     spent_month:
       type: bigint
       description: "Fixed-window (calendar-month) spend counter, minor units, for the monthly amount limit. NOT NULL, default 0. Reset when spent_month_date's month rolls."
-    count_month:
-      type: bigint
-      description: "Fixed-window (calendar-month) transaction-count counter, for the monthly velocity (count) limit. NOT NULL, default 0. Reset with spent_month (same month marker)."
     spent_month_date:
       type: date
-      description: "First-of-month the *month* counters refer to. NOT NULL. Fixed-window marker resetting BOTH spent_month and count_month."
+      description: "First-of-month spent_month refers to. NOT NULL. Fixed-window marker resetting spent_month."
     created_at:
       type: timestamptz
       description: "Row creation time. NOT NULL, default now()."
@@ -259,7 +253,7 @@ ExternalPayee:
     transactions: "Transaction — external outbound transactions targeting this payee."
 
 UserLimits:
-  description: "A configurable set of amount caps and fixed-window transaction-count (velocity) checks applied to transfers. All windows are FIXED calendar periods (day / month), never rolling. Global baseline + per-customer override (customer wins). Table: user_limits (also sidesteps the SQL reserved word LIMIT)."
+  description: "A configurable set of amount caps applied to transfers: a per-transaction cap plus fixed-window daily and monthly amount caps. All windows are FIXED calendar periods (day / month), never rolling; no count-based velocity limit. Global baseline + per-customer override (customer wins). Table: user_limits (also sidesteps the SQL reserved word LIMIT)."
   attributes:
     id:
       type: uuid
@@ -282,12 +276,6 @@ UserLimits:
     monthly_max:
       type: bigint
       description: "Max cumulative spend in the CURRENT CALENDAR MONTH (fixed window, not rolling), minor units. Checked against account.spent_month. Nullable (NULL = no cap)."
-    daily_count_max:
-      type: integer
-      description: "Velocity: max number of transfers in the CURRENT CALENDAR DAY (fixed window). Checked against account.count_today. Nullable (NULL = no cap)."
-    monthly_count_max:
-      type: integer
-      description: "Velocity: max number of transfers in the CURRENT CALENDAR MONTH (fixed window). Checked against account.count_month. Nullable (NULL = no cap)."
     created_at:
       type: timestamptz
       description: "NOT NULL, default now()."
