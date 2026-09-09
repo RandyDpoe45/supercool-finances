@@ -16,10 +16,11 @@ with the first write path; this slice uses standard Nest exceptions only.
 | File | Role |
 |---|---|
 | `accounts.module.ts` | `imports: [PersistenceModule]`; declares the controller, provides the service. |
-| `accounts.controller.ts` | `@Controller('api')` — the two read routes; delegates to the service. |
-| `accounts.service.ts` | Owner-scoped reads + pure entity→DTO mappers + `STATEMENT_PAGE_LIMIT`. |
-| `dto/account.dto.ts` | `AccountDto` — customer view of an account. |
-| `dto/statement-entry.dto.ts` | `StatementEntryDto` — one ledger leg of a statement. |
+| `accounts.controller.ts` | `@Controller('api')` — the two read routes; calls the service (entities) then serializes to DTOs. |
+| `accounts.service.ts` | Owner-scoped reads (returns **entities**) + `assertOwnerScope` + `STATEMENT_PAGE_LIMIT`. |
+| `accounts.serializer.ts` | Pure explicit-whitelist serializers `serializeAccount` / `serializeStatementEntry` (entity→DTO). |
+| `dto/account.dto.ts` | `AccountDto` — customer view of an account (the wire contract). |
+| `dto/statement-entry.dto.ts` | `StatementEntryDto` — one ledger leg of a statement (the wire contract). |
 
 `PersistenceModule` was merged unwired (no consumer). Importing it in `AccountsModule`,
 and adding `AccountsModule` to `AppModule.imports`, is **what finally wires it into the
@@ -42,7 +43,8 @@ Lists **only the caller's own** accounts (`owner_id = userId`). The repo's
 - **200** → `{ accounts: AccountDto[] }`
 - `AccountDto`: `{ id, currency, status, kind, balance, held, available }` — all strings.
   - Path: `AccountsController.listAccounts` → `AccountsService.listOwnedAccounts(userId)`
-    → `IAccountRepository.findByOwner(userId)` → `toAccountDto`.
+    (returns `Account[]`) → `IAccountRepository.findByOwner(userId)`; the controller maps
+    each entity through `serializeAccount`.
 
 ### `GET /api/accounts/:id/transactions`
 
@@ -56,9 +58,10 @@ The per-account statement (that account's ledger legs), **newest-first, bounded*
 - `StatementEntryDto`: `{ id, transactionId, delta, balanceAfter, currency, createdAt }`
   (`createdAt` is an ISO-8601 UTC string).
   - Path: `AccountsController.getAccountTransactions` →
-    `AccountsService.getAccountStatement(id, userId)` →
+    `AccountsService.getAccountStatement(id, userId)` (returns `{ account, entries }`) →
     `IAccountRepository.findByIdAndOwner(id, userId)` (ownership check) →
-    `ILedgerEntryRepository.findByAccount(id, STATEMENT_PAGE_LIMIT)` → `toStatementEntryDto`.
+    `ILedgerEntryRepository.findByAccount(id, STATEMENT_PAGE_LIMIT)`; the controller maps
+    each entity through `serializeStatementEntry` and echoes `account.id` as `accountId`.
 
 ## Object-level authorization (anti-IDOR, ADR-3)
 
@@ -79,15 +82,35 @@ depends on, so the anti-IDOR predicate stays with the query it guards and needs 
 `Repository<Entity>` leak into the domain service. The helper remains the sanctioned
 pattern for ad-hoc owner-scoped reads.
 
+## Layering & serialization
+
+The service works in **entities/domain objects**; **DTO serialization is a transport
+concern applied at the controller boundary** (repo-wide convention — see
+[`CLAUDE.md` § Layering & serialization](../../../CLAUDE.md#layering--serialization)):
+
+- `AccountsService` returns `Account` / `LedgerEntry` (and `{ account, entries }`) — it
+  owns the authz (`assertOwnerScope`, ownership check → 404) and the bound, but never the
+  wire shape.
+- `AccountsController` maps each entity through an **explicit-whitelist serializer** in
+  `accounts.serializer.ts` (`serializeAccount`, `serializeStatementEntry`) before
+  responding. The serializers are **pure, plain functions** (no `@Injectable`).
+- The serializers **list output fields explicitly and never spread the entity**, so
+  internal columns (`ownerId`, `systemKey`, `spentToday`/`spentMonth` and their dates,
+  `createdAt`/`updatedAt` on the account, …) can never leak onto the wire. A leaked
+  internal field would be a security defect, so adding a DTO field is a deliberate act.
+- **Derived / presentation fields are computed at serialize time** from shared helpers:
+  `available` via `common/money`, `createdAt` via `Date.toISOString()`.
+
 ## Money & the `available` derivation
 
 - Money is **`bigint` minor units surfaced as JS `string`** (int64 precision — never
   `Number`/float). See [persistence.md](./persistence.md#money--type-mapping-decisions).
 - **Available balance is derived, never stored:** `available = balance − held`.
   `src/common/money/money.ts` `availableBalance(balance, held)` computes it with exact
-  `BigInt` math. It lives in `common/` because it is cross-cutting — the posting
-  operation (later step) reuses it. `available` MAY be negative for system/clearing
-  accounts; customer overdraft is enforced at debit time (later step), not here.
+  `BigInt` math, called at **serialize time** by `serializeAccount`. It lives in `common/`
+  because it is cross-cutting — the posting operation (later step) reuses it. `available`
+  MAY be negative for system/clearing accounts; customer overdraft is enforced at debit
+  time (later step), not here.
 
 ## Bounded reads
 

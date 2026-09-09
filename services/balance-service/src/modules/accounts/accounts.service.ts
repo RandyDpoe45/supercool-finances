@@ -4,7 +4,6 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
-import { availableBalance } from '../../common/money/money';
 import { Account } from '../../database/entities/account.entity';
 import { LedgerEntry } from '../../database/entities/ledger-entry.entity';
 import {
@@ -15,37 +14,10 @@ import {
   ILedgerEntryRepository,
   LEDGER_ENTRY_REPOSITORY,
 } from '../../database/repositories/ledger-entry.repository.interface';
-import { AccountDto } from './dto/account.dto';
-import { StatementEntryDto } from './dto/statement-entry.dto';
 
 /** Upper bound on ledger legs returned by one statement read. The underlying query
  * MUST stay bounded — an account's history is unbounded, so it is never scanned whole. */
 export const STATEMENT_PAGE_LIMIT = 100;
-
-/** Pure entity→DTO map; `available` is derived, never read from storage. */
-export function toAccountDto(account: Account): AccountDto {
-  return {
-    id: account.id,
-    currency: account.currency,
-    status: account.status,
-    kind: account.kind,
-    balance: account.balance,
-    held: account.held,
-    available: availableBalance(account.balance, account.held),
-  };
-}
-
-/** Pure entity→DTO map; `createdAt` is rendered as an ISO-8601 UTC instant. */
-export function toStatementEntryDto(entry: LedgerEntry): StatementEntryDto {
-  return {
-    id: entry.id,
-    transactionId: entry.transactionId,
-    delta: entry.delta,
-    balanceAfter: entry.balanceAfter,
-    currency: entry.currency,
-    createdAt: entry.createdAt.toISOString(),
-  };
-}
 
 /**
  * Fail-closed guard on the owner scope. An empty `ownerId` would let TypeORM drop the
@@ -63,7 +35,8 @@ function assertOwnerScope(ownerId: string): void {
 /**
  * Read-only customer account queries (spec 04 Accounts, first domain slice — no money
  * movement). Every read is owner-scoped: the caller's `userId` comes from the trusted
- * gateway identity, never from the request body/query.
+ * gateway identity, never from the request body/query. The service works in ENTITIES —
+ * DTO serialization is a transport concern applied at the controller boundary.
  */
 @Injectable()
 export class AccountsService {
@@ -73,10 +46,9 @@ export class AccountsService {
   ) {}
 
   /** The caller's own accounts only — `findByOwner` excludes system accounts (NULL owner). */
-  async listOwnedAccounts(ownerId: string): Promise<{ accounts: AccountDto[] }> {
+  async listOwnedAccounts(ownerId: string): Promise<Account[]> {
     assertOwnerScope(ownerId);
-    const rows = await this.accounts.findByOwner(ownerId);
-    return { accounts: rows.map(toAccountDto) };
+    return this.accounts.findByOwner(ownerId);
   }
 
   /**
@@ -88,13 +60,13 @@ export class AccountsService {
   async getAccountStatement(
     accountId: string,
     ownerId: string,
-  ): Promise<{ accountId: string; entries: StatementEntryDto[] }> {
+  ): Promise<{ account: Account; entries: LedgerEntry[] }> {
     assertOwnerScope(ownerId);
     const account = await this.accounts.findByIdAndOwner(accountId, ownerId);
     if (!account) {
       throw new NotFoundException('Account not found');
     }
     const entries = await this.ledger.findByAccount(account.id, STATEMENT_PAGE_LIMIT);
-    return { accountId: account.id, entries: entries.map(toStatementEntryDto) };
+    return { account, entries };
   }
 }

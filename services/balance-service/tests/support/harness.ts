@@ -262,6 +262,78 @@ export function getAvailableBalance(): (balance: string, held: string) => string
   return fn as (balance: string, held: string) => string;
 }
 
+export interface AccountSerializers {
+  /** Entity -> AccountDto: an explicit whitelist to {id,currency,status,kind,balance,held,available}. */
+  serializeAccount: (account: any) => any;
+  /** Entity -> StatementEntryDto: whitelist to {id,transactionId,delta,balanceAfter,currency,createdAt}. */
+  serializeStatementEntry: (entry: any) => any;
+}
+
+/**
+ * The controller-boundary serializers introduced by the Step-1 layering refactor
+ * (services work in entities; controllers serialize to DTOs via explicit whitelists).
+ * `serializeAccount(account) => AccountDto` and `serializeStatementEntry(entry) =>
+ * StatementEntryDto`. Each export is scanned independently with `findExportAcross` across
+ * the plausible locations; if the implementor names/locates them differently, add the
+ * path/export here — this is the single coordination point.
+ */
+export function getAccountSerializers(): AccountSerializers {
+  const candidates = [
+    `${SRC}/modules/accounts/accounts.serializer`,
+    `${SRC}/modules/accounts/account.serializer`,
+    `${SRC}/modules/accounts/serializers`,
+    `${SRC}/modules/accounts/serializer`,
+    `${SRC}/modules/api/accounts.serializer`,
+    `${SRC}/modules/api/serializers`,
+    `${SRC}/common/serializers/account.serializer`,
+  ];
+  const serializeAccount = findExportAcross(candidates, [
+    'serializeAccount',
+    'toAccountDto',
+    'accountToDto',
+  ]);
+  const serializeStatementEntry = findExportAcross(candidates, [
+    'serializeStatementEntry',
+    'toStatementEntryDto',
+    'statementEntryToDto',
+  ]);
+  if (serializeAccount === undefined || serializeStatementEntry === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the account serializers ` +
+        `(serializeAccount / serializeStatementEntry). If the implementor put them ` +
+        `elsewhere, add the path/export to tests/support/harness.ts:getAccountSerializers ` +
+        `— the single coordination point.`,
+    );
+  }
+  return { serializeAccount, serializeStatementEntry };
+}
+
+/**
+ * The read-only `AccountsService` class (Step-1 domain slice). Returned so a pure unit
+ * test can `new AccountsService(mockAccountRepo, mockLedgerRepo)` and drive its
+ * owner-scope guard directly (positional constructor args — DI decorators are inert under
+ * plain instantiation). Scanned with `findExportAcross`; if the implementor moves/renames
+ * it, add the path/export here — the single coordination point.
+ */
+export function getAccountsService(): any {
+  const cls = findExportAcross(
+    [
+      `${SRC}/modules/accounts/accounts.service`,
+      `${SRC}/modules/accounts/account.service`,
+      `${SRC}/modules/api/accounts.service`,
+    ],
+    ['AccountsService'],
+  );
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve AccountsService. If the implementor moved/renamed ` +
+        `it, add the path/export to tests/support/harness.ts:getAccountsService — the ` +
+        `single coordination point.`,
+    );
+  }
+  return cls;
+}
+
 /**
  * Best-effort TCP reachability probe for the honest-SKIP integration gate. Resolves
  * true iff a TCP connection to host:port opens within `timeoutMs`. Never throws.
