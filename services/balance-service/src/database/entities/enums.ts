@@ -33,3 +33,33 @@ export enum PayeeStatus {
   Active = 'active',
   Disabled = 'disabled',
 }
+
+export enum HoldStatus {
+  Placed = 'PLACED',
+  Settled = 'SETTLED',
+  Released = 'RELEASED',
+  Expired = 'EXPIRED',
+}
+
+export enum UserLimitsScope {
+  Global = 'global',
+  Customer = 'customer',
+}
+
+export enum ApprovalAction {
+  Reversal = 'reversal',
+  UserLimitsChange = 'user_limits_change',
+  Adjustment = 'adjustment',
+}
+
+export enum ApprovalStatus {
+  Pending = 'PENDING',
+  Approved = 'APPROVED',
+  Rejected = 'REJECTED',
+  Executed = 'EXECUTED',
+}
+
+export enum IdempotencyStatus {
+  InProgress = 'in_progress',
+  Completed = 'completed',
+}

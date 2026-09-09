@@ -13,9 +13,10 @@ coordination contract, not from the implementor's code. Each test is designed to
 | `e2e/health.e2e-spec.ts` | **`/internal/health`** liveness-vs-readiness body, **503 on readiness failure**, service-token **carve-out** | No | `npm run test:e2e` |
 | `integration/health-and-migration.integration.spec.ts` | Real DB readiness UP + **sample migration ran on boot** in `balance` | **Yes** (honest-SKIP) | `npm test` |
 | `integration/schema-constraints.integration.spec.ts` | Spec 04 **Step-1 schema is DB-enforced**: 5 tables + 5 native enum types exist (with exact labels); **MXN seeded @ scale 2**; FK enforcement (bad currency / bad tx / bad account); native-enum rejection; **CHECK held>=0** (INSERT+UPDATE) with **no blanket balance>=0** (negative clearing balance allowed); **spent_today_date/spent_month_date NOT NULL, no default** (23502 when omitted — decision #5); partial **uq_account_system_key**; **uq_payee** triple; column defaults (account balance/held/status/spent_*, payee status=pending, `ledger_entry.created_at` from clock); the named indexes exist with their partial predicates | **Yes** (honest-SKIP) | `npm test` |
+| `integration/satellites-schema.integration.spec.ts` | Spec 04 **Step-2 schema is DB-enforced**: 6 tables (`hold`, `user_limits`, `outbox_event`, `audit_log`, `approval_request`, `idempotency_key`) + 5 native enum types (exact labels); native-enum rejection (one column per enum); **hold** `CHECK amount>0`, account/transaction FKs, `status` default `PLACED`; **user_limits** `UNIQUE(scope,owner_id)` **NULLS NOT DISTINCT** (two global rows rejected; global+customer coexist; two customers same owner rejected); **outbox_event** partial `idx_outbox_unpublished ... WHERE published_at IS NULL`, `published_at` default NULL, transaction FK; **audit_log** bigint IDENTITY auto-increments + `actor_id`/`action` NOT NULL; **approval_request** four-eyes `CHECK(checker_id<>maker_id)` + `status` default `PENDING`; **idempotency_key** composite PK `(owner_id,key)` (dup rejected, same key/different owner allowed) + `idx_idem_expires` and the `(owner_id,request_fingerprint,created_at)` lookup index; the shipped partial `idx_hold_account_placed` (`account_id` WHERE status `PLACED`) | **Yes** (honest-SKIP) | `npm test` |
 
 Discovery is already wired by the scaffold: `jest.config.ts` matches
-`tests/**/*.spec.ts` (unit + the integration spec, which self-skips) and
+`tests/**/*.spec.ts` (unit + the integration specs, which self-skip) and
 `jest-e2e.config.ts` matches `tests/**/*.e2e-spec.ts`.
 
 ## Honest-SKIP (integration)
@@ -44,6 +45,17 @@ edit and it throws an actionable error naming what is missing. The seam it wires
 `parseEnv` (config), `GatewayIdentityGuard`, `ServiceIdentityGuard`,
 `AllExceptionsFilter`, the `APP_CONFIG` token, `HealthController` +
 `HEALTH_REPOSITORY`, `InternalController`, `requestIdMiddleware`, and `AppModule`.
+
+## Shared DB helpers: `support/pg.ts`
+
+The schema integration specs (`schema-constraints` Step 1, `satellites-schema`
+Step 2) share their raw-SQL plumbing from `support/pg.ts` — **not** implementor
+source, just test plumbing: the `PG` SQLSTATE vocabulary, `withRollback(ds, fn)`
+(always-rolled-back QueryRunner tx), `insertRow(q, table, row)` (parameterised
+`INSERT ... RETURNING *`), `expectPgError(promise, sqlstate)`, `seedTestCurrency`,
+and the `insertAccount` / `insertTransaction` FK-parent builders. Each spec binds a
+one-line `withRollback = (fn) => withRollbackOn(ds, fn)` to its resolved DataSource.
+Adding a Step-3 schema spec should reuse this module rather than re-copying helpers.
 
 ## Design notes / where fidelity comes from
 
@@ -78,6 +90,19 @@ edit and it throws an actionable error naming what is missing. The seam it wires
   where that logic lands. This suite asserts the schema is a correct *foundation* for
   them (tables, enums, FKs, the `held >= 0` and non-blanket-`balance` checks, the
   uniqueness/defaults/indexes the manifest specifies).
+- **`satellites-schema` (Step 2) likewise proves only DB-enforced invariants.**
+  Deferred to domain-logic tests (the DB cannot/should not enforce them): the hold
+  reconciliation `SUM(amount WHERE status='PLACED') per account == account.held`, the
+  `PLACED → SETTLED|RELEASED|EXPIRED` transition rules, the 24h `expires_at =
+  created_at + 24h` math and the retention sweep, the idempotency
+  fingerprint/replay/60s soft-duplicate logic, the maker-checker *transition* guard
+  (the DB only holds the `checker_id <> maker_id` CHECK; "a different admin must
+  approve" is enforced in the service), and the `audit_log` append-only guarantee
+  (**convention-only by decision — no trigger, no REVOKE, deferred hardening**, same
+  posture as `ledger_entry`; so no UPDATE/DELETE-blocking guard is asserted here). The
+  composite-PK, enum, FK,
+  `CHECK amount>0`, `NULLS NOT DISTINCT`, default, and index assertions prove the
+  schema foundation those behaviours build on.
 
 ## Escalations / assumptions (confirm with the developer)
 
@@ -90,3 +115,20 @@ edit and it throws an actionable error naming what is missing. The seam it wires
    responses would carry `requestId: 'unknown'` — it does not assert the correlation
    id, only health + migration. If correlation must hold under `AppModule` alone,
    move the middleware into a `NestModule.configure()` and escalate.
+3. **Step-2 index names.** `idx_outbox_unpublished` and `idx_idem_expires` are fixed
+   by DATA-MODEL and asserted **by name**. The soft-duplicate lookup index over
+   `(owner_id, request_fingerprint, created_at)` is **not named** in the manifest, so
+   it is asserted **by content** (an index on `idempotency_key` covering those three
+   columns) rather than pinning a name like `idx_idem_fingerprint` — this avoids a
+   false failure on a naming choice the spec does not fix. If the team wants that name
+   pinned, say so and it will be asserted by name.
+4. **`user_limits` uniqueness requires Postgres 15+ `NULLS NOT DISTINCT`.** The
+   "reject a second global row" test depends on it (two NULL `owner_id`s must collide).
+   Storage/compose runs Postgres 16, so this holds; if the target ever downgrades below
+   15, the constraint needs a different encoding (e.g. a partial unique index) and this
+   test is the tripwire.
+5. **`idx_hold_account_placed` is guarded by name though it is not manifest-mandated.**
+   It is a shipped index backing the hold reconciliation query (`SUM(amount) WHERE
+   status='PLACED' per account`); the by-name + partial-predicate assertion catches a
+   regression that drops or unscopes it. If the index is renamed or intentionally
+   removed, update/remove this guard.
