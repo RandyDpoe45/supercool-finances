@@ -383,12 +383,77 @@ export function getPostingService(): any {
   return cls;
 }
 
+/**
+ * The generic idempotency wrapper CLASS — `execute(params, operation)` applies a money
+ * operation at most once (replay returns the original result; a reused key with a different
+ * fingerprint rejects; a soft-duplicate within 60s rejects unless confirmed). Returned as a
+ * class so the DB-backed suite can `app.get(IdempotencyService, { strict: false })` and drive
+ * the REAL DI'd instance against Postgres (the claim + operation commit together in one tx).
+ * Scanned with `findExportAcross`; if the implementor names/places it differently, add the
+ * path/export HERE — the single coordination point.
+ */
+export function getIdempotencyService(): any {
+  const cls = findExportAcross(
+    [
+      `${SRC}/modules/idempotency/idempotency.service`,
+      `${SRC}/modules/transfers/idempotency.service`,
+      `${SRC}/modules/posting/idempotency.service`,
+      `${SRC}/common/idempotency/idempotency.service`,
+      `${SRC}/modules/idempotency`,
+      `${SRC}/common/idempotency`,
+      `${SRC}/modules/transfers`,
+    ],
+    ['IdempotencyService'],
+  );
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the IdempotencyService (execute(params, operation)). ` +
+        `If the implementor named/placed it differently, add the path/export to ` +
+        `tests/support/harness.ts:getIdempotencyService — the single coordination point.`,
+    );
+  }
+  return cls;
+}
+
+export interface FingerprintInput {
+  type: string;
+  source: string | null;
+  destination: string | null;
+  amount: string;
+  currency: string;
+}
+
+/**
+ * BEST-EFFORT resolution of a PURE `computeFingerprint(input)` helper (the canonical hash of
+ * `{type, source, destination, amount, currency}` used for soft-duplicate detection). Returns
+ * `undefined` when no such pure export exists — the pure fingerprint unit suite is only
+ * written when this resolves, and fingerprint behaviour is otherwise proven via the
+ * integration soft-duplicate cases. Add the path/export here if the implementor exposes it
+ * under a different name/location.
+ */
+export function getComputeFingerprint(): ((input: FingerprintInput) => string) | undefined {
+  return findExportAcross(
+    [
+      `${SRC}/modules/idempotency/fingerprint`,
+      `${SRC}/modules/idempotency/idempotency.fingerprint`,
+      `${SRC}/modules/idempotency/idempotency.service`,
+      `${SRC}/modules/idempotency`,
+      `${SRC}/common/idempotency/fingerprint`,
+      `${SRC}/modules/transfers/fingerprint`,
+      `${SRC}/common/fingerprint`,
+    ],
+    ['computeFingerprint', 'requestFingerprint', 'fingerprintOf', 'computeRequestFingerprint'],
+  );
+}
+
 export interface ResolvedDomainErrors {
   InsufficientFundsError?: any;
   AccountFrozenError?: any;
   CurrencyMismatchError?: any;
   AccountNotFoundError?: any;
   InvalidPostingCommandError?: any;
+  IdempotencyKeyReuseError?: any;
+  SuspectedDuplicateError?: any;
 }
 
 /**
@@ -406,6 +471,10 @@ export function getDomainErrors(): ResolvedDomainErrors {
     `${SRC}/modules/ledger/domain.errors`,
     `${SRC}/modules/ledger/errors`,
     `${SRC}/modules/posting/posting.errors`,
+    `${SRC}/modules/idempotency/idempotency.errors`,
+    `${SRC}/modules/idempotency/errors`,
+    `${SRC}/common/idempotency/idempotency.errors`,
+    `${SRC}/modules/transfers/idempotency.errors`,
     `${SRC}/modules/transfers/transfers.errors`,
     `${SRC}/modules/transfers/errors`,
     `${SRC}/common/errors/domain.errors`,
@@ -414,6 +483,7 @@ export function getDomainErrors(): ResolvedDomainErrors {
     `${SRC}/domain/errors`,
     `${SRC}/modules/ledger`,
     `${SRC}/modules/posting`,
+    `${SRC}/modules/idempotency`,
     `${SRC}/modules/transfers`,
   ];
   return {
@@ -431,6 +501,17 @@ export function getDomainErrors(): ResolvedDomainErrors {
       'InvalidPostingCommandError',
       'InvalidPostingCommand',
       'InvalidCommandError',
+    ]),
+    IdempotencyKeyReuseError: findExportAcross(candidates, [
+      'IdempotencyKeyReuseError',
+      'IdempotencyKeyReusedError',
+      'IdempotencyKeyReused',
+      'KeyReuseError',
+    ]),
+    SuspectedDuplicateError: findExportAcross(candidates, [
+      'SuspectedDuplicateError',
+      'SuspectedDuplicate',
+      'DuplicateSuspectedError',
     ]),
   };
 }

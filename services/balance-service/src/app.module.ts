@@ -9,6 +9,7 @@ import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { ApiModule } from './modules/api/api.module';
+import { IdempotencyModule } from './modules/idempotency/idempotency.module';
 import { InternalModule } from './modules/internal/internal.module';
 import { PostingModule } from './modules/posting/posting.module';
 
@@ -35,11 +36,12 @@ import { PostingModule } from './modules/posting/posting.module';
     DatabaseModule,
     HealthModule,
     ApiModule,
-    // PostingModule is a SERVICE-ONLY feature module (no controller yet). It is imported here
-    // transitionally so PostingService is resolvable in the graph; it moves under its
-    // consuming surface module once a controller uses it (the transfers `-api` controller,
-    // step 4).
+    // PostingModule and IdempotencyModule are SERVICE-ONLY feature modules (no controller
+    // yet). They are imported here transitionally so their services are resolvable in the
+    // graph; each moves under its consuming surface module once a controller uses it (the
+    // transfers `-api` controller, step 4).
     PostingModule,
+    IdempotencyModule,
     AdminModule,
     InternalModule,
   ],

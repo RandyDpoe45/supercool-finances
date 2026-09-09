@@ -247,7 +247,7 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
 | `OUTBOX_EVENT_REPOSITORY` | `IOutboxEventRepository` | `findById`, `create` |
 | `AUDIT_LOG_REPOSITORY` | `IAuditLogRepository` | `findById`, `create` |
 | `APPROVAL_REQUEST_REPOSITORY` | `IApprovalRequestRepository` | `findById`, `create` |
-| `IDEMPOTENCY_KEY_REPOSITORY` | `IIdempotencyKeyRepository` | `findByOwnerAndKey(ownerId, key)`, `create` |
+| `IDEMPOTENCY_KEY_REPOSITORY` | `IIdempotencyKeyRepository` | `findByOwnerAndKey(ownerId, key)`, `create`, `findByOwnerAndKeyInTx`, `claimInTx` (INSERT … ON CONFLICT DO NOTHING), `markCompletedInTx`, `findRecentByFingerprintInTx` |
 
 - **`create(data)`** persists a new row (`repo.save(repo.create(data))`) and returns it. No
   generic `save`/update primitive is exposed — updates are status transitions the domain
@@ -260,10 +260,12 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
   `findByOwnerAndKey` rather than `findById`. **Caveat:** because that PK is
   **client-supplied**, `create()` (`repo.save(repo.create(data))`) behaves as an **UPSERT** —
   a `create()` for an already-present `(owner_id, key)` silently **UPDATEs** the row instead
-  of raising a `23505` unique violation. Harmless now (no caller; idempotency semantics are
-  deferred to the domain step), but the domain step's **in-progress guard must not rely on
-  `create()` throwing on a duplicate key** — it must use an explicit `INSERT` /
-  `ON CONFLICT` / guarded status transition to detect a concurrent retry.
+  of raising a `23505` unique violation. **Resolved in the domain layer (spec 04 step 3):**
+  the idempotency wrapper claims the key with `claimInTx` — an explicit
+  `INSERT … ON CONFLICT ("owner_id","key") DO NOTHING RETURNING "key"` whose returned-row
+  count is the claim signal (1 = we won, 0 = a concurrent holder). It **never** uses
+  `create()`/`.save()` for the claim, so the upsert can't silently overwrite the holder. See
+  [domain.md](./domain.md#idempotency--soft-duplicate-step-3).
 - **Owner-scoped reads.** `findByOwner` returns a customer's rows as a list (a customer has
   several accounts/payees). The single-resource, per-id anti-IDOR read
   (`WHERE id = :id AND owner_id = :sub` → 404) is now wired by the accounts domain step as a
@@ -276,7 +278,8 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
   the per-account statement (`GET /api/accounts/:id/transactions`) — newest-first
   (`created_at DESC, id DESC`), always bounded by `limit`.
 - **Deferred to the domain step (driven by real callers):** outbox `pollUnpublished`
-  (FOR UPDATE SKIP LOCKED) + `markPublished`; hold PLACED-sum / reconciliation; the
-  idempotency soft-duplicate-window lookup; ledger reconstruction / delta-sum;
-  transaction-by-debit-account history; and all status-transition helpers. These are
-  intentionally absent now to avoid speculative, caller-less query surface.
+  (FOR UPDATE SKIP LOCKED) + `markPublished`; hold PLACED-sum / reconciliation; ledger
+  reconstruction / delta-sum; transaction-by-debit-account history; and the remaining
+  status-transition helpers. These are intentionally absent now to avoid speculative,
+  caller-less query surface. (The idempotency soft-duplicate-window lookup —
+  `findRecentByFingerprintInTx` — landed with spec 04 step 3.)
