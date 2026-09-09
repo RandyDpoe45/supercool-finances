@@ -11,6 +11,7 @@ import { AccountsModule } from './modules/accounts/accounts.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { ApiModule } from './modules/api/api.module';
 import { InternalModule } from './modules/internal/internal.module';
+import { PostingModule } from './modules/posting/posting.module';
 
 /**
  * Root module. The identity guards and the error filter are bound GLOBALLY
@@ -29,6 +30,7 @@ import { InternalModule } from './modules/internal/internal.module';
     HealthModule,
     ApiModule,
     AccountsModule,
+    PostingModule,
     AdminModule,
     InternalModule,
   ],

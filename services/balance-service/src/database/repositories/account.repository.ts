@@ -37,4 +37,13 @@ export class AccountRepository implements IAccountRepository {
       .where('account.id = :id', { id })
       .getOne();
   }
+
+  async updateBalanceInTx(queryRunner: QueryRunner, id: string, newBalance: string): Promise<void> {
+    await queryRunner.manager
+      .createQueryBuilder()
+      .update(Account)
+      .set({ balance: newBalance, updatedAt: () => 'now()' })
+      .where('id = :id', { id })
+      .execute();
+  }
 }

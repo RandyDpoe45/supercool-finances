@@ -335,6 +335,107 @@ export function getAccountsService(): any {
 }
 
 /**
+ * The balance-mutating reducer CLASS — the single `postTransaction(command)` operation
+ * (spec 04 Ledger/Transfers, ADR-13). Returned as a class so the DB-backed integration
+ * suite can `app.get(PostingService, { strict: false })` and drive the REAL DI'd instance
+ * (real repositories + DataSource) against Postgres — the only place the concurrency /
+ * overdraft / no-money-created-or-lost invariants are actually provable. Scanned with
+ * `findExportAcross` across the plausible domain-layer locations and export names; if the
+ * implementor names/places it differently, add the path/export HERE — the single
+ * coordination point (see tests/README.md "Seam contract").
+ */
+export function getPostingService(): any {
+  const cls = findExportAcross(
+    [
+      `${SRC}/modules/ledger/posting.service`,
+      `${SRC}/modules/ledger/ledger.service`,
+      `${SRC}/modules/posting/posting.service`,
+      `${SRC}/modules/transactions/posting.service`,
+      `${SRC}/modules/transactions/transactions.service`,
+      `${SRC}/modules/transfers/posting.service`,
+      `${SRC}/modules/transfers/transfers.service`,
+      `${SRC}/modules/transfers/transfer.service`,
+      `${SRC}/modules/ledger/posting/posting.service`,
+      `${SRC}/domain/posting/posting.service`,
+      `${SRC}/modules/ledger`,
+      `${SRC}/modules/posting`,
+      `${SRC}/modules/transactions`,
+      `${SRC}/modules/transfers`,
+    ],
+    [
+      'PostingService',
+      'LedgerService',
+      'LedgerPostingService',
+      'TransactionService',
+      'TransactionsService',
+      'TransfersService',
+      'TransferService',
+    ],
+  );
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the postTransaction reducer service (PostingService / ` +
+        `LedgerService / TransfersService …). If the implementor named/placed it differently, ` +
+        `add the path/export to tests/support/harness.ts:getPostingService — the single ` +
+        `coordination point.`,
+    );
+  }
+  return cls;
+}
+
+export interface ResolvedDomainErrors {
+  InsufficientFundsError?: any;
+  AccountFrozenError?: any;
+  CurrencyMismatchError?: any;
+  AccountNotFoundError?: any;
+  InvalidPostingCommandError?: any;
+}
+
+/**
+ * BEST-EFFORT resolution of the reducer's framework-agnostic domain error classes so a
+ * rejection can be classified by `instanceof`. UNLIKE the other resolvers this one does NOT
+ * throw when a class is absent: the money-safety proofs gate on OBSERVABLE STATE (the tx
+ * rolled back — no ledger/tx/outbox rows, balances unchanged), never on the error type
+ * alone, and the error *kind* is a secondary signal the suite falls back to matching by
+ * `code`/message when a class is not exported here. If the implementor exports these under
+ * the spec-named identifiers, add their module path below and classification becomes exact.
+ */
+export function getDomainErrors(): ResolvedDomainErrors {
+  const candidates = [
+    `${SRC}/modules/ledger/posting.errors`,
+    `${SRC}/modules/ledger/domain.errors`,
+    `${SRC}/modules/ledger/errors`,
+    `${SRC}/modules/posting/posting.errors`,
+    `${SRC}/modules/transfers/transfers.errors`,
+    `${SRC}/modules/transfers/errors`,
+    `${SRC}/common/errors/domain.errors`,
+    `${SRC}/common/errors/domain-errors`,
+    `${SRC}/common/errors/domain.error`,
+    `${SRC}/domain/errors`,
+    `${SRC}/modules/ledger`,
+    `${SRC}/modules/posting`,
+    `${SRC}/modules/transfers`,
+  ];
+  return {
+    InsufficientFundsError: findExportAcross(candidates, [
+      'InsufficientFundsError',
+      'InsufficientFunds',
+    ]),
+    AccountFrozenError: findExportAcross(candidates, ['AccountFrozenError', 'AccountFrozen']),
+    CurrencyMismatchError: findExportAcross(candidates, [
+      'CurrencyMismatchError',
+      'CurrencyMismatch',
+    ]),
+    AccountNotFoundError: findExportAcross(candidates, ['AccountNotFoundError', 'AccountNotFound']),
+    InvalidPostingCommandError: findExportAcross(candidates, [
+      'InvalidPostingCommandError',
+      'InvalidPostingCommand',
+      'InvalidCommandError',
+    ]),
+  };
+}
+
+/**
  * Best-effort TCP reachability probe for the honest-SKIP integration gate. Resolves
  * true iff a TCP connection to host:port opens within `timeoutMs`. Never throws.
  */
