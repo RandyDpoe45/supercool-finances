@@ -96,8 +96,9 @@ whole prompt is about — correctness here is the deliverable.
   the active code is **consumed** or its **TTL expires**. **Only user-initiated
   transfers are OTP-gated** — internal and external outbound; **external inbound is
   not** (it arrives already approved by the originating external institution, not ours
-  to authorize). Confirm verifies the user's active code and posts their pending
-  transfer; expose `GET /api/pending-authorizations` for the OTP app.
+  to authorize). A dedicated `POST /api/otp` **generate** endpoint mints the code (the code is
+  **not** auto-minted at transfer initiation); confirm verifies the user's active code and posts
+  their pending transfer; expose `GET /api/pending-authorizations` for the OTP app.
 - **Outbox + relay worker** — write the `OutboxEvent` in the **same DB
   transaction** as the ledger change; a background worker polls with
   `SELECT ... FOR UPDATE SKIP LOCKED`, `XADD`s to `events:transactions`, then marks
@@ -115,7 +116,10 @@ whole prompt is about — correctness here is the deliverable.
 ## Endpoints (representative)
 
 - `/api`: `GET /accounts`, `GET /accounts/:id/transactions`, `POST /transfers`,
-  `POST /transfers/:id/confirm`, `POST /payees`, `GET /pending-authorizations`.
+  `POST /transfers/:id/confirm`, `POST /otp`, `POST /payees`, `GET /pending-authorizations`.
+  `POST /otp` mints the caller's user-scoped one-time code (the mocked out-of-band delivery to
+  the OTP app) — a **dedicated generate endpoint**, singleton-gated; OTP is **not** auto-minted
+  at transfer initiation.
 - `/admin`: `POST /accounts/:id/freeze`, `PUT /limits`, `POST /transfers/:id/reverse`,
   `POST /approvals/:id/approve`, `GET /transactions`, `POST /external/inbound`.
 - `/internal`: `POST /rails/settlement-callback`, `GET /health`.

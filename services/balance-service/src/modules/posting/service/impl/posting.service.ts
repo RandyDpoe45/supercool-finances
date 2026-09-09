@@ -30,6 +30,7 @@ import {
   CurrencyMismatchError,
   InsufficientFundsError,
   InvalidPostingCommandError,
+  TransactionNotPendingError,
 } from '../errors';
 import {
   TRANSACTION_POSTED_EVENT,
@@ -64,9 +65,18 @@ interface AppliedLeg {
  * the `LedgerEntry` carrying the resulting `balance_after`), then exactly one outbox row —
  * all in the same tx (transactional outbox, ADR-5). Only a deadlock (`40P01`) is retried.
  *
- * Scope (this step): the balancing multi-leg post. Deliberately NOT here (later steps):
- * spend-counter/limit updates, hold/`held` mutation, idempotency-key handling. The funds
- * check DOES subtract existing `held` when computing `available`.
+ * Two entry points share the same shared steps (lock → per-leg check/fold → balance-then-
+ * ledger → one outbox row) and differ ONLY in the header step ({@link applyPosting}'s
+ * `applyHeader` callback):
+ * - {@link postTransaction} opens its OWN transaction and INSERTS a new POSTED header (a fresh
+ *   movement, e.g. reversal / external settlement).
+ * - {@link postPendingInTx} runs INSIDE the caller's transaction and TRANSITIONS an existing
+ *   PENDING header to POSTED (the confirm-time half of an internal transfer).
+ *
+ * Scope: the balancing multi-leg post. Deliberately NOT here (later steps): spend-counter/limit
+ * updates, hold/`held` mutation. Idempotency-key handling is the wrapper's job (the transfers
+ * layer runs the initiate under it). The funds check DOES subtract existing `held` when
+ * computing `available`.
  */
 @Injectable()
 export class PostingService implements IPostingService {
@@ -89,24 +99,48 @@ export class PostingService implements IPostingService {
     this.validateCommand(command);
 
     const txId = randomUUID();
-    // Distinct account ids in canonical ascending order — the lock order every posting uses,
-    // so two concurrent posts touching the same pair can never deadlock by acquiring in
-    // opposite orders. Ids are already distinct (validated); the Set is defensive.
-    const lockOrder = [...new Set(command.legs.map((leg) => leg.accountId))].sort(compareAccountId);
+    const lockOrder = lockOrderFor(command);
 
     // ONE transaction at READ COMMITTED, deadlock-retried, via the shared helper. `txId` and
-    // `lockOrder` are captured up front so they stay stable across retries.
+    // `lockOrder` are captured up front so they stay stable across retries. The header step
+    // INSERTS a fresh POSTED row.
     return runInTransactionWithRetry(this.dataSource, (queryRunner) =>
-      this.applyPosting(queryRunner, command, txId, lockOrder),
+      this.applyPosting(queryRunner, command, txId, lockOrder, () =>
+        this.insertPostedHeader(queryRunner, command, txId),
+      ),
     );
   }
 
-  /** Steps c–g of ADR-13, inside one already-open transaction. */
+  async postPendingInTx(
+    queryRunner: QueryRunner,
+    transactionId: string,
+    command: PostTransactionCommand,
+  ): Promise<Transaction> {
+    this.validateCommand(command);
+    const lockOrder = lockOrderFor(command);
+
+    // Runs INSIDE the caller's already-open transaction (no new tx): the header ALREADY exists
+    // (created PENDING at initiate), so the header step is a guarded PENDING→POSTED transition,
+    // not an insert. `transactionId` is the existing header's id and doubles as the ledger/
+    // outbox FK. Re-run-safe: on a deadlock the caller's wrapper rolls the whole tx back
+    // (status returns to PENDING) and retries, so the transition succeeds again.
+    return this.applyPosting(queryRunner, command, transactionId, lockOrder, () =>
+      this.transitionExistingHeader(queryRunner, transactionId),
+    );
+  }
+
+  /**
+   * Steps c–g of ADR-13, inside one already-open transaction. The header step (e) is supplied
+   * by `applyHeader` — an INSERT for a fresh post, a guarded transition for a confirm — and is
+   * the ONLY difference between the two entry points. It runs BEFORE the ledger/outbox rows
+   * because both FK their `transaction_id` to the header row.
+   */
   private async applyPosting(
     queryRunner: QueryRunner,
     command: PostTransactionCommand,
     txId: string,
     lockOrder: string[],
+    applyHeader: () => Promise<Transaction>,
   ): Promise<Transaction> {
     // c. Lock every affected account row FOR UPDATE, in canonical ascending id order.
     const locked = new Map<string, Account>();
@@ -121,24 +155,9 @@ export class PostingService implements IPostingService {
     // d. Validate each leg against its (now locked) account, and compute its balance_after.
     const appliedLegs = command.legs.map((leg) => this.checkAndFold(leg, command, locked));
 
-    // e. The transaction header, POSTED, with debit/credit derived from a clean 2-leg pair.
-    //    Inserted BEFORE the ledger/outbox rows: both FK their `transaction_id` to this row,
-    //    so the parent must exist first. The up-front `txId` lets us do this without a
-    //    round-trip.
-    const { debitAccountId, creditAccountId } = deriveDebitCredit(command.legs);
-    const transaction = await this.transactions.insertInTx(queryRunner, {
-      id: txId,
-      type: command.type,
-      status: TransactionStatus.Posted,
-      amount: command.amount,
-      currency: command.currency,
-      debitAccountId,
-      creditAccountId,
-      initiatedBy: command.initiatedBy,
-      payeeId: command.payeeId ?? null,
-      reversesTransactionId: command.reversesTransactionId ?? null,
-      postedAt: new Date(),
-    });
+    // e. The transaction header (insert POSTED, or guarded PENDING→POSTED transition). Runs
+    //    BEFORE the ledger/outbox rows, which FK their `transaction_id` to it.
+    const transaction = await applyHeader();
 
     // f. balance-then-ledger: update the materialized balance FIRST, then append the entry
     //    (ADR-13). Runs after the header so the ledger FK parent exists.
@@ -161,6 +180,56 @@ export class PostingService implements IPostingService {
     });
 
     return transaction;
+  }
+
+  /**
+   * Header step for {@link postTransaction}: INSERT a fresh POSTED header, with debit/credit
+   * derived from a clean 2-leg pair (null for both otherwise — the ledger legs remain
+   * authoritative). The up-front `txId` lets the FK children reference it without a round-trip.
+   */
+  private insertPostedHeader(
+    queryRunner: QueryRunner,
+    command: PostTransactionCommand,
+    txId: string,
+  ): Promise<Transaction> {
+    const { debitAccountId, creditAccountId } = deriveDebitCredit(command.legs);
+    return this.transactions.insertInTx(queryRunner, {
+      id: txId,
+      type: command.type,
+      status: TransactionStatus.Posted,
+      amount: command.amount,
+      currency: command.currency,
+      debitAccountId,
+      creditAccountId,
+      initiatedBy: command.initiatedBy,
+      payeeId: command.payeeId ?? null,
+      reversesTransactionId: command.reversesTransactionId ?? null,
+      postedAt: new Date(),
+    });
+  }
+
+  /**
+   * Header step for {@link postPendingInTx}: a guarded `PENDING → POSTED` transition on the
+   * EXISTING header. A 0-row result means the transfer was already posted / is not pending, so
+   * it throws {@link TransactionNotPendingError} BEFORE any balance is touched — the "money
+   * moves once" gate. On success the just-transitioned row is re-read WITHIN this tx so the
+   * returned header reflects the POSTED status + `posted_at`.
+   */
+  private async transitionExistingHeader(
+    queryRunner: QueryRunner,
+    transactionId: string,
+  ): Promise<Transaction> {
+    const transitioned = await this.transactions.transitionToPostedInTx(queryRunner, transactionId);
+    if (!transitioned) {
+      throw new TransactionNotPendingError(transactionId);
+    }
+    const posted = await this.transactions.findByIdInTx(queryRunner, transactionId);
+    if (!posted) {
+      // Unreachable: the row was just transitioned under this same transaction. A genuine
+      // breach here is an internal fault (500), not a business error.
+      throw new Error(`Transaction ${transactionId} vanished after its POSTED transition`);
+    }
+    return posted;
   }
 
   /**
@@ -257,6 +326,16 @@ export class PostingService implements IPostingService {
       );
     }
   }
+}
+
+/**
+ * Distinct affected account ids in canonical ascending order — the lock order EVERY posting
+ * uses, so two concurrent posts touching the same pair can never deadlock by acquiring the
+ * rows in opposite orders. Ids are already distinct (validated); the `Set` is defensive.
+ * Shared by both entry points so they lock identically.
+ */
+function lockOrderFor(command: PostTransactionCommand): string[] {
+  return [...new Set(command.legs.map((leg) => leg.accountId))].sort(compareAccountId);
 }
 
 /** Canonical ascending order over account ids (UUID strings), used for lock acquisition. */

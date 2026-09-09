@@ -18,8 +18,13 @@ per step:
 - **Step 4a — OTP module + Redis client**
   ([below](#otp-module--redis-client-step-4a)): the user-scoped one-time code service
   (singleton gate + single-use), and the global lifecycle-managed Redis client it uses.
+- **Step 4b — internal transfers**
+  ([below](#step-4b--internal-transfers)): the customer↔customer transfer flow end-to-end —
+  the `/api` transfers + OTP endpoints, the initiate=PENDING / confirm=post lifecycle, the
+  QueryRunner-aware `postPendingInTx` posting seam, the DomainError→HTTP mapping, and the zod
+  request validation.
 
-Holds, limits, transfers, and the outbox relay still arrive in later steps.
+Holds, external transfers, limits, and the outbox relay still arrive in later steps.
 
 ## Module structure
 
@@ -294,12 +299,13 @@ live in the service, not in transport. A small cross-cutting base
 | `InsufficientFundsError` | `INSUFFICIENT_FUNDS` | Customer debit exceeds `available`. |
 | `AccountFrozenError` | `ACCOUNT_FROZEN` | Debit on a frozen customer account. |
 | `CurrencyMismatchError` | `CURRENCY_MISMATCH` | Leg account currency ≠ transaction currency. |
+| `TransactionNotPendingError` | `TRANSFER_NOT_PENDING` | Guarded `PENDING → POSTED` transition affected 0 rows (already posted / not pending). Shares the `TRANSFER_NOT_PENDING` code with the transfers service's pre-check; both → 409. |
 
-**Deferred HTTP mapping.** The global `AllExceptionsFilter` currently derives `code` from
-the HTTP status, so a `DomainError` reaching it today would render a generic 500. Mapping
-each domain `code` to a status (e.g. `INSUFFICIENT_FUNDS` → 422, `ACCOUNT_FROZEN` → 409,
-`ACCOUNT_NOT_FOUND` → 404, `INVALID_POSTING_COMMAND` → 400) is done at the **endpoint step**
-when the write routes first throw these — there is no HTTP surface for the reducer yet.
+**HTTP mapping (added in step 4b).** The global `AllExceptionsFilter` now has a `DomainError`
+branch that maps each domain `code` to its status via the single
+[`domain-error-status.ts`](#domainerrorhttp-mapping) table (`INSUFFICIENT_FUNDS` → 422,
+`ACCOUNT_FROZEN` → 409, `ACCOUNT_NOT_FOUND` → 404, `INVALID_POSTING_COMMAND` → 400), and returns
+the domain `code` itself as the response `code`.
 
 ### Outbox payload (provisional transaction-event contract)
 
@@ -419,12 +425,13 @@ other error roll back and rethrow; **always** release. Both `IdempotencyService.
 `PostingService.postTransaction` use it — the latter a **behavior-preserving** refactor of its
 former inline loop (same isolation, retry bound, rollback/release, and deadlock detection).
 
-### Deferred to step 4 (transfers)
+### Wired in step 4b (transfers)
 
-The DoD proof that a **replayed `Idempotency-Key` moves money once** end-to-end is exercised
-when the transfers surface wires `execute` around `postTransaction` (the `operation`) behind
-`POST /api/transfers`. This step delivers the reusable wrapper and its unit-level guarantees;
-no endpoint yet.
+`POST /api/transfers` now runs `execute` around the PENDING-header insert (the `operation`), so
+a **replayed `Idempotency-Key` creates the transfer once** — see
+[Step 4b](#step-4b--internal-transfers). Note the wrapped operation for an internal transfer is
+the **PENDING creation**, not the money movement: money moves at confirm, gated by the OTP
+single-use + the guarded PENDING→POSTED transition.
 
 ## OTP module + Redis client (step 4a)
 
@@ -551,11 +558,172 @@ this branch's `GET` and `SET`. Without `XX`, that resurrected record would have 
 would jam the `SET … EX … NX` singleton gate in `generate` forever — a permanent self-lockout with
 no self-heal. On the null reply the branch writes nothing and returns the no-active-code result.
 
+## Step 4b — internal transfers
+
+The customer↔customer transfer flow end-to-end: two-phase and OTP-gated. A transfer is created
+**PENDING** at initiate (no money moves) and **posts on OTP-confirm**, with the funds check
+performed at confirm-time under the account lock. This step also lands the reusable
+DomainError→HTTP mapping and the zod request-validation pipe that the write surface needs.
+
+### Module structure
+
+`src/modules/transfers/` — the transfers FEATURE module (module-layout + controller-surface
+conventions): the root holds only `transfers.module.ts`; business logic under `service/`; the
+controller in its own `api/` surface folder with `dto/` + `serializers/`.
+
+| File | Role |
+|---|---|
+| `transfers.module.ts` | Feature module: `imports: [PersistenceModule, PostingModule, IdempotencyModule, OtpModule]`, binds `{ provide: TRANSFERS_SERVICE, useClass: TransfersService }`, exports the token. **No controllers of its own.** |
+| `service/interfaces/transfers.service.interface.ts` | `ITransfersService` + `TRANSFERS_SERVICE` token + the `InitiateTransferParams` / `ConfirmTransferParams` contract types. |
+| `service/errors.ts` | Transfers-owned domain errors (extend `DomainError`): `TransferNotFoundError`, `TransferNotPendingError`, `InvalidOtpError`, `OtpLockedOutError`, `InvalidTransferError`. |
+| `service/impl/transfers.service.ts` | `TransfersService implements ITransfersService` — initiate / confirm / listPendingAuthorizations; injects the DataSource + `ACCOUNT_REPOSITORY` / `TRANSACTION_REPOSITORY` / `IDEMPOTENCY_SERVICE` / `OTP_SERVICE` / `POSTING_SERVICE` tokens. |
+| `api/transfers-api.controller.ts` | `TransfersApiController`, `@Controller('api')` — the three routes; **declared by `ApiModule`**. |
+| `api/dto/*.dto.ts` | `TransferDto`, `PendingAuthorizationDto` (wire contracts). |
+| `api/dto/transfers.schema.ts` | zod schemas for the bodies + the `Idempotency-Key` header. |
+| `api/serializers/transfers.serializer.ts` | Explicit-whitelist `serializeTransfer` / `serializePendingAuthorization`. |
+
+The OTP feature gains its first `/api` surface controller under `src/modules/otp/api/`
+(`otp-api.controller.ts` + `dto/otp.dto.ts` + `serializers/otp.serializer.ts`), also **declared
+by `ApiModule`**. `OtpModule` still just provides + exports `OTP_SERVICE`.
+
+### Endpoints
+
+All under the global `/api` prefix (the `GatewayIdentityGuard` has required the Kong
+`X-User-Id`); the caller id is read **only** via `@Identity()`, never the body/query.
+
+| Route | Effect |
+|---|---|
+| `POST /api/transfers` | Initiate an internal transfer → creates a **PENDING** transaction (no money moves). Body `{ sourceAccountId, destinationAccountId, amount, currency, confirmDuplicate? }`; required `Idempotency-Key` header. **201**, `TransferDto`. |
+| `POST /api/otp` | Mint the caller's user-scoped one-time code (mocked out-of-band delivery). **201**, `OtpDto { code, ttlSeconds }`. Singleton-gated → `OtpAlreadyActiveError` (409) if a code is already active. |
+| `POST /api/transfers/:id/confirm` | Verify+consume the OTP, then post the pending transfer (money moves). Body `{ code }`; `:id` via `ParseUUIDPipe`. **200**, the posted `TransferDto`. |
+| `GET /api/pending-authorizations` | The caller's PENDING transfers, newest-first (the OTP app's feed). **200**, `{ authorizations: PendingAuthorizationDto[] }`. |
+
+`TransferDto` = `{ id, type, status, amount, currency, sourceAccountId, destinationAccountId,
+createdAt, postedAt }` — `debitAccountId`→`sourceAccountId`, `creditAccountId`→`destinationAccountId`,
+timestamps ISO-8601, `postedAt` null while PENDING. Internal columns (`initiatedBy`,
+`failureReason`, …) are never serialized.
+
+### The lifecycle (initiate = PENDING, confirm = post)
+
+**Initiate** (`TransfersService.initiateTransfer`):
+
+1. **Validate** (defense-in-depth; the wire schema also enforces): source ≠ destination; `amount`
+   a positive unsigned minor-unit integer; currency present.
+2. **Anti-IDOR + existence**: the **source** is owner-scoped (`findByIdAndOwner(source, ownerId)`;
+   null → `TransferNotFoundError`/404, never revealing non-ownership); the **destination** is
+   resolved by id alone (`findById`; null → `TransferNotFoundError`) — you transfer *to* another
+   customer's account. Both must be **customer** accounts (`InvalidTransferError` otherwise) whose
+   currency matches the request (`CurrencyMismatchError` otherwise).
+3. **Claim + create under the `Idempotency-Key`**: `idempotency.execute({ …, fingerprintInput:
+   { type: 'internal', source, destination, amount, currency }, confirmDuplicate }, (qr) =>
+   insert a PENDING `Transaction` header)`. A replayed key returns the original id;
+   `SUSPECTED_DUPLICATE` / `IDEMPOTENCY_KEY_REUSED` propagate from the wrapper.
+4. Load and return the PENDING transfer.
+
+**Confirm** (`TransfersService.confirmTransfer`):
+
+1. Load the transfer (`findById`; null → `TransferNotFoundError`).
+2. **Anti-IDOR on the nested resource** — the account being **debited**, not just the id:
+   `findByIdAndOwner(transfer.debitAccountId, ownerId)`; null → `TransferNotFoundError`.
+3. **Idempotent replay**: an already-**POSTED** transfer is returned as-is; anything else
+   non-PENDING → `TransferNotPendingError`.
+4. **Consume the OTP** (`otp.consume(ownerId, code)`): `!ok && lockedOut` → `OtpLockedOutError`
+   (429); `!ok` → `InvalidOtpError` (401).
+5. **Post**: build the double-entry `PostTransactionCommand` (debit source `−amount`, credit
+   destination `+amount`) and run `runInTransactionWithRetry(dataSource, (qr) =>
+   posting.postPendingInTx(qr, transferId, command))`.
+
+The OTP is consumed **before** the post transaction: the single-use `GETDEL` is the
+authorization gate, so if the post then throws (insufficient funds under the lock, etc.) the
+code is spent and the transfer stays PENDING — a retry needs a **fresh** code. This matches the
+spec's confirm-time funds check.
+
+### The `postPendingInTx` posting seam
+
+`applyPosting` in `PostingService` was generalized so its shared steps — **lock** accounts in
+canonical ascending id order → per-leg **`checkAndFold`** (currency / frozen / funds) →
+**balance-then-ledger** → **one outbox row** — are reused by two entry points that differ ONLY
+in the **header step** (an `applyHeader` callback):
+
+- `postTransaction(command)` — **unchanged behavior**: opens its own tx and **INSERTs** a new
+  POSTED header.
+- `postPendingInTx(queryRunner, transactionId, command)` — runs **inside the caller's tx** (no
+  new tx), and its header step is a **guarded transition** on the EXISTING header:
+  `ITransactionRepository.transitionToPostedInTx` runs `UPDATE transaction SET status = POSTED,
+  posted_at = now() WHERE id = :id AND status = 'PENDING'`. **0 rows** → `TransactionNotPendingError`
+  (someone else already posted / not pending), thrown **before** any balance mutation; on success
+  the row is re-read within the tx (`findByIdInTx`) and returned. The confirm-time **funds check
+  under the lock** happens in the shared `checkAndFold`. The reducer OWNS this guarded transition,
+  so it owns the error (posting-module `service/errors.ts`); it carries the same
+  `TRANSFER_NOT_PENDING` code as the transfers service's stale-read pre-check, so both map to 409.
+
+Re-run safety under the deadlock retry: `postPendingInTx` runs inside the transfers service's
+`runInTransactionWithRetry`, and a deadlock rolls the WHOLE tx back — including the transition —
+so status returns to PENDING and a retry re-locks, re-reads, and re-transitions cleanly.
+
+### Money-once (the two independent gates)
+
+- **Idempotency-Key at initiate** dedups duplicate transfer **creation** (a retry/replay yields
+  the same PENDING transfer, not a second one).
+- At confirm, the **OTP single-use** (`GETDEL`, one confirm wins) **plus** the **guarded
+  PENDING→POSTED transition** (the `WHERE status = 'PENDING'` predicate is the single-write gate)
+  ensure the movement posts **exactly once**, even under concurrent confirms.
+
+### DomainError→HTTP mapping
+
+The global `AllExceptionsFilter` gained an `else if (exception instanceof DomainError)` branch
+that maps the stable domain `code` to an HTTP status via a single table
+(`common/errors/domain-error-status.ts`, `domainErrorHttpStatus(code)`, default **400**). The
+response `ErrorResponse.code` is the **domain code itself** (e.g. `INSUFFICIENT_FUNDS`), and the
+message is the domain error's (authored PII-light, safe to surface). No controller maps errors;
+there is no second filter. Every domain code is 4xx, so a `DomainError` never reaches the 5xx
+generic-message path.
+
+| Domain `code` | Status |
+|---|---|
+| `INVALID_POSTING_COMMAND`, `INVALID_TRANSFER` | 400 |
+| `ACCOUNT_NOT_FOUND`, `TRANSFER_NOT_FOUND` | 404 |
+| `CURRENCY_MISMATCH`, `INSUFFICIENT_FUNDS` | 422 |
+| `ACCOUNT_FROZEN`, `TRANSFER_NOT_PENDING`, `SUSPECTED_DUPLICATE`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `OTP_ALREADY_ACTIVE` | 409 |
+| `INVALID_OTP` | 401 |
+| `OTP_LOCKED_OUT` | 429 |
+
+### zod request validation
+
+`common/validation/zod-validation.pipe.ts` `ZodValidationPipe` (implements `PipeTransform`) runs
+`schema.parse(value)` and, on a `ZodError`, throws `BadRequestException` (→ 400 `BAD_REQUEST` via
+the filter) with a SAFE message — only the failing field **names**, never the offending values or
+raw internals (anti-reflection). It validates the request bodies (`@Body(new ZodValidationPipe(
+schema))`) and the `Idempotency-Key` header (applied manually, since `@Headers()` — unlike
+`@Body`/`@Param` — does not accept a pipe; a missing/empty header → 400). Path `:id` keeps
+`ParseUUIDPipe`. This is a security control: it rejects malformed / unexpected input at the edge
+before it reaches the domain services.
+
+### New repository methods
+
+Added to `ITransactionRepository` (interface/impl split, following the tx-aware `…InTx` seam):
+
+| Method | Effect |
+|---|---|
+| `findPendingByInitiator(initiatedBy)` | The initiator's PENDING transfers, newest-first — the pending-authorizations feed. |
+| `transitionToPostedInTx(qr, id)` | Guarded `PENDING → POSTED` UPDATE (`WHERE id AND status = 'PENDING'`); returns `affected > 0`. |
+| `findByIdInTx(qr, id)` | Read one transaction inside the caller's tx (sees its own uncommitted writes) — used to return the just-posted header from `postPendingInTx`. |
+
+`insertInTx` is reused for the PENDING header.
+
+### Module wiring
+
+- `ApiModule` (`/api` surface registry) now imports `[AccountsModule, TransfersModule, OtpModule]`
+  and declares `[ApiController, AccountsApiController, TransfersApiController, OtpApiController]`.
+- `TransfersModule` imports `PostingModule` + `IdempotencyModule` + `OtpModule`, so those three
+  former **service-only** feature modules are now reached through it (and `OtpModule` also directly
+  by `ApiModule` for `OtpApiController`). `AppModule` therefore **no longer** imports
+  `PostingModule` / `IdempotencyModule` / `OtpModule` transitionally; it keeps the `@Global`
+  `RedisModule` and the rest.
+
 ## Not in this slice (later steps)
 
-Internal transfers + the OTP HTTP surface (step 4b: `POST /api/transfers`,
-`POST /api/transfers/:id/confirm`, `GET /api/pending-authorizations`, wiring `IOtpService`
-into the transfer lifecycle), holds + external outbound, the outbox **relay worker**, limits +
-external payees, and admin ops + maker-checker + external rails. Statement pagination beyond
-the first page is likewise deferred — the read slice returns only the most recent
-`STATEMENT_PAGE_LIMIT` legs.
+Holds + external outbound + external inbound, the outbox **relay worker**, limits + external
+payees, and admin ops + maker-checker + external rails. Statement pagination beyond the first
+page is likewise deferred — the read slice returns only the most recent `STATEMENT_PAGE_LIMIT`
+legs.

@@ -525,6 +525,22 @@ export interface ResolvedDomainErrors {
   InvalidPostingCommandError?: any;
   IdempotencyKeyReuseError?: any;
   SuspectedDuplicateError?: any;
+  // Transfers/OTP domain errors added by Step-4b (internal transfers end-to-end). Best-effort
+  // like the rest of this map — undefined until the implementor exports them. The DomainError→HTTP
+  // filter maps by `.code`, so the filter proof (all-exceptions.filter.spec) can fall back to a
+  // synthetic DomainError subclass carrying the code when a concrete class is not yet resolvable;
+  // the money-safety proofs gate on OBSERVABLE STATE + status codes, classifying by class/code
+  // only as a secondary signal.
+  InvalidTransferError?: any;
+  TransferNotFoundError?: any;
+  /** The transfers SERVICE-level pre-check error (TransfersService.confirmTransfer). */
+  TransferNotPendingError?: any;
+  /** The posting REDUCER-level guarded-transition error (PostingService.postPendingInTx).
+   *  Distinct class from TransferNotPendingError, but shares the `TRANSFER_NOT_PENDING` code. */
+  TransactionNotPendingError?: any;
+  InvalidOtpError?: any;
+  OtpLockedOutError?: any;
+  OtpAlreadyActiveError?: any;
 }
 
 /**
@@ -551,6 +567,11 @@ export function getDomainErrors(): ResolvedDomainErrors {
     `${SRC}/modules/transfers/idempotency.errors`,
     `${SRC}/modules/transfers/transfers.errors`,
     `${SRC}/modules/transfers/errors`,
+    // Step-4b: the transfers feature owns its domain errors under `service/errors`.
+    `${SRC}/modules/transfers/service/errors`,
+    `${SRC}/modules/otp/service/errors`,
+    `${SRC}/modules/otp/otp.errors`,
+    `${SRC}/modules/otp/errors`,
     `${SRC}/common/errors/domain.errors`,
     `${SRC}/common/errors/domain-errors`,
     `${SRC}/common/errors/domain.error`,
@@ -586,6 +607,38 @@ export function getDomainErrors(): ResolvedDomainErrors {
       'SuspectedDuplicateError',
       'SuspectedDuplicate',
       'DuplicateSuspectedError',
+    ]),
+    // Step-4b transfers/OTP domain errors (best-effort).
+    InvalidTransferError: findExportAcross(candidates, ['InvalidTransferError', 'InvalidTransfer']),
+    TransferNotFoundError: findExportAcross(candidates, [
+      'TransferNotFoundError',
+      'TransferNotFound',
+      'TransactionNotFoundError',
+    ]),
+    // The transfers service pre-check throws `TransferNotPendingError` (transfers/service/errors);
+    // the posting reducer's guarded transition throws `TransactionNotPendingError`
+    // (posting/service/errors). Two distinct classes sharing the `TRANSFER_NOT_PENDING` code —
+    // resolved under SEPARATE keys so an `instanceof` proof targets the right one (posting's
+    // module is scanned before transfers', so the names must not overlap or they'd collide).
+    TransferNotPendingError: findExportAcross(candidates, [
+      'TransferNotPendingError',
+      'TransferNotPending',
+    ]),
+    TransactionNotPendingError: findExportAcross(candidates, ['TransactionNotPendingError']),
+    InvalidOtpError: findExportAcross(candidates, [
+      'InvalidOtpError',
+      'InvalidOtp',
+      'OtpInvalidError',
+    ]),
+    OtpLockedOutError: findExportAcross(candidates, [
+      'OtpLockedOutError',
+      'OtpLockedOut',
+      'OtpLockoutError',
+    ]),
+    OtpAlreadyActiveError: findExportAcross(candidates, [
+      'OtpAlreadyActiveError',
+      'OtpActiveError',
+      'OtpAlreadyActive',
     ]),
   };
 }
@@ -705,4 +758,142 @@ export function tcpProbe(host: string, port: number, timeoutMs = 1500): Promise<
     socket.once('error', () => done(false));
     socket.connect(port, host);
   });
+}
+
+// ---- Transfers module (spec 04 Transfers, Step-4b: internal transfers end-to-end) ---------
+// Resolved through the same single-seam convention as everything else: the running instance BY
+// TOKEN through the app graph (integration), and the CLASS for the pure unit spec that drives it
+// with mocked deps.
+
+/** `TRANSFERS_SERVICE` — the DI token the TransfersModule binds the TransfersService to (resolved
+ *  by token, never by class, per the interface/impl split). Reuses the shared service-token probe. */
+export function getTransfersServiceToken(): symbol {
+  return resolveServiceToken('TRANSFERS_SERVICE', 'transfers');
+}
+
+/**
+ * The `TransfersService` CLASS, for the pure unit spec (driven through a Nest TestingModule so the
+ * injection is order-independent — see tests/unit/transfers.service.spec.ts). Scanned with
+ * `findExportAcross`; if the implementor moves/renames it, add the path/export HERE — the single
+ * coordination point.
+ */
+export function getTransfersService(): any {
+  const cls = findExportAcross(
+    [
+      `${SRC}/modules/transfers/service/impl/transfers.service`,
+      `${SRC}/modules/transfers/impl/transfers.service`,
+      `${SRC}/modules/transfers/transfers.service`,
+      `${SRC}/modules/transfers/service/transfers.service`,
+    ],
+    ['TransfersService'],
+  );
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the TransfersService class. If the implementor named/placed ` +
+        `it differently, add the path/export to tests/support/harness.ts:getTransfersService — the ` +
+        `single coordination point.`,
+    );
+  }
+  return cls;
+}
+
+export interface TransferSerializers {
+  serializeTransfer?: (transfer: any) => any;
+  serializePendingAuthorization?: (transfer: any) => any;
+}
+
+/**
+ * BEST-EFFORT resolution of the controller-boundary transfer serializers (services return
+ * entities; controllers serialize to DTOs via explicit whitelists). Returns `undefined` members
+ * when a serializer is not exported — the e2e proves the wire DTO shape / anti-leak over HTTP
+ * regardless, so this is only used opportunistically. Add the path/export here if the implementor
+ * names/locates them differently.
+ */
+export function getTransferSerializers(): TransferSerializers {
+  const candidates = [
+    `${SRC}/modules/transfers/api/serializers/transfers.serializer`,
+    `${SRC}/modules/transfers/api/serializers/transfer.serializer`,
+    `${SRC}/modules/transfers/api/serializers`,
+    `${SRC}/modules/transfers/transfers.serializer`,
+    `${SRC}/modules/transfers/serializers`,
+  ];
+  return {
+    serializeTransfer: findExportAcross(candidates, [
+      'serializeTransfer',
+      'toTransferDto',
+      'transferToDto',
+    ]),
+    serializePendingAuthorization: findExportAcross(candidates, [
+      'serializePendingAuthorization',
+      'toPendingAuthorizationDto',
+      'serializePendingAuth',
+      'pendingAuthorizationToDto',
+    ]),
+  };
+}
+
+/**
+ * The `ZodValidationPipe` CLASS — a `PipeTransform` constructed with a Zod schema
+ * (`new ZodValidationPipe(schema)`) whose `transform(value, metadata)` returns the parsed value
+ * on success and throws a `BadRequestException` (HTTP 400) on a schema violation, with a safe
+ * (non-leaky) message. Scanned with `findExportAcross`; if the implementor names/places it
+ * differently, add the path/export HERE — the single coordination point.
+ */
+export function getZodValidationPipe(): any {
+  const cls = findExportAcross(
+    [
+      `${SRC}/common/pipes/zod-validation.pipe`,
+      `${SRC}/common/pipes/zod.pipe`,
+      `${SRC}/common/validation/zod-validation.pipe`,
+      `${SRC}/common/validation/zod.pipe`,
+      `${SRC}/common/zod/zod-validation.pipe`,
+      `${SRC}/common/pipes/zod-validation`,
+      `${SRC}/modules/transfers/api/zod-validation.pipe`,
+    ],
+    ['ZodValidationPipe'],
+  );
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the ZodValidationPipe class. If the implementor named/placed ` +
+        `it differently, add the path/export to tests/support/harness.ts:getZodValidationPipe — the ` +
+        `single coordination point.`,
+    );
+  }
+  return cls;
+}
+
+/**
+ * BEST-EFFORT resolution of `runInTransactionWithRetry(dataSource, fn, options?)` — the single
+ * seam every money-mutating operation opens its DB transaction through (the posting reducer and
+ * the idempotency wrapper). Returned so the transfers integration suite can drive the reducer's
+ * confirm-time `postPendingInTx` seam through the SAME transaction wrapper production uses
+ * (`confirmTransfer` calls it exactly this way). Does NOT throw when absent — the caller falls
+ * back to opening a QueryRunner transaction directly, so a rename/move never turns the money-once
+ * proof into a false pass. If the implementor moves/renames it, add the path/export here.
+ */
+export function getRunInTransactionWithRetry():
+  | (<T>(dataSource: any, fn: (queryRunner: any) => Promise<T>, options?: any) => Promise<T>)
+  | undefined {
+  return findExportAcross(
+    [
+      `${SRC}/common/db/run-in-transaction`,
+      `${SRC}/common/db/run-in-transaction-with-retry`,
+      `${SRC}/common/database/run-in-transaction`,
+      `${SRC}/common/db`,
+    ],
+    ['runInTransactionWithRetry', 'runInTransaction'],
+  );
+}
+
+/**
+ * The abstract `DomainError` base class (every domain error extends it and carries a stable
+ * `.code`). Returned so the filter spec can build a synthetic subclass for a code whose concrete
+ * class is not yet resolvable, and so a rejection can be classified by `instanceof DomainError`.
+ */
+export function getDomainErrorBase(): any {
+  return resolveOrThrow(
+    'the DomainError base class',
+    [`${SRC}/common/errors/domain-error`, `${SRC}/common/errors/domain.error`],
+    ['DomainError'],
+  );
 }

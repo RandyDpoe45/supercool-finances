@@ -3,12 +3,14 @@ import { OtpService } from './service/impl/otp.service';
 import { OTP_SERVICE } from './service/interfaces/otp.service.interface';
 
 /**
- * The OTP domain module. Provides the user-scoped one-time code service (spec 04 OTP module)
- * bound behind the `OTP_SERVICE` token (interface/impl split — consumers depend on
- * `IOtpService`, never the concrete class). The `REDIS_CLIENT` the service injects comes from
- * the `@Global` {@link RedisModule} (imported once in AppModule), so it is NOT imported here.
- * Exported so the transfers surface module (step 4b) can depend on it. No controller — this
- * step has no HTTP surface.
+ * The OTP FEATURE module. Provides + exports the user-scoped one-time code service (spec 04 OTP
+ * module) behind the `OTP_SERVICE` token (interface/impl split — consumers depend on
+ * `IOtpService`, never the concrete class). It owns its `/api` surface controller FILE
+ * (`api/otp-api.controller.ts`) but declares no controllers of its own: per the controller-
+ * surface convention {@link ApiModule} DECLARES `OtpApiController` and imports this module for
+ * the service. It is also imported by {@link TransfersModule} (the confirm flow consumes the
+ * service). The `REDIS_CLIENT` + `APP_CONFIG` the service injects come from `@Global` modules,
+ * so they are NOT imported here.
  */
 @Module({
   providers: [{ provide: OTP_SERVICE, useClass: OtpService }],

@@ -8,12 +8,20 @@ import {
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { RequestWithIdentity } from '../identity/request-identity';
+import { DomainError } from './domain-error';
+import { domainErrorHttpStatus } from './domain-error-status';
 import { codeForStatus, ErrorResponse } from './error-response';
 
 /**
  * Global exception filter that renders every failure as the single {@link
  * ErrorResponse} shape. 5xx messages are made generic so internal details never
  * leak to clients; the full error is logged server-side with the request id.
+ *
+ * A {@link DomainError} (a violated business invariant thrown by a service) is mapped to its
+ * HTTP status via the {@link domainErrorHttpStatus} table, and the response `code` is the
+ * domain code itself (e.g. `INSUFFICIENT_FUNDS`). Domain messages are authored PII-light and
+ * safe to surface, so they are returned verbatim. Every domain code is 4xx, so a DomainError
+ * never reaches the 5xx generic-message path below.
  */
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -33,6 +41,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
       status = exception.getStatus();
       code = codeForStatus(status);
       message = extractMessage(exception.getResponse()) ?? exception.message;
+    } else if (exception instanceof DomainError) {
+      // The domain code IS the response code; the status comes from the single mapping table.
+      status = domainErrorHttpStatus(exception.code);
+      code = exception.code;
+      message = exception.message;
     }
 
     if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
