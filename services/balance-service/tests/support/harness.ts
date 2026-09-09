@@ -146,6 +146,86 @@ export function getAppModule(): any {
 }
 
 /**
+ * Return the FIRST candidate module that actually EXPORTS one of `names`. Unlike
+ * `resolveOrThrow` (which only inspects the first requireable module), this keeps
+ * scanning — so a barrel that exists but does not re-export a given repository token
+ * falls through to the per-file candidate. Missing modules are skipped; a real
+ * compile/dependency error inside an existing module still surfaces.
+ */
+function findExportAcross(candidates: string[], names: string[]): any | undefined {
+  for (const p of candidates) {
+    let mod: any;
+    try {
+      mod = require(p);
+    } catch (e: any) {
+      if (e && e.code === 'MODULE_NOT_FOUND') continue;
+      throw e;
+    }
+    const hit = pickExport(mod, names);
+    if (hit !== undefined) return hit;
+  }
+  return undefined;
+}
+
+/**
+ * The Step-3 persistence module (optional). Returned so the integration suite can
+ * import it into its testing module and put the DI wiring itself under test. Returns
+ * null if the repos are wired directly into another module (e.g. DatabaseModule)
+ * instead of a dedicated PersistenceModule — in that case the suite falls back to
+ * resolving the tokens through the booted AppModule graph.
+ */
+export function tryResolvePersistenceModule(): any | null {
+  return (
+    findExportAcross(
+      [
+        `${SRC}/persistence/persistence.module`,
+        `${SRC}/persistence`,
+        `${SRC}/database/persistence.module`,
+        `${SRC}/database/repositories/repositories.module`,
+        `${SRC}/database/repositories/persistence.module`,
+        `${SRC}/database/repositories`,
+        `${SRC}/persistence/repositories.module`,
+      ],
+      ['PersistenceModule', 'RepositoriesModule'],
+    ) ?? null
+  );
+}
+
+/**
+ * Resolve a repository DI token (a Symbol) by its export name. `fileBase` is the
+ * kebab-case entity file base (e.g. 'ledger-entry') used to probe the per-repo file
+ * when there is no central token barrel. Follows the same interface/token convention
+ * as HEALTH_REPOSITORY. Throws an actionable error naming what is missing (this file
+ * is the single edit point if the implementor names things differently).
+ */
+export function getRepositoryToken(tokenName: string, fileBase: string): symbol {
+  const token = findExportAcross(
+    [
+      `${SRC}/persistence/persistence.tokens`,
+      `${SRC}/persistence/tokens`,
+      `${SRC}/persistence`,
+      `${SRC}/persistence/${fileBase}.repository`,
+      `${SRC}/persistence/${fileBase}.repository.interface`,
+      `${SRC}/persistence/${fileBase}/${fileBase}.repository`,
+      `${SRC}/database/repositories/tokens`,
+      `${SRC}/database/repositories`,
+      `${SRC}/database/repositories/${fileBase}.repository`,
+      `${SRC}/database/repositories/${fileBase}.repository.interface`,
+      `${SRC}/database/repositories/${fileBase}/${fileBase}.repository`,
+    ],
+    [tokenName],
+  );
+  if (token === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the ${tokenName} DI token (repo file base ` +
+        `'${fileBase}'). If the implementor put it elsewhere, add the path/export to ` +
+        `tests/support/harness.ts:getRepositoryToken — the single coordination point.`,
+    );
+  }
+  return token as symbol;
+}
+
+/**
  * Best-effort TCP reachability probe for the honest-SKIP integration gate. Resolves
  * true iff a TCP connection to host:port opens within `timeoutMs`. Never throws.
  */

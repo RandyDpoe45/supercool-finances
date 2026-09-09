@@ -15,6 +15,7 @@ import { IdempotencyKey } from './entities/idempotency-key.entity';
 import { CreateAppMetadata1725000000000 } from './migrations/1725000000000-CreateAppMetadata';
 import { CreateBalanceCore1788825600000 } from './migrations/1788825600000-CreateBalanceCore';
 import { CreateBalanceSatellites1788912000000 } from './migrations/1788912000000-CreateBalanceSatellites';
+import { SeedSystemAccounts1788998400000 } from './migrations/1788998400000-SeedSystemAccounts';
 
 /**
  * Single source of truth for the TypeORM DataSource options, shared by the Nest
@@ -49,6 +50,7 @@ export function buildDataSourceOptions(config: AppConfig): DataSourceOptions {
       CreateAppMetadata1725000000000,
       CreateBalanceCore1788825600000,
       CreateBalanceSatellites1788912000000,
+      SeedSystemAccounts1788998400000,
     ],
     migrationsRun: true,
     synchronize: false,

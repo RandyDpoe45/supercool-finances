@@ -196,3 +196,81 @@ either table:
 
 Until then, append-only is upheld by the domain layer: ledger mutations funnel through
 the single posting operation, and audit rows are only ever inserted (spec 04, later steps).
+
+## System seed — the two clearing accounts
+
+The two per-rail **clearing accounts** are seeded by a migration, `SeedSystemAccounts1788998400000`
+(`…/migrations/1788998400000-SeedSystemAccounts.ts`), so they exist on boot:
+
+| `system_key` | kind | owner_id | currency |
+|---|---|---|---|
+| `clearing:rail-outbound` | `system` | NULL | MXN |
+| `clearing:rail-inbound` | `system` | NULL | MXN |
+
+- **Why a migration, not `tools/seed`.** These are **system constants** the service needs
+  to run — the accounting counter-leg for all external money — exactly like the MXN
+  `currency` row (seeded by `CreateBalanceCore`). They are not demo data, so they live in a
+  boot migration rather than the seed tool.
+- **Idempotent.** `up()` inserts both rows with
+  `ON CONFLICT ("system_key") WHERE "kind" = 'system' DO NOTHING`, whose arbiter is the
+  partial unique index `uq_account_system_key` — a re-run is a no-op. `spent_today_date` /
+  `spent_month_date` are supplied (`CURRENT_DATE`, `date_trunc('month', CURRENT_DATE)::date`)
+  because they are NOT NULL without a DB default; balance/held/spend counters default to 0,
+  `status` to `active`, `id` to `gen_random_uuid()`. `down()` deletes the two rows.
+- **Deliberately NOT seeded here:** global/default `user_limits`, and any customer or demo
+  data. Those belong to **spec 08 / `tools/seed`** (customers are provisioned in Keycloak
+  and keyed by `sub`), not to the schema's boot migrations.
+
+## Repository layer (minimal, per-aggregate)
+
+Each aggregate has a repository exposed **behind an interface + a Symbol DI token**, with a
+TypeORM implementation — the same interface-behind-token pattern as the foundation's
+`IHealthRepository` / `HealthRepository`. Files live in
+`src/database/repositories/` (`<name>.repository.interface.ts` = token + interface;
+`<name>.repository.ts` = `@Injectable` impl using `@InjectRepository`).
+
+`PersistenceModule` (`src/database/persistence.module.ts`) registers the ten entity
+repositories via `TypeOrmModule.forFeature([...])`, binds each token to its impl
+(`{ provide: <NAME>_REPOSITORY, useClass: … }`), and **exports the tokens** so the upcoming
+domain modules inject the interfaces. It is **intentionally not imported into `AppModule`
+yet** — there is no consumer this step (same posture as the still-unwired `owner-scoped`
+helper).
+
+| Token | Interface | Methods |
+|---|---|---|
+| `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findBySystemKey`, `lockByIdForUpdate(queryRunner, id)` |
+| `LEDGER_ENTRY_REPOSITORY` | `ILedgerEntryRepository` | `findById`, `create` |
+| `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create` |
+| `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create` |
+| `EXTERNAL_PAYEE_REPOSITORY` | `IExternalPayeeRepository` | `findById`, `create`, `findByOwner` |
+| `USER_LIMITS_REPOSITORY` | `IUserLimitsRepository` | `findById`, `create`, `findByOwner` |
+| `OUTBOX_EVENT_REPOSITORY` | `IOutboxEventRepository` | `findById`, `create` |
+| `AUDIT_LOG_REPOSITORY` | `IAuditLogRepository` | `findById`, `create` |
+| `APPROVAL_REQUEST_REPOSITORY` | `IApprovalRequestRepository` | `findById`, `create` |
+| `IDEMPOTENCY_KEY_REPOSITORY` | `IIdempotencyKeyRepository` | `findByOwnerAndKey(ownerId, key)`, `create` |
+
+- **`create(data)`** persists a new row (`repo.save(repo.create(data))`) and returns it. No
+  generic `save`/update primitive is exposed — updates are status transitions the domain
+  step owns. Repositories carry **no domain logic** (no `postTransaction`, no multi-entity
+  orchestration, no business rules).
+- **`Account.lockByIdForUpdate`** issues `SELECT … FOR UPDATE` on the account row inside a
+  caller-supplied `QueryRunner` transaction — the concurrency primitive the posting reducer
+  is built on (ADR-13). `findBySystemKey` resolves the seeded clearing accounts.
+- **`IdempotencyKey`** is keyed on its composite PK `(owner_id, key)`, so lookup is
+  `findByOwnerAndKey` rather than `findById`. **Caveat:** because that PK is
+  **client-supplied**, `create()` (`repo.save(repo.create(data))`) behaves as an **UPSERT** —
+  a `create()` for an already-present `(owner_id, key)` silently **UPDATEs** the row instead
+  of raising a `23505` unique violation. Harmless now (no caller; idempotency semantics are
+  deferred to the domain step), but the domain step's **in-progress guard must not rely on
+  `create()` throwing on a duplicate key** — it must use an explicit `INSERT` /
+  `ON CONFLICT` / guarded status transition to detect a concurrent retry.
+- **Owner-scoped reads.** `findByOwner` returns a customer's rows as a list (a customer has
+  several accounts/payees). The single-resource, per-id anti-IDOR read
+  (`WHERE id = :id AND owner_id = :sub` → 404) stays with the existing
+  `common/authz/owner-scoped.ts` `findOwnedOrFail` helper, to be wired by the domain step's
+  endpoints (it remains the sanctioned pattern, still unwired here).
+- **Deferred to the domain step (driven by real callers):** outbox `pollUnpublished`
+  (FOR UPDATE SKIP LOCKED) + `markPublished`; hold PLACED-sum / reconciliation; the
+  idempotency soft-duplicate-window lookup; ledger reconstruction / delta-sum;
+  transaction-by-debit-account history; and all status-transition helpers. These are
+  intentionally absent now to avoid speculative, caller-less query surface.

@@ -14,6 +14,7 @@ coordination contract, not from the implementor's code. Each test is designed to
 | `integration/health-and-migration.integration.spec.ts` | Real DB readiness UP + **sample migration ran on boot** in `balance` | **Yes** (honest-SKIP) | `npm test` |
 | `integration/schema-constraints.integration.spec.ts` | Spec 04 **Step-1 schema is DB-enforced**: 5 tables + 5 native enum types exist (with exact labels); **MXN seeded @ scale 2**; FK enforcement (bad currency / bad tx / bad account); native-enum rejection; **CHECK held>=0** (INSERT+UPDATE) with **no blanket balance>=0** (negative clearing balance allowed); **spent_today_date/spent_month_date NOT NULL, no default** (23502 when omitted — decision #5); partial **uq_account_system_key**; **uq_payee** triple; column defaults (account balance/held/status/spent_*, payee status=pending, `ledger_entry.created_at` from clock); the named indexes exist with their partial predicates | **Yes** (honest-SKIP) | `npm test` |
 | `integration/satellites-schema.integration.spec.ts` | Spec 04 **Step-2 schema is DB-enforced**: 6 tables (`hold`, `user_limits`, `outbox_event`, `audit_log`, `approval_request`, `idempotency_key`) + 5 native enum types (exact labels); native-enum rejection (one column per enum); **hold** `CHECK amount>0`, account/transaction FKs, `status` default `PLACED`; **user_limits** `UNIQUE(scope,owner_id)` **NULLS NOT DISTINCT** (two global rows rejected; global+customer coexist; two customers same owner rejected); **outbox_event** partial `idx_outbox_unpublished ... WHERE published_at IS NULL`, `published_at` default NULL, transaction FK; **audit_log** bigint IDENTITY auto-increments + `actor_id`/`action` NOT NULL; **approval_request** four-eyes `CHECK(checker_id<>maker_id)` + `status` default `PENDING`; **idempotency_key** composite PK `(owner_id,key)` (dup rejected, same key/different owner allowed) + `idx_idem_expires` and the `(owner_id,request_fingerprint,created_at)` lookup index; the shipped partial `idx_hold_account_placed` (`account_id` WHERE status `PLACED`) | **Yes** (honest-SKIP) | `npm test` |
+| `integration/repositories-and-seed.integration.spec.ts` | Spec 04 **Step-3 persistence completion**. **Seed migration**: exactly the two clearing/system accounts (`clearing:rail-outbound/-inbound`, `kind=system`, `MXN`, `balance/held=0`, `active`, date markers set); **no over-seed** (system-account count == 2, **zero** `global` `user_limits`); MXN sanity. **Repos (agreed minimal surface, resolved BY TOKEN through the app graph)**: **all 10 `<NAME>_REPOSITORY` tokens bind to a working provider** (`create` + each repo's read method — `findById`, or `findByOwnerAndKey` for IdempotencyKey — guards the full PersistenceModule wiring); Account `create`→`findById`; `findByOwner` owner-scoping (isolation); `findBySystemKey` resolves a seeded clearing account; `lockByIdForUpdate` returns the row **and holds a real FOR UPDATE lock** (concurrent `FOR UPDATE NOWAIT` → 55P03); ExternalPayee `findByOwner` scoping; IdempotencyKey `findByOwnerAndKey` keys on (owner,key); Transaction & LedgerEntry `create`→`findById` | **Yes** (honest-SKIP) | `npm test` |
 
 Discovery is already wired by the scaffold: `jest.config.ts` matches
 `tests/**/*.spec.ts` (unit + the integration specs, which self-skip) and
@@ -46,16 +47,27 @@ edit and it throws an actionable error naming what is missing. The seam it wires
 `AllExceptionsFilter`, the `APP_CONFIG` token, `HealthController` +
 `HEALTH_REPOSITORY`, `InternalController`, `requestIdMiddleware`, and `AppModule`.
 
+For Step 3 it also wires the persistence layer: `tryResolvePersistenceModule()`
+(optional — returned so the integration suite imports it and puts the DI wiring under
+test; null if repos are wired straight into another module) and
+`getRepositoryToken(tokenName, fileBase)` (resolves each `<NAME>_REPOSITORY` Symbol,
+scanning a barrel then per-repo files — `findExportAcross` keeps looking past a barrel
+that lacks the token). If the implementor lays repos out differently, `harness.ts` is
+the single edit.
+
 ## Shared DB helpers: `support/pg.ts`
 
 The schema integration specs (`schema-constraints` Step 1, `satellites-schema`
-Step 2) share their raw-SQL plumbing from `support/pg.ts` — **not** implementor
-source, just test plumbing: the `PG` SQLSTATE vocabulary, `withRollback(ds, fn)`
-(always-rolled-back QueryRunner tx), `insertRow(q, table, row)` (parameterised
-`INSERT ... RETURNING *`), `expectPgError(promise, sqlstate)`, `seedTestCurrency`,
-and the `insertAccount` / `insertTransaction` FK-parent builders. Each spec binds a
-one-line `withRollback = (fn) => withRollbackOn(ds, fn)` to its resolved DataSource.
-Adding a Step-3 schema spec should reuse this module rather than re-copying helpers.
+Step 2, `repositories-and-seed` Step 3) share their raw-SQL plumbing from
+`support/pg.ts` — **not** implementor source, just test plumbing: the `PG` SQLSTATE
+vocabulary (incl. `LOCK_NOT_AVAILABLE` 55P03 for the FOR UPDATE proof),
+`withRollback(ds, fn)` (always-rolled-back QueryRunner tx), `insertRow(q, table, row)`
+(parameterised `INSERT ... RETURNING *`), `expectPgError(promise, sqlstate)`,
+`seedTestCurrency`, and the `insertAccount` / `insertTransaction` FK-parent builders.
+Schema specs bind a one-line `withRollback = (fn) => withRollbackOn(ds, fn)` to their
+resolved DataSource. **Note:** the Step-3 repo tests do NOT use `withRollback` — a
+DI'd repo uses its own auto-commit connection, so a separate QueryRunner tx cannot
+wrap it; those tests use random ids and clean up their committed rows in `afterEach`.
 
 ## Design notes / where fidelity comes from
 
@@ -103,6 +115,15 @@ Adding a Step-3 schema spec should reuse this module rather than re-copying help
   composite-PK, enum, FK,
   `CHECK amount>0`, `NULLS NOT DISTINCT`, default, and index assertions prove the
   schema foundation those behaviours build on.
+- **`repositories-and-seed` (Step 3) proves the seed + the agreed minimal repo
+  surface only.** DEFERRED to the domain-logic step (they are not repo methods this
+  step): the specialised queries (outbox `SKIP LOCKED` relay poll, hold `PLACED`-sum,
+  idempotency 60s soft-duplicate window, ledger reconstruction, tx-by-debit-account),
+  and — crucially — the **no-double-spend / no-overdraft concurrency proof** (N
+  simultaneous transfers). This suite proves `lockByIdForUpdate` takes a **real** row
+  lock (concurrent `FOR UPDATE NOWAIT` → 55P03), which is the *primitive* the
+  overdraft-safe `postTransaction` will build on; the end-to-end concurrency invariant
+  is tested where that logic lands (spec 04 DoD).
 
 ## Escalations / assumptions (confirm with the developer)
 
@@ -132,3 +153,18 @@ Adding a Step-3 schema spec should reuse this module rather than re-copying help
    status='PLACED' per account`); the by-name + partial-predicate assertion catches a
    regression that drops or unscopes it. If the index is renamed or intentionally
    removed, update/remove this guard.
+6. **Step-3 repos resolved by TOKEN through the app graph (DI under test).** The suite
+   boots `AppModule` (plus `PersistenceModule` if `harness.tryResolvePersistenceModule`
+   finds one) and does `app.get(<NAME>_REPOSITORY, { strict: false })`. This requires
+   the repo providers to be in the app graph. If the gate errors resolving a token, the
+   fix is either (a) the implementor imports `PersistenceModule` into `AppModule`, or
+   (b) `harness.getRepositoryToken` gains the actual path/export — the single edit
+   point. Direct impl instantiation was the sanctioned fallback but was **not** needed.
+7. **`repository.create(...)` is assumed to return the persisted entity** (agreed shape
+   "create → findById returns the row"), and to accept an **entity-shaped** input
+   (camelCase props: `ownerId`, `spentTodayDate`, …). The Account/Payee/Idempotency
+   round-trips are hardened against a void return (they re-fetch via a finder), but the
+   Transaction/LedgerEntry round-trips rely on the returned `id`. If `create` returns
+   void or takes a different DTO, those two fail with a clear message — escalate to
+   reconcile the contract. `bigint` money fields surface as JS strings (documented in
+   docs/persistence.md), so numeric checks use `Number(...)`.

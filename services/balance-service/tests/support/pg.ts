@@ -20,6 +20,7 @@ export const PG = {
   UNIQUE_VIOLATION: '23505',
   CHECK_VIOLATION: '23514',
   INVALID_ENUM_TEXT: '22P02', // "invalid input value for enum ...": proves a NATIVE enum type
+  LOCK_NOT_AVAILABLE: '55P03', // FOR UPDATE NOWAIT on an already-locked row
 } as const;
 
 /** Date-window markers accounts require (NOT NULL, no DB default — decision #5). */
