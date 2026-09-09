@@ -14,6 +14,10 @@ coordination contract, not from the implementor's code. Each test is designed to
 | `integration/health-and-migration.integration.spec.ts` | Real DB readiness UP + **sample migration ran on boot** in `balance` | **Yes** (honest-SKIP) | `npm test` |
 | `integration/schema-constraints.integration.spec.ts` | Spec 04 **Step-1 schema is DB-enforced**: 5 tables + 5 native enum types exist (with exact labels); **MXN seeded @ scale 2**; FK enforcement (bad currency / bad tx / bad account); native-enum rejection; **CHECK held>=0** (INSERT+UPDATE) with **no blanket balance>=0** (negative clearing balance allowed); **spent_today_date/spent_month_date NOT NULL, no default** (23502 when omitted — decision #5); partial **uq_account_system_key**; **uq_payee** triple; column defaults (account balance/held/status/spent_*, payee status=pending, `ledger_entry.created_at` from clock); the named indexes exist with their partial predicates | **Yes** (honest-SKIP) | `npm test` |
 | `integration/satellites-schema.integration.spec.ts` | Spec 04 **Step-2 schema is DB-enforced**: 6 tables (`hold`, `user_limits`, `outbox_event`, `audit_log`, `approval_request`, `idempotency_key`) + 5 native enum types (exact labels); native-enum rejection (one column per enum); **hold** `CHECK amount>0`, account/transaction FKs, `status` default `PLACED`; **user_limits** `UNIQUE(scope,owner_id)` **NULLS NOT DISTINCT** (two global rows rejected; global+customer coexist; two customers same owner rejected); **outbox_event** partial `idx_outbox_unpublished ... WHERE published_at IS NULL`, `published_at` default NULL, transaction FK; **audit_log** bigint IDENTITY auto-increments + `actor_id`/`action` NOT NULL; **approval_request** four-eyes `CHECK(checker_id<>maker_id)` + `status` default `PENDING`; **idempotency_key** composite PK `(owner_id,key)` (dup rejected, same key/different owner allowed) + `idx_idem_expires` and the `(owner_id,request_fingerprint,created_at)` lookup index; the shipped partial `idx_hold_account_placed` (`account_id` WHERE status `PLACED`) | **Yes** (honest-SKIP) | `npm test` |
+| `unit/money.spec.ts` | Spec 04 **domain Step-1** pure money helper: `availableBalance(balance, held)` = `(BigInt(balance) − BigInt(held)).toString()` — held=0, held=balance, and values **beyond 2^53 / near the max bigint** to prove **BigInt (not Number) math** (no silent rounding); string return. **No DB, never skipped** | No | `npm test` |
+| `unit/accounts.serializer.spec.ts` | Spec 04 **domain Step-1** controller-boundary serializers (`serializeAccount` / `serializeStatementEntry`): **whitelist / anti-leak** — feed a FULL entity (incl. `ownerId`, `spent*`, `systemKey`, timestamps, `accountId`) and assert the DTO carries **EXACTLY** the contract keys and leaks none of the sensitive ones; `available = balance − held` via BigInt (no float loss near 2^63); held=0 / held=balance edges; a `Date` `createdAt` rendered as its **ISO-8601 string**. **No DB, never skipped** | No | `npm test` |
+| `unit/accounts.service.spec.ts` | Spec 04 **domain Step-1** `AccountsService` owner-scope guard (**anti-IDOR, fail-closed**): `new AccountsService(mockRepos)` with `jest.fn()` repos; `listOwnedAccounts` and `getAccountStatement` with an **empty / blank** `ownerId` **reject** (500-class) **and never call the repo** (fails closed BEFORE any query); positive control — a real `ownerId` passes the guard and runs the owner-scoped lookup (bounded page limit). **No DB, never skipped** | No | `npm test` |
+| `integration/accounts-read.integration.spec.ts` | Spec 04 **domain Step-1** read endpoints over HTTP (real `AppModule` + gateway guard + error filter). **`GET /api/accounts`**: owner scoping / **anti-IDOR** (only the caller's accounts; system account never listed); **AccountDto** shape + money as strings; **available = balance − held** (held>0 / =0 / =balance) with **no float loss near the max bigint**. **`GET /api/accounts/:id/transactions`**: 404 (never 403 / **no existence leak**) for a not-owned or system account, 404 for a missing id; **only that account's ledger legs**, **newest-first** (created_at DESC), **bounded to 100**; `balance_after` intact as strings; malformed `:id` → **400 BAD_REQUEST** | **Yes** (honest-SKIP) | `npm test` |
 | `integration/repositories-and-seed.integration.spec.ts` | Spec 04 **Step-3 persistence completion**. **Seed migration**: exactly the two clearing/system accounts (`clearing:rail-outbound/-inbound`, `kind=system`, `MXN`, `balance/held=0`, `active`, date markers set); **no over-seed** (system-account count == 2, **zero** `global` `user_limits`); MXN sanity. **Repos (agreed minimal surface, resolved BY TOKEN through the app graph)**: **all 10 `<NAME>_REPOSITORY` tokens bind to a working provider** (`create` + each repo's read method — `findById`, or `findByOwnerAndKey` for IdempotencyKey — guards the full PersistenceModule wiring); Account `create`→`findById`; `findByOwner` owner-scoping (isolation); `findBySystemKey` resolves a seeded clearing account; `lockByIdForUpdate` returns the row **and holds a real FOR UPDATE lock** (concurrent `FOR UPDATE NOWAIT` → 55P03); ExternalPayee `findByOwner` scoping; IdempotencyKey `findByOwnerAndKey` keys on (owner,key); Transaction & LedgerEntry `create`→`findById` | **Yes** (honest-SKIP) | `npm test` |
 
 Discovery is already wired by the scaffold: `jest.config.ts` matches
@@ -55,6 +59,17 @@ scanning a barrel then per-repo files — `findExportAcross` keeps looking past 
 that lacks the token). If the implementor lays repos out differently, `harness.ts` is
 the single edit.
 
+For domain Step-1 it also wires `getAvailableBalance()` — the pure
+`availableBalance(balance, held)` money helper, scanned (via `findExportAcross`) across
+the plausible domain locations; if the implementor names/places it differently, add the
+path/export in `harness.ts` (single seam). It currently resolves
+`src/common/money/money.ts`. `getAccountSerializers()` wires the controller-boundary
+serializers `serializeAccount` / `serializeStatementEntry` the same way (scanned across
+plausible locations; currently `src/modules/accounts/accounts.serializer.ts`).
+`getAccountsService()` resolves the `AccountsService` class the same way (currently
+`src/modules/accounts/accounts.service.ts`) so a pure unit test can instantiate it with
+mock repos.
+
 ## Shared DB helpers: `support/pg.ts`
 
 The schema integration specs (`schema-constraints` Step 1, `satellites-schema`
@@ -65,7 +80,9 @@ vocabulary (incl. `LOCK_NOT_AVAILABLE` 55P03 for the FOR UPDATE proof),
 (parameterised `INSERT ... RETURNING *`), `expectPgError(promise, sqlstate)`,
 `seedTestCurrency`, and the `insertAccount` / `insertTransaction` FK-parent builders.
 Schema specs bind a one-line `withRollback = (fn) => withRollbackOn(ds, fn)` to their
-resolved DataSource. **Note:** the Step-3 repo tests do NOT use `withRollback` — a
+resolved DataSource. `insertLedgerEntry(q, overrides)` (added for the domain-read suite)
+inserts one ledger leg (MXN by default; `transaction_id`/`account_id` supplied by the
+caller; pass `created_at` to control statement ordering). **Note:** the Step-3 repo tests do NOT use `withRollback` — a
 DI'd repo uses its own auto-commit connection, so a separate QueryRunner tx cannot
 wrap it; those tests use random ids and clean up their committed rows in `afterEach`.
 

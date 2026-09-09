@@ -22,6 +22,10 @@ export class AccountRepository implements IAccountRepository {
     return this.repo.find({ where: { ownerId } });
   }
 
+  findByIdAndOwner(id: string, ownerId: string): Promise<Account | null> {
+    return this.repo.findOne({ where: { id, ownerId } });
+  }
+
   findBySystemKey(systemKey: string): Promise<Account | null> {
     return this.repo.findOne({ where: { systemKey } });
   }

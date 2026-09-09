@@ -231,15 +231,15 @@ TypeORM implementation — the same interface-behind-token pattern as the founda
 
 `PersistenceModule` (`src/database/persistence.module.ts`) registers the ten entity
 repositories via `TypeOrmModule.forFeature([...])`, binds each token to its impl
-(`{ provide: <NAME>_REPOSITORY, useClass: … }`), and **exports the tokens** so the upcoming
-domain modules inject the interfaces. It is **intentionally not imported into `AppModule`
-yet** — there is no consumer this step (same posture as the still-unwired `owner-scoped`
-helper).
+(`{ provide: <NAME>_REPOSITORY, useClass: … }`), and **exports the tokens** so the domain
+modules inject the interfaces. It is imported by `AccountsModule` (spec 04's first domain
+slice) — the first thing to pull `PersistenceModule` into the running `AppModule` graph;
+later domain modules import it the same way. See [domain.md](./domain.md#module-structure).
 
 | Token | Interface | Methods |
 |---|---|---|
-| `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findBySystemKey`, `lockByIdForUpdate(queryRunner, id)` |
-| `LEDGER_ENTRY_REPOSITORY` | `ILedgerEntryRepository` | `findById`, `create` |
+| `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findByIdAndOwner(id, ownerId)`, `findBySystemKey`, `lockByIdForUpdate(queryRunner, id)` |
+| `LEDGER_ENTRY_REPOSITORY` | `ILedgerEntryRepository` | `findById`, `create`, `findByAccount(accountId, limit)` |
 | `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create` |
 | `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create` |
 | `EXTERNAL_PAYEE_REPOSITORY` | `IExternalPayeeRepository` | `findById`, `create`, `findByOwner` |
@@ -266,9 +266,15 @@ helper).
   `ON CONFLICT` / guarded status transition to detect a concurrent retry.
 - **Owner-scoped reads.** `findByOwner` returns a customer's rows as a list (a customer has
   several accounts/payees). The single-resource, per-id anti-IDOR read
-  (`WHERE id = :id AND owner_id = :sub` → 404) stays with the existing
-  `common/authz/owner-scoped.ts` `findOwnedOrFail` helper, to be wired by the domain step's
-  endpoints (it remains the sanctioned pattern, still unwired here).
+  (`WHERE id = :id AND owner_id = :sub` → 404) is now wired by the accounts domain step as a
+  typed repository method, `IAccountRepository.findByIdAndOwner(id, ownerId)` — the
+  token-bound repo is the seam the domain service already depends on, so the anti-IDOR
+  predicate stays with its query without leaking `Repository<Entity>` into the service (see
+  [domain.md](./domain.md#object-level-authorization-anti-idor-adr-3)). The generic
+  `common/authz/owner-scoped.ts` `findOwnedOrFail` helper remains the sanctioned pattern for
+  ad-hoc owner-scoped reads. `ILedgerEntryRepository.findByAccount(accountId, limit)` backs
+  the per-account statement (`GET /api/accounts/:id/transactions`) — newest-first
+  (`created_at DESC, id DESC`), always bounded by `limit`.
 - **Deferred to the domain step (driven by real callers):** outbox `pollUnpublished`
   (FOR UPDATE SKIP LOCKED) + `markPublished`; hold PLACED-sum / reconciliation; the
   idempotency soft-duplicate-window lookup; ledger reconstruction / delta-sum;

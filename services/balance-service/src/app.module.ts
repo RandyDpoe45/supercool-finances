@@ -7,6 +7,7 @@ import { requestIdMiddleware } from './common/request-context/request-id.middlew
 import { AppConfigModule } from './config/config.module';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
+import { AccountsModule } from './modules/accounts/accounts.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { ApiModule } from './modules/api/api.module';
 import { InternalModule } from './modules/internal/internal.module';
@@ -22,7 +23,15 @@ import { InternalModule } from './modules/internal/internal.module';
  * module without main.ts. The error DTO's `requestId` depends on it.
  */
 @Module({
-  imports: [AppConfigModule, DatabaseModule, HealthModule, ApiModule, AdminModule, InternalModule],
+  imports: [
+    AppConfigModule,
+    DatabaseModule,
+    HealthModule,
+    ApiModule,
+    AccountsModule,
+    AdminModule,
+    InternalModule,
+  ],
   providers: [
     { provide: APP_GUARD, useClass: GatewayIdentityGuard },
     { provide: APP_GUARD, useClass: ServiceIdentityGuard },

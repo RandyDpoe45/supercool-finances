@@ -128,6 +128,19 @@ Harness rules:
   reconciliation). **How to write them** is the test-writer agent's method. This
   file sets the standard both follow.
 
+## Layering & serialization
+
+- **Services operate on entities / domain objects; DTO serialization is a transport
+  concern done at the controller boundary.** A service returns domain objects and owns
+  the business rules (authz, invariants); it never shapes the wire response.
+- **Serialize with explicit whitelist functions** — small, pure serializers that list
+  each output field by hand. **Never auto-serialize or spread an entity onto the wire:**
+  a leaked internal field (owner ids, internal counters, secrets) is a **security
+  defect**, so adding a DTO field must be a deliberate act, not an accident of shape.
+- **DTOs are the wire contract** (plain types), kept apart from entities.
+  **Derived / presentation fields** (e.g. a computed balance, an ISO timestamp) are
+  computed **at serialize time from shared helpers**, never stored on the entity.
+
 ## Repository layout (monorepo)
 
 Each app is **self-contained and atomic** in its own folder: **no cross-folder

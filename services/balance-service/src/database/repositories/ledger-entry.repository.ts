@@ -17,4 +17,12 @@ export class LedgerEntryRepository implements ILedgerEntryRepository {
   create(data: DeepPartial<LedgerEntry>): Promise<LedgerEntry> {
     return this.repo.save(this.repo.create(data));
   }
+
+  findByAccount(accountId: string, limit: number): Promise<LedgerEntry[]> {
+    return this.repo.find({
+      where: { accountId },
+      order: { createdAt: 'DESC', id: 'DESC' },
+      take: limit,
+    });
+  }
 }

@@ -35,14 +35,13 @@ import { IdempotencyKeyRepository } from './repositories/idempotency-key.reposit
 
 /**
  * Binds each aggregate's repository interface (token) to its TypeORM implementation and
- * exports the tokens, so the upcoming domain modules inject the interfaces — never the
- * concrete classes. `TypeOrmModule.forFeature` registers the entity repositories the impls
- * receive via `@InjectRepository`; it relies on the default connection wired by
- * {@link DatabaseModule}.
+ * exports the tokens, so the domain modules inject the interfaces — never the concrete
+ * classes. `TypeOrmModule.forFeature` registers the entity repositories the impls receive
+ * via `@InjectRepository`; it relies on the default connection wired by
+ * {@link DatabaseModule} (no second connection).
  *
- * Intentionally NOT imported into AppModule this step — there is no consumer yet (the domain
- * modules arrive next). Same posture as the foundation's `owner-scoped` helper, which was
- * added as a pattern but left unwired until a domain endpoint needed it.
+ * Wired into the app graph from spec 04's first domain slice: {@link AccountsModule} imports
+ * this module for its owner-scoped account reads. Later domain modules import it the same way.
  */
 @Module({
   imports: [

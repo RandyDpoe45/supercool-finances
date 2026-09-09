@@ -111,3 +111,22 @@ export async function insertTransaction(
     ...overrides,
   });
 }
+
+/**
+ * One ledger leg for an account. The `transaction_id` and `account_id` FK parents MUST
+ * be supplied via overrides (there is no sensible default). Denominated in MXN by
+ * default so read-path suites can reuse the migration-seeded currency rather than
+ * committing a throwaway one; pass `created_at` to control statement ordering (the
+ * column otherwise defaults to clock_timestamp() at insert).
+ */
+export async function insertLedgerEntry(
+  q: any,
+  overrides: Record<string, unknown> = {},
+): Promise<any> {
+  return insertRow(q, 'ledger_entry', {
+    delta: 100,
+    balance_after: 100,
+    currency: 'MXN',
+    ...overrides,
+  });
+}
