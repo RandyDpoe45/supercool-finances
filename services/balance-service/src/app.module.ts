@@ -9,19 +9,19 @@ import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { ApiModule } from './modules/api/api.module';
-import { IdempotencyModule } from './modules/idempotency/idempotency.module';
 import { InternalModule } from './modules/internal/internal.module';
-import { OtpModule } from './modules/otp/otp.module';
-import { PostingModule } from './modules/posting/posting.module';
 import { RedisModule } from './redis/redis.module';
 
 /**
  * Root module. It composes the app from the three per-surface registry modules
  * ({@link ApiModule} `/api`, {@link AdminModule} `/admin`, {@link InternalModule}
  * `/internal`) plus infrastructure (config, database, redis, health) — the controller-surface
- * convention (see CLAUDE.md § Controller surfaces). Feature modules (e.g. accounts) are NOT
- * imported here directly: they are reached through the surface module that declares their
- * controllers (accounts via {@link ApiModule}), which exports nothing to AppModule.
+ * convention (see CLAUDE.md § Controller surfaces). Feature modules (accounts, transfers, otp)
+ * are NOT imported here directly: they are reached through the surface module that declares
+ * their controllers. Since `TransfersApiController` and `OtpApiController` now consume them,
+ * `TransfersModule` (which imports `PostingModule` + `IdempotencyModule` + `OtpModule`) and
+ * `OtpModule` are reached via {@link ApiModule} — so the former transitional `PostingModule` /
+ * `IdempotencyModule` / `OtpModule` imports here have been removed.
  *
  * The identity guards and the error filter are bound GLOBALLY (APP_GUARD / APP_FILTER) so no
  * endpoint can skip them — each guard scopes itself to its own prefix (`/api`+`/admin` vs
@@ -41,13 +41,6 @@ import { RedisModule } from './redis/redis.module';
     RedisModule,
     HealthModule,
     ApiModule,
-    // PostingModule, IdempotencyModule and OtpModule are SERVICE-ONLY feature modules (no
-    // controller yet). They are imported here transitionally so their services are resolvable
-    // in the graph; each moves under its consuming surface module once a controller uses it
-    // (the transfers `-api` controller, step 4b).
-    PostingModule,
-    IdempotencyModule,
-    OtpModule,
     AdminModule,
     InternalModule,
   ],

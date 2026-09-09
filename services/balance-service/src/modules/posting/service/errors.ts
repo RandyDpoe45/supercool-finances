@@ -44,6 +44,19 @@ export class AccountFrozenError extends DomainError {
   }
 }
 
+/** The guarded `PENDING → POSTED` transition affected 0 rows: the header was already posted
+ * (or otherwise not pending), so the reducer refuses to touch any balance — the "money moves
+ * once" gate. The reducer OWNS this transition, so it owns the error. The `code` is
+ * deliberately `'TRANSFER_NOT_PENDING'` (shared with the transfers service's own pre-check):
+ * both mean the same thing to a caller and map to the same 409. */
+export class TransactionNotPendingError extends DomainError {
+  readonly code = 'TRANSFER_NOT_PENDING';
+
+  constructor(readonly transactionId?: string) {
+    super('Transaction is not in a pending state');
+  }
+}
+
 /** A leg's account currency does not match the transaction currency. */
 export class CurrencyMismatchError extends DomainError {
   readonly code = 'CURRENCY_MISMATCH';
