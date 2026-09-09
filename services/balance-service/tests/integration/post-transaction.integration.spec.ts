@@ -55,7 +55,12 @@ import { randomUUID } from 'crypto';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 
-import { getAppModule, getPostingService, getDomainErrors, tcpProbe } from '../support/harness';
+import {
+  getAppModule,
+  getPostingServiceToken,
+  getDomainErrors,
+  tcpProbe,
+} from '../support/harness';
 import { completeRawEnv } from '../support/env.fixture';
 import { insertRow, TODAY, MONTH_START } from '../support/pg';
 
@@ -126,13 +131,14 @@ suite('postTransaction — the atomic reducer (integration, needs Postgres)', ()
     }
     if (!ds) throw new Error('[integration] could not resolve the TypeORM DataSource from the app');
 
-    const PostingService = getPostingService();
-    posting = app.get(PostingService, { strict: false });
+    // The module binds `{ provide: POSTING_SERVICE, useClass: PostingService }`, so the
+    // instance is resolved BY TOKEN, not by class.
+    posting = app.get(getPostingServiceToken(), { strict: false });
     if (!posting || typeof posting.postTransaction !== 'function') {
       throw new Error(
         '[integration] resolved the posting service but it has no `postTransaction(command)` ' +
           'method. If the reducer entry point is named differently, update the seam ' +
-          '(tests/support/harness.ts:getPostingService) / coordinate the contract.',
+          '(tests/support/harness.ts:getPostingServiceToken) / coordinate the contract.',
       );
     }
     domainErrors = getDomainErrors();

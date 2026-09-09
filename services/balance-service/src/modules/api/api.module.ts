@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AccountsModule } from '../accounts/accounts.module';
-import { AccountsApiController } from '../accounts/accounts-api.controller';
+import { AccountsApiController } from '../accounts/api/accounts-api.controller';
 import { ApiController } from './api.controller';
 
 /**

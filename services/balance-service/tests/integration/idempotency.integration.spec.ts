@@ -40,7 +40,12 @@ import { randomUUID } from 'crypto';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 
-import { getAppModule, getIdempotencyService, getDomainErrors, tcpProbe } from '../support/harness';
+import {
+  getAppModule,
+  getIdempotencyServiceToken,
+  getDomainErrors,
+  tcpProbe,
+} from '../support/harness';
 import { completeRawEnv } from '../support/env.fixture';
 import { insertIdempotencyKey } from '../support/pg';
 
@@ -118,13 +123,14 @@ suite(
       if (!ds)
         throw new Error('[integration] could not resolve the TypeORM DataSource from the app');
 
-      const IdempotencyService = getIdempotencyService();
-      idem = app.get(IdempotencyService, { strict: false });
+      // The module binds `{ provide: IDEMPOTENCY_SERVICE, useClass: IdempotencyService }`, so
+      // the instance is resolved BY TOKEN, not by class.
+      idem = app.get(getIdempotencyServiceToken(), { strict: false });
       if (!idem || typeof idem.execute !== 'function') {
         throw new Error(
           '[integration] resolved the idempotency service but it has no `execute(params, operation)` ' +
             'method. If the entry point is named differently, update the seam ' +
-            '(tests/support/harness.ts:getIdempotencyService) / coordinate the contract.',
+            '(tests/support/harness.ts:getIdempotencyServiceToken) / coordinate the contract.',
         );
       }
       domainErrors = getDomainErrors();

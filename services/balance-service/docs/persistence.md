@@ -225,9 +225,13 @@ The two per-rail **clearing accounts** are seeded by a migration, `SeedSystemAcc
 
 Each aggregate has a repository exposed **behind an interface + a Symbol DI token**, with a
 TypeORM implementation — the same interface-behind-token pattern as the foundation's
-`IHealthRepository` / `HealthRepository`. Files live in
-`src/database/repositories/` (`<name>.repository.interface.ts` = token + interface;
-`<name>.repository.ts` = `@Injectable` impl using `@InjectRepository`).
+`IHealthRepository` / `HealthRepository`. Per the repo-wide **interface/impl separation**
+convention (see [`CLAUDE.md`](../../../CLAUDE.md#interface--implementation-separation)), the
+pair lives in **sibling subfolders** under `src/database/repositories/`:
+`interfaces/<name>.repository.interface.ts` (token + interface) and
+`impl/<name>.repository.ts` (the `@Injectable` impl using `@InjectRepository`, which imports
+its interface from `../interfaces/`). Consumers import the token + interface from
+`interfaces/`; only `persistence.module.ts` references `impl/` (to bind each token).
 
 `PersistenceModule` (`src/database/persistence.module.ts`) registers the ten entity
 repositories via `TypeOrmModule.forFeature([...])`, binds each token to its impl
