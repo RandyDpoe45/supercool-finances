@@ -21,6 +21,8 @@ export function completeRawEnv(overrides: Record<string, unknown> = {}): Record<
     REDIS_PORT: '6379',
     REDIS_PASSWORD: 'changeme-redis-local',
     INTERNAL_SERVICE_TOKEN: 'test-internal-service-token',
+    // Pepper for the keyed HMAC that hashes OTP codes at rest (env.schema requires >= 16 chars).
+    OTP_HASH_SECRET: 'test-otp-hash-secret-0123456789',
     ...overrides,
   };
 }

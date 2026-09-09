@@ -22,6 +22,9 @@ export const EnvSchema = z.object({
 
   // Shared secret for the `/internal` service-identity guard.
   INTERNAL_SERVICE_TOKEN: z.string().min(1),
+
+  // Pepper for hashing OTP codes at rest (keyed HMAC); never stored in Redis.
+  OTP_HASH_SECRET: z.string().min(16),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

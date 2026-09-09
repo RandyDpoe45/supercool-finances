@@ -81,7 +81,16 @@ whole prompt is about — correctness here is the deliverable.
   the user's out-of-band second factor for authorizing their **own** transfers.
   **Single-use is atomic:** a code authorizes **exactly one** transaction — two
   confirmations with the same code, even microseconds apart, cannot both succeed
-  (`GETDEL`: one wins, the other finds no code). **Generation is singleton-gated:** a
+  (`GETDEL`: one wins, the other finds no code). Refinement: the `GETDEL` targets an
+  `otp:<sub>:<code>` **composite key** (the code is in the key name) so a **wrong** code
+  is **non-destructive** — verification tolerates **up to 3 attempts** tracked in the
+  user-scoped record `otp:<sub>` (`{codeHash, attempts}`, reset on generate); the code is
+  **burned on attempt exhaustion or regenerate**. **Codes are stored hashed at rest** — Redis
+  never holds the plaintext: both the composite key and the record carry a **keyed HMAC**
+  (HMAC-SHA256 peppered by env `OTP_HASH_SECRET`, userId mixed in), so a Redis dump can't be
+  brute-forced offline over the 10^6 space. The hash is deterministic given the pepper, so
+  verification stays hashed-key existence with **no plaintext compare**; the plaintext code is
+  delivered **out-of-band** on generate and **never persisted**. **Generation is singleton-gated:** a
   user may generate a code without a pending transfer (harmless), but **not while one
   is already active** — a second generation is **rejected**; the slot frees only when
   the active code is **consumed** or its **TTL expires**. **Only user-initiated

@@ -15,8 +15,11 @@ per step:
 - **Step 3 — idempotency & soft-duplicate**
   ([below](#idempotency--soft-duplicate-step-3)): the generic at-most-once wrapper +
   60s duplicate-suppression, and the shared transaction-with-deadlock-retry helper.
+- **Step 4a — OTP module + Redis client**
+  ([below](#otp-module--redis-client-step-4a)): the user-scoped one-time code service
+  (singleton gate + single-use), and the global lifecycle-managed Redis client it uses.
 
-Holds, limits, OTP, transfers, and the outbox relay still arrive in later steps.
+Holds, limits, transfers, and the outbox relay still arrive in later steps.
 
 ## Module structure
 
@@ -423,9 +426,136 @@ when the transfers surface wires `execute` around `postTransaction` (the `operat
 `POST /api/transfers`. This step delivers the reusable wrapper and its unit-level guarantees;
 no endpoint yet.
 
+## OTP module + Redis client (step 4a)
+
+The user-scoped second factor for authorizing a user's **own** transfers (spec 04 OTP
+module). This step delivers the **capability only** — the OTP service and its Redis client.
+The generate/confirm endpoints, the `GET /api/pending-authorizations` route, and the transfer
+lifecycle that consumes a code all land in **step 4b**; there is **no HTTP surface** here.
+
+### Redis client
+
+`src/redis/` — a single lifecycle-managed **ioredis** client bound behind the `REDIS_CLIENT`
+Symbol token, mirroring the `src/database/` infra layout (parallel to `DatabaseModule`).
+`RedisModule` is **`@Global`**, so it is imported **once** in `AppModule` and the token is
+resolvable everywhere: the OTP service uses it now, and the step-6 outbox relay reuses the
+**same** client.
+
+| File | Role |
+|---|---|
+| `redis/redis.tokens.ts` | The `REDIS_CLIENT` Symbol token — consumers inject the connection via it, never construct their own. |
+| `redis/redis.module.ts` | `@Global` module: `useFactory` builds the client from the injected `AppConfig` (`config.redis.url`); implements `OnModuleDestroy` to `quit()` on shutdown. |
+
+Boot-resilience choices (the non-obvious *why*):
+
+- **`lazyConnect: true`** — no socket is opened until the first command. Booting `AppModule`
+  while Redis is down neither connects nor throws, so any test/boot that creates `AppModule`
+  without a live Redis stays green.
+- **`'error'` handler attached in the factory** — ioredis emits `'error'` on connection
+  trouble; an unhandled EventEmitter `'error'` is *thrown* and would crash the process. The
+  handler swallows it (ioredis owns reconnect/backoff), so a transient outage degrades
+  commands, not the process. Command-level failures still reject their own promises.
+- **`maxRetriesPerRequest: null`** — never hard-cap retries of a queued command across a
+  reconnect.
+- **`onModuleDestroy() → client.quit()`** (guarded with `.catch(() => 'OK')`) — a graceful
+  QUIT that won't surface as a rejected `app.close()` if Redis is unreachable at shutdown.
+  Safe on a never-connected lazy client too (ioredis does a transient connect then
+  disconnects; still resolves).
+
+### OTP module
+
+`src/modules/otp/` — follows the module layout convention: the module root holds only
+`otp.module.ts`; the service lives under `service/` (interface + `OTP_SERVICE` token in
+`service/interfaces/`, the concrete class in `service/impl/`, the domain error at the
+`service/` root so `service/interfaces/` never imports from `impl/`). It is a **service-only
+feature module** — it binds `{ provide: OTP_SERVICE, useClass: OtpService }` and **exports**
+the token, and is imported **transitionally by `AppModule`** until the transfers surface module
+consumes it (step 4b). It does **not** import `RedisModule` (that module is `@Global`). The
+service injects two tokens: `REDIS_CLIENT` and `APP_CONFIG` — the latter supplies the
+`OTP_HASH_SECRET` pepper used to hash codes at rest (below).
+
+| File | Role |
+|---|---|
+| `otp.module.ts` | Binds `{ provide: OTP_SERVICE, useClass: OtpService }`, exports the token. No controller. |
+| `service/interfaces/otp.service.interface.ts` | `IOtpService` + the `OTP_SERVICE` token + `OtpGenerationResult` + `OtpConsumeResult`. |
+| `service/errors.ts` | `OtpAlreadyActiveError` (`OTP_ALREADY_ACTIVE`), extends `DomainError`. |
+| `service/impl/otp.service.ts` | `OtpService implements IOtpService` — the generate/consume logic, plus the `OTP_CODE_LENGTH` / `OTP_TTL_SECONDS` / `OTP_MAX_ATTEMPTS` constants. |
+
+**Codes are hashed at rest.** Redis **never** holds the plaintext code. Both key shapes below
+carry a **keyed hash** — `codeHash = HMAC-SHA256(OTP_HASH_SECRET, "<sub>:<code>")` (`digest('hex')`).
+The pepper (`OTP_HASH_SECRET`, injected via `APP_CONFIG`, min 16 chars) means a Redis-only
+attacker cannot brute-force the small 10^6 code space offline; mixing `<sub>` into the message
+makes identical codes for different users hash differently. The HMAC is **deterministic** given
+the pepper, so the hash slots straight into the composite-key design — verification stays
+"does the hashed key exist", with **no plaintext compare anywhere**.
+
+**Keys & constants.** Two keys per user, **both TTL-bound to `OTP_TTL_SECONDS`**:
+
+- **`otp:<sub>`** (`sub` = the user id) — the user-scoped record, stored as the JSON string
+  `{ codeHash, attempts }`. One record does **triple duty**: (a) the **singleton gate** (created
+  with `SET … EX 300 NX`), (b) the **attempt counter**, (c) the **reverse-lookup** that lets a
+  lockout/regenerate delete the composite key by userId (the stored `codeHash` names it).
+- **`otp:<sub>:<codeHash>`** — a marker (value `'1'`), the **`GETDEL` target**. The code's
+  **hash** is IN the key name, so the key's existence *is* the verification — there is no
+  stored-vs-supplied compare, and no plaintext ever reaches Redis.
+
+`OTP_CODE_LENGTH = 6` (6-digit numeric), `OTP_TTL_SECONDS = 300` (5-minute TTL), and
+`OTP_MAX_ATTEMPTS = 3` (attempts per code before lockout) are **prototype defaults, not
+env-configurable yet**.
+
+**Code generation.** A code is minted from a CSPRNG — `crypto.randomInt(0, 10 ** 6)` zero-
+padded to 6 digits — never `Math.random`. The plaintext is hashed immediately (`hash(sub, code)`)
+and only the hash is persisted; the plaintext leaves the service **only** in the `generate`
+return value, for out-of-band delivery, and is **never stored**.
+
+**Singleton gate (`generate`).** Meta-first, and the write itself is the gate:
+`SET otp:<sub> {"codeHash","attempts":0} EX 300 NX`. `NX` stores only when no record exists; a
+**`null`** reply means the slot is already taken → the service throws `OtpAlreadyActiveError`.
+Then it writes the marker `SET otp:<sub>:<codeHash> '1' EX 300`. A user MAY generate without a
+pending transfer (harmless), but never a **second** code while one is live; generate **resets
+the attempt allowance** for the fresh code. The slot frees only when the code is **consumed**,
+**locked out**, or its **TTL expires**. The gate being an atomic `SET NX` (not read-then-write)
+means two concurrent generations cannot both win. Meta-first ordering is deliberate: the record
+is authoritative, and a crash between the two writes self-heals — a missing marker just makes
+every consume miss until the record clears on TTL/lockout.
+
+**Single-use + typo-tolerant verification (`consume`).** The supplied code is hashed with the
+same keyed HMAC, then verification is the **existence of the composite key**, consumed via one
+atomic `GETDEL otp:<sub>:<hash(supplied)>`:
+
+- **Correct code** — hashes to the existing composite key, so `GETDEL` returns the marker and
+  deletes it atomically; the service then `DEL otp:<sub>` to free the slot and clear the counter,
+  and returns `{ ok: true, remainingAttempts: 0, lockedOut: false }`. Because two confirmations of
+  the same code cannot both find the marker (one gets `'1'`, the other `null`), a code
+  authorizes **exactly one** transaction — the money-safety single-use invariant.
+- **Wrong code** — hashes to a **non-existent** composite key, so the `GETDEL` is a **no-op** and
+  the real code **survives** (typo-tolerant). The service then reads `otp:<sub>`: if it is `null`
+  (no active code / expired) it returns `{ ok: false, remainingAttempts: 0, lockedOut: false }`
+  **without creating anything** (never resurrect a TTL-less key). Otherwise it bumps `attempts`:
+  on exhaustion (`attempts + 1 >= OTP_MAX_ATTEMPTS`) it **burns** the composite
+  (`DEL otp:<sub>:<stored-codeHash>` + `DEL otp:<sub>`) and returns
+  `{ ok: false, remainingAttempts: 0, lockedOut: true }`; otherwise it persists the bumped count
+  with an **`XX`-guarded** `SET … XX KEEPTTL` and returns
+  `{ ok: false, remainingAttempts: OTP_MAX_ATTEMPTS - used, lockedOut: false }`.
+
+`consume` returns a rich `OtpConsumeResult` (`{ ok, remainingAttempts, lockedOut }`), never a
+bare boolean and never throws for a wrong code.
+
+**App-side (best-effort) counter.** The single-use guarantee rides on the atomic `GETDEL` of the
+composite key, **not** on the counter — the counter is a best-effort throttle. A rare concurrent
+double-wrong may under-count by one; that is acceptable because it never weakens single-use. The
+bumped count is written with **`SET … XX KEEPTTL`** (ioredis / Redis 6+): `KEEPTTL` so counting a
+wrong attempt does **not** extend the code's remaining life, and **`XX`** so the write is a no-op
+(null reply) rather than a create if a concurrent successful `consume` `DEL`'d the record between
+this branch's `GET` and `SET`. Without `XX`, that resurrected record would have **no TTL** and
+would jam the `SET … EX … NX` singleton gate in `generate` forever — a permanent self-lockout with
+no self-heal. On the null reply the branch writes nothing and returns the no-active-code result.
+
 ## Not in this slice (later steps)
 
-Internal transfers + OTP, holds + external outbound, the outbox **relay worker**, limits +
+Internal transfers + the OTP HTTP surface (step 4b: `POST /api/transfers`,
+`POST /api/transfers/:id/confirm`, `GET /api/pending-authorizations`, wiring `IOtpService`
+into the transfer lifecycle), holds + external outbound, the outbox **relay worker**, limits +
 external payees, and admin ops + maker-checker + external rails. Statement pagination beyond
 the first page is likewise deferred — the read slice returns only the most recent
 `STATEMENT_PAGE_LIMIT` legs.

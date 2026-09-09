@@ -11,12 +11,14 @@ import { AdminModule } from './modules/admin/admin.module';
 import { ApiModule } from './modules/api/api.module';
 import { IdempotencyModule } from './modules/idempotency/idempotency.module';
 import { InternalModule } from './modules/internal/internal.module';
+import { OtpModule } from './modules/otp/otp.module';
 import { PostingModule } from './modules/posting/posting.module';
+import { RedisModule } from './redis/redis.module';
 
 /**
  * Root module. It composes the app from the three per-surface registry modules
  * ({@link ApiModule} `/api`, {@link AdminModule} `/admin`, {@link InternalModule}
- * `/internal`) plus infrastructure (config, database, health) — the controller-surface
+ * `/internal`) plus infrastructure (config, database, redis, health) — the controller-surface
  * convention (see CLAUDE.md § Controller surfaces). Feature modules (e.g. accounts) are NOT
  * imported here directly: they are reached through the surface module that declares their
  * controllers (accounts via {@link ApiModule}), which exports nothing to AppModule.
@@ -34,14 +36,18 @@ import { PostingModule } from './modules/posting/posting.module';
   imports: [
     AppConfigModule,
     DatabaseModule,
+    // RedisModule is @Global: imported ONCE here so the REDIS_CLIENT token is resolvable
+    // everywhere (the OTP service now, the step-6 outbox relay later).
+    RedisModule,
     HealthModule,
     ApiModule,
-    // PostingModule and IdempotencyModule are SERVICE-ONLY feature modules (no controller
-    // yet). They are imported here transitionally so their services are resolvable in the
-    // graph; each moves under its consuming surface module once a controller uses it (the
-    // transfers `-api` controller, step 4).
+    // PostingModule, IdempotencyModule and OtpModule are SERVICE-ONLY feature modules (no
+    // controller yet). They are imported here transitionally so their services are resolvable
+    // in the graph; each moves under its consuming surface module once a controller uses it
+    // (the transfers `-api` controller, step 4b).
     PostingModule,
     IdempotencyModule,
+    OtpModule,
     AdminModule,
     InternalModule,
   ],
