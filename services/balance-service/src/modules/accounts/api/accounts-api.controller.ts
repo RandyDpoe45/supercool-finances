@@ -1,8 +1,11 @@
 import { Controller, Get, Inject, Param, ParseUUIDPipe } from '@nestjs/common';
-import { Identity } from '../../common/identity/identity.decorator';
-import { RequestIdentity } from '../../common/identity/request-identity';
-import { serializeAccount, serializeStatementEntry } from './accounts.serializer';
-import { ACCOUNTS_SERVICE, IAccountsService } from './interfaces/accounts.service.interface';
+import { Identity } from '../../../common/identity/identity.decorator';
+import { RequestIdentity } from '../../../common/identity/request-identity';
+import { serializeAccount, serializeStatementEntry } from './serializers/accounts.serializer';
+import {
+  ACCOUNTS_SERVICE,
+  IAccountsService,
+} from '../service/interfaces/accounts.service.interface';
 import { AccountDto } from './dto/account.dto';
 import { StatementEntryDto } from './dto/statement-entry.dto';
 

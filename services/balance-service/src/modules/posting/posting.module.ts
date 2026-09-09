@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PersistenceModule } from '../../database/persistence.module';
-import { PostingService } from './impl/posting.service';
-import { POSTING_SERVICE } from './interfaces/posting.service.interface';
+import { PostingService } from './service/impl/posting.service';
+import { POSTING_SERVICE } from './service/interfaces/posting.service.interface';
 
 /**
  * The posting domain module. Provides the single balance-mutating reducer all money movement

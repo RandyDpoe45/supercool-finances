@@ -155,6 +155,10 @@ Harness rules:
 - **`AppModule` composes from the surface modules + infra**, not from feature modules.
 - A **service-only feature module** (no controller yet) is imported by its consuming
   surface module — or **transitionally by `AppModule`** until a controller consumes it.
+- **Each controller lives in its own surface folder** inside the feature module — `api/`
+  (and later `admin/` / `internal/`) — holding that controller **plus its own `dto/` and
+  `serializers/`**: `<surface>/<name>-<surface>.controller.ts`, `<surface>/dto/*.dto.ts`,
+  `<surface>/serializers/<name>.serializer.ts`.
 
 ## Interface / implementation separation
 
@@ -162,8 +166,14 @@ Harness rules:
   `interfaces/` (the interface + its DI token) and `impl/` (the concrete class)
   subfolders.** Consumers depend on the **interface via its Symbol token**, never the
   concrete class; the dependency points **impl → interface**, never the reverse (an
-  interface must not import from `impl/`). (The foundation `src/health/` module predates
-  this convention and is left as-is.)
+  interface must not import from `impl/`).
+- **Module layout.** Inside `src/modules/<name>/`, the module root holds **only**
+  `<name>.module.ts`. Business logic lives under **`service/`**: `service/interfaces/`
+  (the service interface + its `<NAME>_SERVICE` token + the service's **contract types**)
+  and `service/impl/` (the concrete class + impl-only helpers); **service-owned domain
+  errors** and any **pure shared helper the interface needs** (e.g. a fingerprint helper)
+  sit at the `service/` root so the interface can import them **without** reaching into
+  `impl/`. (The foundation `src/health/` module predates this convention and is left as-is.)
 
 ## Repository layout (monorepo)
 

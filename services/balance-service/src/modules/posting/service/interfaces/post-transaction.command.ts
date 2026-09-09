@@ -1,4 +1,4 @@
-import { TransactionType } from '../../database/entities/enums';
+import { TransactionType } from '../../../../database/entities/enums';
 
 /**
  * One signed leg of a balancing post: a delta applied to a single account. `delta` is a

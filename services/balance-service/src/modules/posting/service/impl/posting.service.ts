@@ -2,40 +2,40 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryRunner } from 'typeorm';
-import { runInTransactionWithRetry } from '../../../common/db/run-in-transaction';
-import { addMinor, availableMinor, sumMinor } from '../../../common/money/money';
-import { Account } from '../../../database/entities/account.entity';
-import { AccountKind, AccountStatus, TransactionStatus } from '../../../database/entities/enums';
-import { Transaction } from '../../../database/entities/transaction.entity';
+import { runInTransactionWithRetry } from '../../../../common/db/run-in-transaction';
+import { addMinor, availableMinor, sumMinor } from '../../../../common/money/money';
+import { Account } from '../../../../database/entities/account.entity';
+import { AccountKind, AccountStatus, TransactionStatus } from '../../../../database/entities/enums';
+import { Transaction } from '../../../../database/entities/transaction.entity';
 import {
   ACCOUNT_REPOSITORY,
   IAccountRepository,
-} from '../../../database/repositories/interfaces/account.repository.interface';
+} from '../../../../database/repositories/interfaces/account.repository.interface';
 import {
   ILedgerEntryRepository,
   LEDGER_ENTRY_REPOSITORY,
-} from '../../../database/repositories/interfaces/ledger-entry.repository.interface';
+} from '../../../../database/repositories/interfaces/ledger-entry.repository.interface';
 import {
   IOutboxEventRepository,
   OUTBOX_EVENT_REPOSITORY,
-} from '../../../database/repositories/interfaces/outbox-event.repository.interface';
+} from '../../../../database/repositories/interfaces/outbox-event.repository.interface';
 import {
   ITransactionRepository,
   TRANSACTION_REPOSITORY,
-} from '../../../database/repositories/interfaces/transaction.repository.interface';
-import { PostingLeg, PostTransactionCommand } from '../post-transaction.command';
+} from '../../../../database/repositories/interfaces/transaction.repository.interface';
+import { PostingLeg, PostTransactionCommand } from '../interfaces/post-transaction.command';
 import {
   AccountFrozenError,
   AccountNotFoundError,
   CurrencyMismatchError,
   InsufficientFundsError,
   InvalidPostingCommandError,
-} from '../posting.errors';
+} from '../errors';
 import {
   TRANSACTION_POSTED_EVENT,
   TransactionEventLeg,
   TransactionPostedPayload,
-} from '../transaction-event';
+} from '../interfaces/transaction-event';
 import { IPostingService } from '../interfaces/posting.service.interface';
 
 /** Canonical minor-unit string shapes. A signed integer for a leg delta, an unsigned integer

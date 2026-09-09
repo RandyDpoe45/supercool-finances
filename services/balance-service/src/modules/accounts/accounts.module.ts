@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PersistenceModule } from '../../database/persistence.module';
-import { AccountsService } from './impl/accounts.service';
-import { ACCOUNTS_SERVICE } from './interfaces/accounts.service.interface';
+import { AccountsService } from './service/impl/accounts.service';
+import { ACCOUNTS_SERVICE } from './service/interfaces/accounts.service.interface';
 
 /**
  * The accounts FEATURE module. It owns the accounts domain service and its surface

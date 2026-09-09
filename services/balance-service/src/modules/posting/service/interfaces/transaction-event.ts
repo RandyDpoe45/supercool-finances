@@ -1,4 +1,4 @@
-import { TransactionType } from '../../database/entities/enums';
+import { TransactionType } from '../../../../database/entities/enums';
 
 /**
  * The transaction-event contract as the balance service emits it — the `payload` written

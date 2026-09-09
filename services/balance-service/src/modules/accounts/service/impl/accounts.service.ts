@@ -4,16 +4,16 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
-import { Account } from '../../../database/entities/account.entity';
-import { LedgerEntry } from '../../../database/entities/ledger-entry.entity';
+import { Account } from '../../../../database/entities/account.entity';
+import { LedgerEntry } from '../../../../database/entities/ledger-entry.entity';
 import {
   ACCOUNT_REPOSITORY,
   IAccountRepository,
-} from '../../../database/repositories/interfaces/account.repository.interface';
+} from '../../../../database/repositories/interfaces/account.repository.interface';
 import {
   ILedgerEntryRepository,
   LEDGER_ENTRY_REPOSITORY,
-} from '../../../database/repositories/interfaces/ledger-entry.repository.interface';
+} from '../../../../database/repositories/interfaces/ledger-entry.repository.interface';
 import { IAccountsService } from '../interfaces/accounts.service.interface';
 
 /** Upper bound on ledger legs returned by one statement read. The underlying query

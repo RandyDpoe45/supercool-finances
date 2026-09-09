@@ -1,5 +1,5 @@
-import { Transaction } from '../../../database/entities/transaction.entity';
-import { PostTransactionCommand } from '../post-transaction.command';
+import { Transaction } from '../../../../database/entities/transaction.entity';
+import { PostTransactionCommand } from './post-transaction.command';
 
 /** DI token for {@link IPostingService}. Consumers depend on the interface via this token,
  * never the concrete reducer class. */

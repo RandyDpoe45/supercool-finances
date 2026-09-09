@@ -28,18 +28,20 @@ module provides + exports the service and owns its surface controller file, whil
 surface registry ({@link ApiModule}, `src/modules/api/api.module.ts`) **declares** the
 controller and imports the feature module for the service. The service also follows the
 **interface/impl separation** convention
-([`CLAUDE.md`](../../../CLAUDE.md#interface--implementation-separation)): interface + token in
-`interfaces/`, concrete class in `impl/`, consumers inject the token.
+([`CLAUDE.md`](../../../CLAUDE.md#interface--implementation-separation)): the module root
+holds only `accounts.module.ts`; business logic lives under `service/` (interface + token in
+`service/interfaces/`, concrete class in `service/impl/`, consumers inject the token); and the
+controller lives in its own `api/` surface folder with its `dto/` and `serializers/`.
 
 | File | Role |
 |---|---|
-| `accounts.module.ts` | Feature module: `imports: [PersistenceModule]`, binds `{ provide: ACCOUNTS_SERVICE, useClass: AccountsService }`, `exports: [ACCOUNTS_SERVICE]`. **No controllers of its own.** |
-| `interfaces/accounts.service.interface.ts` | `IAccountsService` + the `ACCOUNTS_SERVICE` Symbol token. |
-| `impl/accounts.service.ts` | `AccountsService implements IAccountsService` — owner-scoped reads (returns **entities**) + `assertOwnerScope` + `STATEMENT_PAGE_LIMIT`. |
-| `accounts-api.controller.ts` | `AccountsApiController`, `@Controller('api')` — the two read routes; **declared by `ApiModule`**; injects `@Inject(ACCOUNTS_SERVICE) accounts: IAccountsService`, calls it (entities) then serializes to DTOs. |
-| `accounts.serializer.ts` | Pure explicit-whitelist serializers `serializeAccount` / `serializeStatementEntry` (entity→DTO). |
-| `dto/account.dto.ts` | `AccountDto` — customer view of an account (the wire contract). |
-| `dto/statement-entry.dto.ts` | `StatementEntryDto` — one ledger leg of a statement (the wire contract). |
+| `accounts.module.ts` | Feature module (the only root file): `imports: [PersistenceModule]`, binds `{ provide: ACCOUNTS_SERVICE, useClass: AccountsService }`, `exports: [ACCOUNTS_SERVICE]`. **No controllers of its own.** |
+| `service/interfaces/accounts.service.interface.ts` | `IAccountsService` + the `ACCOUNTS_SERVICE` Symbol token. |
+| `service/impl/accounts.service.ts` | `AccountsService implements IAccountsService` — owner-scoped reads (returns **entities**) + `assertOwnerScope` + `STATEMENT_PAGE_LIMIT`. |
+| `api/accounts-api.controller.ts` | `AccountsApiController`, `@Controller('api')` — the two read routes; **declared by `ApiModule`**; injects `@Inject(ACCOUNTS_SERVICE) accounts: IAccountsService`, calls it (entities) then serializes to DTOs. |
+| `api/serializers/accounts.serializer.ts` | Pure explicit-whitelist serializers `serializeAccount` / `serializeStatementEntry` (entity→DTO). |
+| `api/dto/account.dto.ts` | `AccountDto` — customer view of an account (the wire contract). |
+| `api/dto/statement-entry.dto.ts` | `StatementEntryDto` — one ledger leg of a statement (the wire contract). |
 
 `PersistenceModule` is imported by `AccountsModule`; `AccountsModule` is reached from the
 graph via `ApiModule` (which `AppModule` imports), so the accounts feature is wired into the
@@ -152,14 +154,19 @@ controller yet, it is imported **transitionally by `AppModule`** so the service 
 in the graph. Under the controller-surface convention it moves under its consuming surface
 module once a controller uses it (the transfers `-api` controller, step 4).
 
+The module root holds only `posting.module.ts`; everything else is under `service/`
+(no controller yet). The service's contract types (`post-transaction.command.ts`,
+`transaction-event.ts`) live in `service/interfaces/` alongside the interface, and the domain
+errors at the `service/` root — so `service/interfaces/` never imports from `service/impl/`.
+
 | File | Role |
 |---|---|
 | `posting.module.ts` | Binds `{ provide: POSTING_SERVICE, useClass: PostingService }`, exports the token; imports `PersistenceModule`. |
-| `interfaces/posting.service.interface.ts` | `IPostingService` + the `POSTING_SERVICE` Symbol token. |
-| `impl/posting.service.ts` | `PostingService implements IPostingService` — the reducer + its private helpers (`applyPosting`, `checkAndFold`, `validateCommand`). |
-| `post-transaction.command.ts` | `PostTransactionCommand` / `PostingLeg` — the **domain** input (not a wire DTO). |
-| `posting.errors.ts` | The concrete posting domain errors (extend `DomainError`). |
-| `transaction-event.ts` | The balance-service **copy** of the transaction-event payload contract. |
+| `service/interfaces/posting.service.interface.ts` | `IPostingService` + the `POSTING_SERVICE` Symbol token. |
+| `service/interfaces/post-transaction.command.ts` | `PostTransactionCommand` / `PostingLeg` — the **domain** input (not a wire DTO). |
+| `service/interfaces/transaction-event.ts` | The balance-service **copy** of the transaction-event payload contract. |
+| `service/errors.ts` | The concrete posting domain errors (extend `DomainError`). |
+| `service/impl/posting.service.ts` | `PostingService implements IPostingService` — the reducer + its private helpers (`applyPosting`, `checkAndFold`, `validateCommand`). |
 
 ### The command
 
@@ -293,8 +300,8 @@ when the write routes first throw these — there is no HTTP surface for the red
 
 ### Outbox payload (provisional transaction-event contract)
 
-`transaction-event.ts` holds the **balance-service's own copy** of the transaction-event
-shape (per ADR-16 — the analytics server keeps an independent copy; the **spec** is the
+`service/interfaces/transaction-event.ts` holds the **balance-service's own copy** of the
+transaction-event shape (per ADR-16 — the analytics server keeps an independent copy; the **spec** is the
 contract of record that keeps them in sync). It is **provisional** for this step; the relay
 and consumer steps may refine it, tracked via the spec. `event_type` is
 `transaction.posted`; the `jsonb` `payload` is:
@@ -320,15 +327,16 @@ entity's `Record<string, unknown>` column without an explicit index signature.
 `Idempotency-Key` with 60s soft duplicate-suppression. It has **no HTTP surface** this step;
 `IdempotencyModule` binds the service behind the `IDEMPOTENCY_SERVICE` token (interface/impl
 split) and **exports** it; it is a **service-only feature module**, imported **transitionally
-by `AppModule`** until the transfers surface consumes it (step 4).
+by `AppModule`** until the transfers surface consumes it (step 4). The module root holds only
+`idempotency.module.ts`; everything else is under `service/`.
 
 | File | Role |
 |---|---|
 | `idempotency.module.ts` | Binds `{ provide: IDEMPOTENCY_SERVICE, useClass: IdempotencyService }`, exports the token; imports `PersistenceModule`. |
-| `interfaces/idempotency.service.interface.ts` | `IIdempotencyService` + the `IDEMPOTENCY_SERVICE` token, plus the shared `IdempotencyParams` / `IdempotentOperation` / `IdempotencyOutcome` types (kept here so the interface never imports from `impl/`). |
-| `impl/idempotency.service.ts` | `IdempotencyService implements IIdempotencyService` — the `execute(params, operation)` wrapper + its replay/claim flow. |
-| `fingerprint.ts` | Pure `computeFingerprint(input)` — `sha256` hex over the canonical business tuple. |
-| `idempotency.errors.ts` | The domain errors (extend `DomainError`). |
+| `service/interfaces/idempotency.service.interface.ts` | `IIdempotencyService` + the `IDEMPOTENCY_SERVICE` token, plus the shared `IdempotencyParams` / `IdempotentOperation` / `IdempotencyOutcome` types (kept here so the interface never imports from `impl/`). |
+| `service/impl/idempotency.service.ts` | `IdempotencyService implements IIdempotencyService` — the `execute(params, operation)` wrapper + its replay/claim flow. |
+| `service/fingerprint.ts` | Pure `computeFingerprint(input)` — `sha256` hex over the canonical business tuple. Lives at the `service/` root so BOTH the interface (for `FingerprintInput`) and the impl import it without an interface→impl edge. |
+| `service/errors.ts` | The domain errors (extend `DomainError`). |
 
 ### The `execute` contract
 

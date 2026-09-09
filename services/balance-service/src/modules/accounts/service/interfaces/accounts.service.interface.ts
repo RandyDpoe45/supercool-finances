@@ -1,5 +1,5 @@
-import { Account } from '../../../database/entities/account.entity';
-import { LedgerEntry } from '../../../database/entities/ledger-entry.entity';
+import { Account } from '../../../../database/entities/account.entity';
+import { LedgerEntry } from '../../../../database/entities/ledger-entry.entity';
 
 /** DI token for {@link IAccountsService}. Consumers (the `/api` surface controller) depend on
  * the interface via this token, never the concrete class. */

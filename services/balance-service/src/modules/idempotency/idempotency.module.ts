@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PersistenceModule } from '../../database/persistence.module';
-import { IdempotencyService } from './impl/idempotency.service';
-import { IDEMPOTENCY_SERVICE } from './interfaces/idempotency.service.interface';
+import { IdempotencyService } from './service/impl/idempotency.service';
+import { IDEMPOTENCY_SERVICE } from './service/interfaces/idempotency.service.interface';
 
 /**
  * The idempotency domain module. Provides the generic at-most-once + soft-duplicate wrapper

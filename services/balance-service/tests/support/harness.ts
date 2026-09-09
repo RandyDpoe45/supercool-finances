@@ -285,6 +285,11 @@ export interface AccountSerializers {
 export function getAccountSerializers(): AccountSerializers {
   const candidates = [
     `${SRC}/modules/accounts/accounts.serializer`,
+    // PR #16 layout: the controller moved into its own `api/` surface folder with its
+    // `serializers/` (and `dto/`). Old paths kept for robustness to either layout.
+    `${SRC}/modules/accounts/api/serializers/accounts.serializer`,
+    `${SRC}/modules/accounts/api/serializers/account.serializer`,
+    `${SRC}/modules/accounts/api/serializers`,
     `${SRC}/modules/accounts/account.serializer`,
     `${SRC}/modules/accounts/serializers`,
     `${SRC}/modules/accounts/serializer`,
@@ -325,6 +330,7 @@ export function getAccountsService(): any {
     [
       `${SRC}/modules/accounts/accounts.service`,
       `${SRC}/modules/accounts/impl/accounts.service`,
+      `${SRC}/modules/accounts/service/impl/accounts.service`,
       `${SRC}/modules/accounts/account.service`,
       `${SRC}/modules/api/accounts.service`,
     ],
@@ -357,7 +363,9 @@ export function getPostingService(): any {
       `${SRC}/modules/ledger/ledger.service`,
       `${SRC}/modules/posting/posting.service`,
       `${SRC}/modules/posting/impl/posting.service`,
+      `${SRC}/modules/posting/service/impl/posting.service`,
       `${SRC}/modules/ledger/impl/ledger.service`,
+      `${SRC}/modules/ledger/service/impl/ledger.service`,
       `${SRC}/modules/transactions/posting.service`,
       `${SRC}/modules/transactions/transactions.service`,
       `${SRC}/modules/transfers/posting.service`,
@@ -405,6 +413,7 @@ export function getIdempotencyService(): any {
     [
       `${SRC}/modules/idempotency/idempotency.service`,
       `${SRC}/modules/idempotency/impl/idempotency.service`,
+      `${SRC}/modules/idempotency/service/impl/idempotency.service`,
       `${SRC}/modules/transfers/idempotency.service`,
       `${SRC}/modules/posting/idempotency.service`,
       `${SRC}/common/idempotency/idempotency.service`,
@@ -437,6 +446,9 @@ function resolveServiceToken(tokenName: string, moduleBase: string): symbol {
   const token = findExportAcross(
     [
       `${SRC}/modules/${moduleBase}/interfaces/${moduleBase}.service.interface`,
+      // PR #16 layout: service files move under `service/{interfaces,impl}`.
+      `${SRC}/modules/${moduleBase}/service/interfaces/${moduleBase}.service.interface`,
+      `${SRC}/modules/${moduleBase}/service/interfaces/${moduleBase}.service.tokens`,
       `${SRC}/modules/${moduleBase}/interfaces/${moduleBase}.service.tokens`,
       `${SRC}/modules/${moduleBase}/${moduleBase}.service.interface`,
       `${SRC}/modules/${moduleBase}/${moduleBase}.tokens`,
@@ -490,6 +502,10 @@ export function getComputeFingerprint(): ((input: FingerprintInput) => string) |
   return findExportAcross(
     [
       `${SRC}/modules/idempotency/fingerprint`,
+      // PR #16 layout: fingerprint moves under `service/` (so the interface can import
+      // FingerprintInput without an impl edge) — try both `service/` and `service/interfaces/`.
+      `${SRC}/modules/idempotency/service/fingerprint`,
+      `${SRC}/modules/idempotency/service/interfaces/fingerprint`,
       `${SRC}/modules/idempotency/idempotency.fingerprint`,
       `${SRC}/modules/idempotency/idempotency.service`,
       `${SRC}/modules/idempotency`,
@@ -526,6 +542,9 @@ export function getDomainErrors(): ResolvedDomainErrors {
     `${SRC}/modules/ledger/domain.errors`,
     `${SRC}/modules/ledger/errors`,
     `${SRC}/modules/posting/posting.errors`,
+    // PR #16 layout: domain error files move to `service/errors.ts` per module.
+    `${SRC}/modules/posting/service/errors`,
+    `${SRC}/modules/idempotency/service/errors`,
     `${SRC}/modules/idempotency/idempotency.errors`,
     `${SRC}/modules/idempotency/errors`,
     `${SRC}/common/idempotency/idempotency.errors`,

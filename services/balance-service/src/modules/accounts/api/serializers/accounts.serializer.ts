@@ -1,8 +1,8 @@
-import { availableBalance } from '../../common/money/money';
-import { Account } from '../../database/entities/account.entity';
-import { LedgerEntry } from '../../database/entities/ledger-entry.entity';
-import { AccountDto } from './dto/account.dto';
-import { StatementEntryDto } from './dto/statement-entry.dto';
+import { availableBalance } from '../../../../common/money/money';
+import { Account } from '../../../../database/entities/account.entity';
+import { LedgerEntry } from '../../../../database/entities/ledger-entry.entity';
+import { AccountDto } from '../dto/account.dto';
+import { StatementEntryDto } from '../dto/statement-entry.dto';
 
 /**
  * The anti-leak transport boundary: pure entity→DTO serializers for the `/api/accounts`

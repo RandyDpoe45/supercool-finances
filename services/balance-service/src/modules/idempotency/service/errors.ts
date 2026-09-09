@@ -1,4 +1,4 @@
-import { DomainError } from '../../common/errors/domain-error';
+import { DomainError } from '../../../common/errors/domain-error';
 
 /**
  * Domain errors raised by {@link IdempotencyService}. Plain, framework-agnostic classes
