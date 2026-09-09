@@ -609,9 +609,10 @@ export function getOtpServiceToken(): symbol {
 }
 
 /**
- * The `OtpService` CLASS, for the pure unit spec: `new OtpService(fakeRedis)` (DI decorators
- * are inert under plain instantiation). Scanned with `findExportAcross`; if the implementor
- * moves/renames it, add the path/export HERE — the single coordination point.
+ * The `OtpService` CLASS, for the pure unit spec: `new OtpService(fakeRedis, config)` (DI
+ * decorators are inert under plain instantiation; the 2nd arg is the AppConfig carrying
+ * `otp.hashSecret`). Scanned with `findExportAcross`; if the implementor moves/renames it,
+ * add the path/export HERE — the single coordination point.
  */
 export function getOtpService(): any {
   const cls = findExportAcross(OTP_SERVICE_IMPL_CANDIDATES, ['OtpService']);
@@ -642,11 +643,16 @@ export function getRedisClientToken(): symbol {
 
 /**
  * BEST-EFFORT resolution of the OTP tuning constants (`OTP_CODE_LENGTH` = 6, `OTP_TTL_SECONDS`
- * = 300) exported from the impl. Does NOT throw when absent: the code-length / ttl assertions
- * fall back to structural bounds (`code.length >= 4`, `ttlSeconds > 0`) when a constant is not
- * exported here.
+ * = 300, `OTP_MAX_ATTEMPTS` = 3 — the typo-tolerance allowance before lockout) exported from
+ * the impl. Does NOT throw when absent: the code-length / ttl assertions fall back to structural
+ * bounds (`code.length >= 4`, `ttlSeconds > 0`), and the attempt-ladder proofs fall back to a
+ * max of 3, when a constant is not exported here.
  */
-export function getOtpConstants(): { OTP_CODE_LENGTH?: number; OTP_TTL_SECONDS?: number } {
+export function getOtpConstants(): {
+  OTP_CODE_LENGTH?: number;
+  OTP_TTL_SECONDS?: number;
+  OTP_MAX_ATTEMPTS?: number;
+} {
   const candidates = [
     ...OTP_SERVICE_IMPL_CANDIDATES,
     `${SRC}/modules/otp/otp.constants`,
@@ -656,6 +662,7 @@ export function getOtpConstants(): { OTP_CODE_LENGTH?: number; OTP_TTL_SECONDS?:
   return {
     OTP_CODE_LENGTH: findExportAcross(candidates, ['OTP_CODE_LENGTH']),
     OTP_TTL_SECONDS: findExportAcross(candidates, ['OTP_TTL_SECONDS']),
+    OTP_MAX_ATTEMPTS: findExportAcross(candidates, ['OTP_MAX_ATTEMPTS', 'OTP_MAX_WRONG_ATTEMPTS']),
   };
 }
 

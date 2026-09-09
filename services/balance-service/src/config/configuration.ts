@@ -18,12 +18,19 @@ export interface RedisConfig {
   url: string;
 }
 
+export interface OtpConfig {
+  /** Pepper for the keyed HMAC that hashes OTP codes at rest. Raw secret — never
+   *  composed into a URL/DSN (discrete-credentials rule). */
+  hashSecret: string;
+}
+
 export interface AppConfig {
   nodeEnv: Env['NODE_ENV'];
   port: number;
   postgres: PostgresConfig;
   redis: RedisConfig;
   internalServiceToken: string;
+  otp: OtpConfig;
 }
 
 /**
@@ -50,12 +57,15 @@ export function buildConfig(env: Env): AppConfig {
     url: `redis://:${encodeURIComponent(env.REDIS_PASSWORD)}@${env.REDIS_HOST}:${env.REDIS_PORT}`,
   };
 
+  const otp: OtpConfig = { hashSecret: env.OTP_HASH_SECRET };
+
   return {
     nodeEnv: env.NODE_ENV,
     port: env.PORT,
     postgres,
     redis,
     internalServiceToken: env.INTERNAL_SERVICE_TOKEN,
+    otp,
   };
 }
 

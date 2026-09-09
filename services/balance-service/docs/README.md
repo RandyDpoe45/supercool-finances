@@ -43,6 +43,7 @@ string and **composes its own** Postgres DSN and Redis URL from the discrete par
 | `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | Postgres (`balance` DB, balance role) | port `5432` |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis (used from spec 04) | port `6379` |
 | `INTERNAL_SERVICE_TOKEN` | shared secret for the `/internal` guard | — |
+| `OTP_HASH_SECRET` | pepper for the keyed HMAC that hashes OTP codes at rest (spec 04); min 16 chars, never stored in Redis | — |
 
 - **Validation is zod, at boot, fail-fast.** `parseEnv` (`config/env.schema.ts`)
   validates and coerces `process.env`; any missing/invalid required var throws an

@@ -63,6 +63,18 @@ describe('config validation (fail-fast, zod)', () => {
     expect(() => validateEnv(rawEnvWithout('INTERNAL_SERVICE_TOKEN'))).toThrow();
   });
 
+  it('fails fast when OTP_HASH_SECRET is missing (the OTP-code pepper)', () => {
+    // The pepper keys the HMAC that hashes OTP codes at rest; booting without it would leave
+    // the OTP module unable to hash/verify — the schema must require it, not default it.
+    expect(() => validateEnv(rawEnvWithout('OTP_HASH_SECRET'))).toThrow();
+  });
+
+  it('fails fast when OTP_HASH_SECRET is present but too short (< 16 chars)', () => {
+    // A trivially short pepper weakens the keyed HMAC; the min-length floor must reject it
+    // rather than silently accept a weak secret.
+    expect(() => validateEnv(completeRawEnv({ OTP_HASH_SECRET: 'short' }))).toThrow();
+  });
+
   it('accepts omitting DB_PORT and REDIS_PORT (they carry defaults 5432 / 6379)', () => {
     // Proves these are optional-with-default, not required — and that a default env
     // still validates once the required secrets are present.
