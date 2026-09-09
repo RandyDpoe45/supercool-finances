@@ -5,7 +5,7 @@
 # it GROWS ONE SERVICE PER STEP as the specs are built (see specs/README.md).
 # It is NOT a final integration task — it exists from step 0 and accretes.
 #
-# Current state — Step 3 (spec 03, balance-service foundation skeleton):
+# Current state — Step 3 (spec 03, balance-service + analytics-server foundation skeletons):
 #   - The five networks (§2) are declared. `data` carries the datastores; `keycloak`
 #     now also joins `app-public`, `app-internal` and `data` (spec 00 §2). The
 #     `edge-*` networks remain empty until step 4 adds the gateways/nginx.
@@ -46,11 +46,23 @@
 #     (no *_URL var — discrete-credentials contract, spec 01 § Contracts). Joins
 #     app-public, app-internal, data (spec 00 §2); host-unpublished. The money
 #     DOMAIN (ledger, transfers, OTP, relay) is added in spec 04.
+#   - `analytics-server` (spec 03, THIS step): the NestJS foundation SKELETON. It
+#     validates its OWN env with zod (fail-fast), connects to Mongo via mongoose
+#     (no migrations — Mongo has none), binds the gateway (/admin) + service-identity
+#     (/internal) guards per prefix — it has NO /api (customers never query it), so
+#     no customer plane — returns the shared error DTO, and exposes /internal/health
+#     (which backs the healthcheck below). It composes its OWN mongodb:// DSN from the
+#     discrete creds mapped in via `environment:` (no *_URL var — discrete-credentials
+#     contract, spec 01 § Contracts). Owns Mongo (ADR-11). Joins app-internal + data
+#     ONLY (spec 00 §2 — NOT app-public: unreachable from the public plane at L3);
+#     host-unpublished. The stream consumer + Mongo read model + reporting API are
+#     added in spec 05.
 #
 # What arrives in later steps (do NOT add here early):
 #   - Step 3  (spec 04): `balance-service`     — EXTENDED with the money domain
 #                        (ledger, transfers, limits, OTP module, outbox relay).
-#   - Step 3  (spec 05): `analytics-server`    — joins app-internal, data.
+#   - Step 3  (spec 05): `analytics-server`    — EXTENDED with the stream consumer,
+#                        Mongo read model + reporting API (/admin) over it.
 #   - Step 4  (spec 06): `public-kong`         — joins edge-public, app-public.
 #                        `internal-kong`       — joins edge-internal, app-internal.
 #                        `public-nginx`        — joins edge-public   (host-published :8080).
@@ -301,5 +313,55 @@ services:
         condition: service_healthy
     networks:
       - app-public
+      - app-internal
+      - data
+
+  # Analytics server — NestJS foundation skeleton (spec 03); the stream consumer +
+  # Mongo read model + reporting API are added in spec 05. Reachable only via the
+  # internal Kong (app-internal) and its datastore (data); it has NO /api and sits
+  # on NO public network, so the public plane cannot reach it even at L3 (spec 00
+  # §2). NEVER host-published. The root DISCRETE Mongo creds are mapped into the
+  # service's OWN env var names below (it is a self-contained component — ADR-16 —
+  # and composes its own mongodb:// DSN internally; no *_URL var, honoring the
+  # discrete-credentials contract, spec 01 § Contracts).
+  analytics-server:
+    build: ./services/analytics-server
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Mongo: the least-privilege analytics app role -> the `analytics` DB (spec 01).
+      # authSource is the `analytics` DB, where the app user is defined.
+      MONGO_HOST: mongo
+      MONGO_PORT: 27017
+      MONGO_DB: ${MONGO_DB}
+      MONGO_USER: ${MONGO_APP_USER}
+      MONGO_PASSWORD: ${MONGO_APP_PASSWORD}
+      MONGO_AUTH_SOURCE: ${MONGO_DB}
+      # Shared secret for the /internal service-identity guard.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN}
+    healthcheck:
+      # Node HTTP probe (alpine ships node): fails unless readiness is UP (the
+      # endpoint returns 503 when Mongo is unreachable). GET /internal/health is
+      # exempt from the service-identity guard so the probe needs no credentials.
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "fetch('http://127.0.0.1:3000/internal/health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      # Startup chain (spec 00 §5): datastore + Keycloak healthy before the service
+      # boots. Mongo is its store; Keycloak gates the same chain as balance-service.
+      mongo:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      # app-internal (reached by the internal Kong) + data (Mongo) ONLY — NOT
+      # app-public, NOT edge-* (spec 00 §2). Host-unpublished.
       - app-internal
       - data
