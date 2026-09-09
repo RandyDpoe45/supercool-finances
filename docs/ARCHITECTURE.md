@@ -201,7 +201,8 @@ Rules that make the split real:
 
 Login proves *who you are*; a sensitive money movement additionally requires
 proof *for that specific action*. That is transaction signing, and its value
-comes from being **out-of-band** and **bound to the transaction**.
+comes from being **out-of-band** and **user-scoped** (a single active, single-use
+code).
 
 **Design choices:**
 
@@ -216,11 +217,16 @@ comes from being **out-of-band** and **bound to the transaction**.
   as a real second factor rather than showing a code in the same session that
   then consumes it. (For the technical test this avoids forcing the evaluator to
   set up an authenticator app — a deliberate, documented mock.)
-- The code is **generated server-side when the transfer is initiated** and is
-  **bound to that transaction** (amount + destination). The OTP app *reveals /
-  delivers* the code for a pending transaction; it never mints an unbound token.
-  Binding is what stops a code being replayed to authorize a *different*
-  transfer.
+- The code is **user-scoped** — **at most one active code per user**, single-use
+  (atomic `GETDEL`), TTL-bound — and is the user's out-of-band second factor, **not**
+  bound to a transaction. It authorizes **exactly one** transfer (two confirms with
+  the same code can't both succeed). Generation is **singleton-gated**: a user may
+  generate a code without a pending transfer (harmless), but **not while one is
+  active** — a second generation is rejected; the slot frees only on use or TTL expiry.
+  The OTP app *reveals / delivers* the user's current code. Because the code proves
+  *the user* (single-use, TTL, out-of-band), it can't be hoarded or replayed;
+  preventing duplicate *transfers* is a separate control (fingerprint window +
+  idempotency), not the OTP's job.
 - **Storage: Redis** — ephemeral, TTL-based, single-use. OTPs are disposable, so
   Redis's non-durability is a feature here, not a risk.
   - `TTL` 2–5 min for auto-expiry (no cleanup job).
@@ -241,7 +247,7 @@ sequenceDiagram
     U->>C: Initiate transfer ($500 → ACME)
     C->>B: POST /transfers (Idempotency-Key)
     B->>B: Create PENDING tx
-    B->>R: SET code — TTL 3m, single-use, bound to tx
+    B->>R: SET code — TTL 3m, single-use, user-scoped (otp:sub)
     B-->>C: 202 Pending — OTP required
     U->>O: Log in (separate channel)
     O->>B: GET /pending-authorizations
@@ -249,7 +255,7 @@ sequenceDiagram
     U->>C: Enter code
     C->>B: POST /transfers/{id}/confirm (code)
     B->>R: GETDEL code (atomic, single-use)
-    B->>B: Verify code is bound to THIS tx; post ledger entries
+    B->>B: Verify code = user's active OTP; post ledger entries
     B-->>C: Transfer POSTED
 ```
 
@@ -289,8 +295,8 @@ is auditable.
   double-entry movement, failure/expiry releases it. `Hold` rows carry an external
   reference for later settlement/reconciliation against the rail
   ([ADR-14](DECISIONS.md#adr-14--holds--settlement)).
-- **Limits:** configurable per-transaction, daily/monthly caps, and **velocity**
-  checks. New external payees have a **cooling-off period** before they can
+- **Limits:** configurable per-transaction and daily/monthly **amount** caps (fixed
+  calendar windows). New external payees have a **cooling-off period** before they can
   receive money.
 - **Reconciliation job:** periodically asserts `sum(ledger) == balances` and that
   internal accounts net to zero.
@@ -354,6 +360,10 @@ flowchart LR
 ## 8. Cross-cutting concerns
 
 - **Rate limiting** at both gateways, tighter on auth and money endpoints.
+- **Time & timezone:** the backend is **UTC-only** — every service stores and serves
+  UTC (`timestamptz` instants, ISO-8601 `Z`). Localizing to **Mexico City time
+  (`America/Mexico_City`)** is exclusively a client-app presentation concern; no
+  service formats or assumes a local zone.
 - **Bot/abuse protection:** a **library-based captcha** on the client (a demo
   stub — rate limiting is the real control; a hosted captcha is the production
   path).

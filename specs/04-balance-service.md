@@ -25,26 +25,41 @@ whole prompt is about — correctness here is the deliverable.
   is the **source of truth**; `balance` is a transactionally-synced projection,
   always rebuildable. All balance mutations funnel through **one `postTransaction`
   operation**, so ledger and `balance` can never diverge. Money is **integer minor
-  units + currency** (never float).
+  units + a `currency` code** (never float); currency is normalized in a `currency`
+  table (prototype seeds **MXN** only).
 - **Transfers** — internal (customer↔customer), external outbound (debit customer,
   credit the **outbound-rail clearing account**) and external inbound (debit the
   **inbound-rail clearing account**, credit customer):
   - **Idempotency:** `Idempotency-Key` per request; a retry returns the original
     result (persisted `IdempotencyKey`).
+  - **Duplicate suppression (soft, defense-in-depth):** distinct from idempotency —
+    catches *different* requests that are semantically identical (a double-submit
+    that mints a **new** key each time, which the idempotency key cannot dedup). If
+    the same `(owner_id, request_fingerprint)` — `fingerprint = hash(type, source,
+    destination, amount, currency)` — was seen within a **60-second window**, the
+    transfer is held as a *suspected duplicate* and requires an explicit
+    `confirmDuplicate` override. It is a **soft** block (repeating an identical
+    payment is legitimately valid) and reuses the fingerprint already stored on
+    `IdempotencyKey` — no new state. This is the **duplicate-transfer control** (the
+    user-scoped OTP is the second factor, not a duplicate check): it catches an
+    identical transfer resubmitted within 60s, whether from a double-click or a rapid
+    manual repeat.
   - **Concurrency:** READ COMMITTED + `SELECT ... FOR UPDATE` on the affected
     account row(s), locked in a **canonical order (by account id)** to avoid
     deadlocks. Because the account row holds the materialized `balance`, `held`
     **and** the period counters, the funds check (against `available = balance −
     held`), the ledger/hold append, the balance/held update, and the limit-counter
     update all happen under that one lock — covering both the
-    single-row overdraft invariant and the multi-row limit/velocity invariants
+    single-row overdraft invariant and the multi-row limit invariants
     without SERIALIZABLE. Retry only on the rare deadlock (`40P01`). See
     [ADR-13](../docs/DECISIONS.md#adr-13--concurrency--balance-projection).
   - **Lifecycle:** `PENDING → POSTED → FAILED / REVERSED`; reversals are
     compensating entries, never mutations. External outbound is two-phase:
     initiation **places a hold** (reserves funds; `balance` unchanged) and
     settlement/OTP-confirm **settles** it into a posted movement (fail/expiry
-    **releases** it). Internal transfers post directly (no hold).
+    **releases** it). Internal transfers place **no hold** but are still
+    **OTP-gated**: they stay `PENDING` at initiation and **post on OTP-confirm**,
+    with the funds check performed at confirm-time under the account lock.
 - **Holds (reservation ledger)** — an append-only `Hold` log for funds reserved
   but not yet posted (external outbound awaiting OTP/settlement). Lifecycle
   `PLACED → SETTLED | RELEASED | EXPIRED`; each hold carries an `externalRef` for
@@ -54,14 +69,26 @@ whole prompt is about — correctness here is the deliverable.
   `LedgerEntry`); **releasing/expiry** returns the funds (hold→`RELEASED`,
   `held−`) with no main-ledger entry. Kept separate from the main ledger, which
   records only money that actually moved.
-- **Limits** — per-transaction, daily/monthly caps, velocity checks; all
-  configurable (global + per-customer).
+- **Limits** — a per-transaction cap plus **fixed calendar-window** daily and monthly
+  **amount** caps — **no rolling windows** and no count-based velocity; checked against
+  the account's fixed-window spend counters (`spent_today` / `spent_month`) under the
+  row lock. Configurable (global baseline + per-customer override).
 - **External payees** — enrollment with a **cooling-off period** before a new payee
   can receive money.
 - **OTP module** (bounded; [ADR-11](../docs/DECISIONS.md#adr-11--service-boundaries--data-ownership))
-  — generate a code at transfer initiation, **bound to the transaction**; store in
-  Redis with TTL, single-use via atomic `GETDEL`; verify at confirm; expose
-  `GET /api/pending-authorizations` for the OTP app.
+  — a **user-scoped** one-time code (`otp:<sub>`), **not** transaction-scoped: **at
+  most one active code per user**, **single-use via atomic `GETDEL`**, TTL-bound. It is
+  the user's out-of-band second factor for authorizing their **own** transfers.
+  **Single-use is atomic:** a code authorizes **exactly one** transaction — two
+  confirmations with the same code, even microseconds apart, cannot both succeed
+  (`GETDEL`: one wins, the other finds no code). **Generation is singleton-gated:** a
+  user may generate a code without a pending transfer (harmless), but **not while one
+  is already active** — a second generation is **rejected**; the slot frees only when
+  the active code is **consumed** or its **TTL expires**. **Only user-initiated
+  transfers are OTP-gated** — internal and external outbound; **external inbound is
+  not** (it arrives already approved by the originating external institution, not ours
+  to authorize). Confirm verifies the user's active code and posts their pending
+  transfer; expose `GET /api/pending-authorizations` for the OTP app.
 - **Outbox + relay worker** — write the `OutboxEvent` in the **same DB
   transaction** as the ledger change; a background worker polls with
   `SELECT ... FOR UPDATE SKIP LOCKED`, `XADD`s to `events:transactions`, then marks
@@ -104,7 +131,9 @@ role-based.
 - [ ] Internal transfer works end-to-end; **concurrency test** (N simultaneous
       transfers) proves no double-spend / no overdraft / no money created or lost.
 - [ ] **Idempotency test**: a replayed `Idempotency-Key` moves money once.
-- [ ] External outbound requires OTP confirm (code bound to the tx, single-use).
+- [ ] **Every user-initiated transfer — internal and external outbound — requires
+      OTP confirm** (user-scoped, single-use code): internal posts on confirm,
+      external settles its hold on confirm.
 - [ ] External outbound **places a hold** at initiation (available drops, balance
       unchanged), **settles** it at confirm (hold→SETTLED, balance/held updated,
       double-entry posted), and **releases** it on fail/expiry (no ledger entry).

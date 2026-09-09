@@ -28,6 +28,10 @@ right is what makes the two services' micro fall into place.
   transfers and relay.
 - **Config:** `ConfigModule` with schema validation (zod/joi) — **fail fast** on a
   missing/invalid var at boot.
+- **Time (UTC):** services **store and serve UTC** — `timestamptz` columns hold UTC
+  instants and API responses emit ISO-8601 with an explicit `Z` offset. **No**
+  server-side localization or timezone formatting; timezone display is the client's
+  job (cross-cutting rule 5 in [`README.md`](./README.md)).
 - **Identity guards (centralized):**
   - `/api` + `/admin`: read the gateway-injected `X-User-Id` / `X-Roles`; trust
     **only** those headers (never a body/query id). Reject if absent (means the
