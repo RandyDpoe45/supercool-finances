@@ -43,4 +43,12 @@ export interface PostTransactionCommand {
    * customer's spend (inbound credits, reversals).
    */
   limitAccountId?: string;
+  /**
+   * AUTHORITATIVE ADMIN CORRECTION ONLY (maker-checker reversal). When true, the reducer SKIPS
+   * the frozen + insufficient-funds checks on customer DEBIT legs, so the movement always applies
+   * and a customer balance may go negative. Still a balanced double-entry — no money is created or
+   * lost. NEVER set on any customer-initiated path (it is set ONLY by `ApprovalService.approve`'s
+   * compensating post, authorized by four-eyes).
+   */
+  forced?: boolean;
 }

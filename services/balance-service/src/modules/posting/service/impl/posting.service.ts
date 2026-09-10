@@ -318,7 +318,13 @@ export class PostingService implements IPostingService {
 
     const delta = BigInt(leg.delta);
     const isDebit = delta < 0n;
-    if (account.kind === AccountKind.Customer && isDebit) {
+    // A FORCED admin correction (maker-checker reversal, `command.forced`) SKIPS the frozen +
+    // insufficient-funds checks on a customer DEBIT leg, so the compensating movement always
+    // applies and the counterparty balance may go negative — there is no `balance >= 0` DB check on
+    // customer accounts, by design, so the fold still balances (no money created or lost). `forced`
+    // is set ONLY by admin reversal; it never affects a credit leg or a system account (neither
+    // enters this branch), and when falsy/absent the checks run unchanged.
+    if (account.kind === AccountKind.Customer && isDebit && !command.forced) {
       if (account.status === AccountStatus.Frozen) {
         throw new AccountFrozenError(account.id);
       }

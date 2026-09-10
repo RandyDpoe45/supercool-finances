@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
 import { AccountsModule } from '../accounts/accounts.module';
 import { AccountsAdminController } from '../accounts/admin/accounts-admin.controller';
+import { ApprovalsModule } from '../approvals/approvals.module';
+import { ApprovalsAdminController } from '../approvals/admin/approvals-admin.controller';
+import { ReversalsAdminController } from '../approvals/admin/reversals-admin.controller';
 import { AuditModule } from '../audit/audit.module';
 import { LimitsModule } from '../limits/limits.module';
 import { LimitsAdminController } from '../limits/admin/limits-admin.controller';
@@ -27,17 +30,29 @@ import { AdminController } from './admin.controller';
  *   ({@link RailsModule}) and `AUDIT_SERVICE` ({@link AuditModule}).
  *
  * {@link AuditModule} is imported directly so `RailsAdminController` can inject `AUDIT_SERVICE`
- * (the accounts/limits services import it themselves for their in-tx audit). This step is the
- * SINGLE-ACTOR admin ops + the audit foundation; maker-checker (reversals + approvals) is step 8b.
+ * (the accounts/limits services import it themselves for their in-tx audit). Step 8b adds the
+ * maker-checker reversals: {@link ApprovalsModule} provides `APPROVAL_SERVICE` for the two
+ * controllers this registry now also declares — `ReversalsAdminController` (the maker's
+ * `POST /admin/transfers/:id/reverse`) and `ApprovalsAdminController` (the checker's
+ * `POST /admin/approvals/:id/approve|reject`).
  */
 @Module({
-  imports: [AuditModule, AccountsModule, LimitsModule, TransfersModule, RailsModule],
+  imports: [
+    AuditModule,
+    AccountsModule,
+    LimitsModule,
+    TransfersModule,
+    RailsModule,
+    ApprovalsModule,
+  ],
   controllers: [
     AdminController,
     AccountsAdminController,
     LimitsAdminController,
     TransfersAdminController,
     RailsAdminController,
+    ReversalsAdminController,
+    ApprovalsAdminController,
   ],
 })
 export class AdminModule {}

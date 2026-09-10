@@ -83,13 +83,16 @@ export interface ITransactionRepository {
    * (+ `held -= amount`) atomically under the source lock. Returns `true` iff it flipped the row. */
   transitionToCancelledInTx(queryRunner: QueryRunner, id: string): Promise<boolean>;
   /** Guarded `POSTED → REVERSED` transition inside the caller's transaction:
-   * `UPDATE ... SET status = REVERSED WHERE id = :id AND status = 'POSTED'`. Returns `true` iff
-   * exactly one row was updated; `false` (0 rows) means the transfer was already reversed (or is
-   * not posted), so a concurrent/retried rail FAILURE callback is a no-op — the single guarded
-   * write is the idempotency gate that stops a double reversal. The compensating movement + its
-   * `reverses_transaction_id` are posted only when this returns `true`. MUST run inside the given
-   * queryRunner's active transaction. */
-  transitionToReversedInTx(queryRunner: QueryRunner, id: string): Promise<boolean>;
+   * `UPDATE ... SET status = REVERSED, failure_reason = :reason WHERE id = :id AND status =
+   * 'POSTED'`. Returns `true` iff exactly one row was updated; `false` (0 rows) means the transfer
+   * was already reversed (or is not posted), so a concurrent/retried reversal is a no-op — the
+   * single guarded write is the idempotency gate that stops a double reversal. The compensating
+   * movement + its `reverses_transaction_id` are posted only when this returns `true`. `reason`
+   * records WHY the posted movement was reversed and defaults to `'rail_settlement_failed'` (the 5c
+   * rail-failure callback's value, preserving its behavior); the maker-checker admin reversal passes
+   * `'admin_reversal'` so the reversed original is not mislabeled as a rail failure on the admin
+   * transaction view. MUST run inside the given queryRunner's active transaction. */
+  transitionToReversedInTx(queryRunner: QueryRunner, id: string, reason?: string): Promise<boolean>;
   /** Admin-scoped transaction query (spec 04 "Admin ops" — `GET /transactions`, view ANY
    * transaction). A parameterized SELECT with the optional filters bound, `ORDER BY created_at
    * DESC` (id tiebreak for determinism), `LIMIT`/`OFFSET` from the (already-clamped) filter.
