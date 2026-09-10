@@ -743,7 +743,8 @@ the destination is *addressed* and adds a confirmation gate in front of initiate
   `1789084800000-CreateCustomerAndAccountNumber`): `id varchar PRIMARY KEY` (the Keycloak `sub`
   — `varchar` to match `account.owner_id`'s existing type, so **no** `owner_id` type change and
   **no** risky ALTER), `name` / `phone` / `email` (all `NOT NULL`, with `phone` / `email` **UNIQUE**
-  via `uq_customer_phone` / `uq_customer_email`), `created_at` / `updated_at`.
+  via `uq_customer_phone` / `uq_customer_email` — `email` **case-insensitively**, as a functional
+  index on `LOWER(email)`, so a future email lookup must query on `LOWER(email)`), `created_at` / `updated_at`.
   Nothing else. Bound behind `CUSTOMER_REPOSITORY` (`findById` / `create`) in `PersistenceModule`.
 - **`account.account_number`** (`varchar NULL`): the human destination identifier — a unique
   **10-digit numeric** string on **customer accounts only** (system/clearing accounts keep NULL).

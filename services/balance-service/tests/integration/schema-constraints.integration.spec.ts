@@ -497,11 +497,13 @@ suite('balance schema — Step 1 constraints (integration, needs Postgres)', () 
   // ---- Confirmation-of-payee migration: uq_customer_phone + uq_customer_email ----------
   // `customer.phone` and `customer.email` are UNIQUE (indexes uq_customer_phone /
   // uq_customer_email). The confirmation-of-payee flow keys on a caller reaching a UNIQUE
-  // destination profile, so two customers must never share a phone or an email. Each test is
-  // power-bearing: drop the matching index and the duplicate insert stops being rejected, so
-  // the "expected rejection but it succeeded" branch fires. The second row is written via a
-  // direct INSERT (insertRow, no ON CONFLICT) so the phone/email UNIQUE violation surfaces
-  // instead of being swallowed by insertCustomer's ON CONFLICT (id) clause.
+  // destination profile, so two customers must never share a phone or an email. Email uniqueness
+  // is CASE-INSENSITIVE (uq_customer_email is a functional index on LOWER(email)), so two
+  // addresses that differ only by letter-case are the SAME address. Each test is power-bearing:
+  // drop the matching index and the duplicate insert stops being rejected, so the "expected
+  // rejection but it succeeded" branch fires. The second row is written via a direct INSERT
+  // (insertRow, no ON CONFLICT) so the phone/email UNIQUE violation surfaces instead of being
+  // swallowed by insertCustomer's ON CONFLICT (id) clause.
 
   it('rejects two customers sharing the same phone (uq_customer_phone UNIQUE)', async () => {
     await withRollback(async (q) => {
@@ -539,6 +541,55 @@ suite('balance schema — Step 1 constraints (integration, needs Postgres)', () 
         }),
         PG.UNIQUE_VIOLATION,
       );
+    });
+  });
+
+  it('rejects two customers whose emails differ only by letter-case (uq_customer_email folds on LOWER(email))', async () => {
+    await withRollback(async (q) => {
+      // ONE address, claimed twice in different case. Under a PLAIN (email) unique index the two
+      // byte-strings are distinct, so the second INSERT would SUCCEED and this test would fail at
+      // expectPgError; only a functional UNIQUE index on LOWER(email) folds them into a single key
+      // and raises 23505 — the developer-directed case-insensitive behaviour. The random token
+      // keeps the address unique across parallel/repeat runs; the case difference lives in the
+      // fixed "User"/"Example.com" letters (randomUUID is all-lowercase hex).
+      const token = randomUUID();
+      const emailMixed = `User-${token}@Example.com`; // stored first, MIXED case
+      const emailLower = emailMixed.toLowerCase(); // SAME address, all lower-case
+      // First customer takes the mixed-case address (explicit override, not the derived default).
+      await insertCustomer(q, `sub-${randomUUID()}`, { email: emailMixed });
+      // A DIFFERENT customer (different id, different phone) reusing the SAME address in a
+      // different case must collide on uq_customer_email. Raw insertRow so the UNIQUE(LOWER(email))
+      // violation surfaces instead of being masked by insertCustomer's ON CONFLICT (id).
+      await expectPgError(
+        insertRow(q, 'customer', {
+          id: `sub-${randomUUID()}`, // DIFFERENT id
+          name: 'Ana Lopez',
+          phone: `521${localAccountNumber()}`, // DIFFERENT phone
+          email: emailLower, // SAME address, lower-cased → 23505 under LOWER(email)
+        }),
+        PG.UNIQUE_VIOLATION,
+      );
+    });
+  });
+
+  it('allows two customers with genuinely different emails (guards against an over-broad index)', async () => {
+    await withRollback(async (q) => {
+      // Complements the case-collision test: pins the index to the WHOLE address, not some
+      // over-broad expression (e.g. domain-only) that would fold distinct addresses together and
+      // reject this pair. Both distinct emails must insert cleanly.
+      const c1 = await insertCustomer(q, `sub-${randomUUID()}`, {
+        email: `alice-${randomUUID()}@example.test`,
+      });
+      const c2 = await insertRow(q, 'customer', {
+        id: `sub-${randomUUID()}`, // DIFFERENT id
+        name: 'Bob Rivera',
+        phone: `521${localAccountNumber()}`, // DIFFERENT phone
+        email: `bob-${randomUUID()}@example.test`, // DIFFERENT address
+      });
+      expect(c1.id).toBeTruthy();
+      expect(c2.id).toBeTruthy();
+      expect(c1.id).not.toBe(c2.id);
+      expect(c1.email).not.toBe(c2.email);
     });
   });
 });

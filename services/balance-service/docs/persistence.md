@@ -49,7 +49,7 @@ accounts — not a schema step.)
 | Table / change | Role |
 |---|---|
 | `customer` | Money-domain user profile Keycloak does not hold. PK `id` = the Keycloak `sub` (`varchar`, same value as `account.owner_id`); `name` / `phone` / `email` NOT NULL, and `phone` / `email` UNIQUE; timestamps. |
-| `uq_customer_phone` / `uq_customer_email` (add) | UNIQUE indexes on `customer.phone` and `customer.email` (both NOT NULL, so no multi-NULL concern). |
+| `uq_customer_phone` / `uq_customer_email` (add) | UNIQUE indexes on `customer.phone` and `customer.email` (both NOT NULL, so no multi-NULL concern). `uq_customer_email` is **case-insensitive** — a functional index on `LOWER(email)`; `uq_customer_phone` is plain (phone is digits). |
 | `account.account_number` (add) | Human destination identifier — unique 10-digit numeric on customer accounts, NULL on system accounts. |
 | `uq_account_account_number` (add) | Plain UNIQUE index on `account_number` (multiple NULLs coexist, so system accounts don't collide). |
 | `fk_account_owner` (add) | `account.owner_id → customer.id`, nullable (not checked for system accounts' NULL owner). |
@@ -128,7 +128,11 @@ not a migration.
   `varchar` so `owner_id` FKs to it with no type change / no risky ALTER).
 - `name`, `phone`, `email` — `varchar NOT NULL`; `created_at` / `updated_at` `timestamptz`.
 - `phone` and `email` are **UNIQUE** — `uq_customer_phone` / `uq_customer_email` (both NOT NULL,
-  so no multi-NULL concern).
+  so no multi-NULL concern). `email` uniqueness is **case-insensitive**: `uq_customer_email` is a
+  functional index on `LOWER(email)`, so `User@Example.com` and `user@example.com` collide (the
+  original-case value is still stored in the column — only the uniqueness key is lowercased). A
+  future email-lookup query must match on `LOWER(email)` to use this index. `uq_customer_phone`
+  is plain (phone is digits — no case).
 - Keycloak keeps only auth; this table owns the profile (name masked before it leaves the
   service — see the transfers `maskName` helper).
 

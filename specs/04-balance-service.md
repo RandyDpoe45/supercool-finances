@@ -149,7 +149,7 @@ whole prompt is about — correctness here is the deliverable.
 
 `Customer` (the money-domain user representation — PK = the Keycloak `sub`, i.e. the same
 value stored in `account.owner_id`; fields **name, phone, email** only, with **phone and email
-UNIQUE**. **Updates the earlier
+UNIQUE** (email uniqueness is **case-insensitive** — unique on `LOWER(email)`). **Updates the earlier
 data-model note that said `sub → name` was Keycloak/UI-only** — the balance DB now owns the
 customer profile; Keycloak keeps only auth), `Account` (carries `balance`, `held` + period
 counters, and now a nullable **`account_number`** — a unique 10-digit numeric string on

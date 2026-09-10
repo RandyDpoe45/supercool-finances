@@ -8,6 +8,10 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   — the SAME value stored in `account.owner_id`, so it stays `varchar` and `owner_id` gains
  *   an FK to it with NO type change and NO risky column ALTER. `phone` and `email` are UNIQUE
  *   (indexes `uq_customer_phone` / `uq_customer_email`); both are NOT NULL, so no multi-NULL concern.
+ *   `email` uniqueness is CASE-INSENSITIVE: `uq_customer_email` is a functional index on
+ *   `LOWER(email)`, so `User@Example.com` and `user@example.com` collide (the original-case value
+ *   is still stored in the `varchar` column — only the uniqueness key is lowercased). `phone` is
+ *   plain (digits — no case). A future email lookup must query on `LOWER(email)` to use the index.
  * - `account.account_number`: the human destination identifier (a unique 10-digit numeric
  *   string), NULLable and on customer accounts only. A PLAIN unique index enforces uniqueness —
  *   Postgres allows multiple NULLs, so the system/clearing accounts (NULL number) never collide.
@@ -30,8 +34,9 @@ export class CreateCustomerAndAccountNumber1789084800000 implements MigrationInt
       )
     `);
     // phone / email are unique per customer (both NOT NULL, so no multi-NULL concern).
+    // email uniqueness is CASE-INSENSITIVE — a functional index on LOWER(email).
     await queryRunner.query(`CREATE UNIQUE INDEX "uq_customer_phone" ON "customer" ("phone")`);
-    await queryRunner.query(`CREATE UNIQUE INDEX "uq_customer_email" ON "customer" ("email")`);
+    await queryRunner.query(`CREATE UNIQUE INDEX "uq_customer_email" ON "customer" (LOWER(email))`);
 
     await queryRunner.query(`ALTER TABLE "account" ADD COLUMN "account_number" varchar`);
     // Unique across customer account numbers; multiple NULLs (system accounts) coexist.
