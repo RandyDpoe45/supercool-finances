@@ -86,8 +86,15 @@ export async function seedTestCurrency(q: any, code = 'TST'): Promise<string> {
   return code;
 }
 
-/** A valid customer account (all NOT-NULL-without-default columns provided). */
+/** A valid customer account (all NOT-NULL-without-default columns provided). When a non-null
+ * `owner_id` is supplied, its `customer` FK parent is seeded first (idempotently) so the
+ * `fk_account_owner` constraint added by the confirmation-of-payee migration is satisfied —
+ * suites that seed owned accounts do not need to know about the customer table. */
 export async function insertAccount(q: any, overrides: Record<string, unknown> = {}): Promise<any> {
+  const ownerId = overrides.owner_id;
+  if (typeof ownerId === 'string' && ownerId.length > 0) {
+    await insertCustomer(q, ownerId);
+  }
   return insertRow(q, 'account', {
     kind: 'customer',
     currency: 'TST',
@@ -95,6 +102,42 @@ export async function insertAccount(q: any, overrides: Record<string, unknown> =
     spent_month_date: MONTH_START,
     ...overrides,
   });
+}
+
+/**
+ * A `customer` row (the balance-service's own money-domain profile — PK `id` IS the Keycloak
+ * `sub`, the same value stored in `account.owner_id`, which FKs to it via `fk_account_owner`).
+ * All three profile columns (`name`, `phone`, `email`) are NOT NULL. Seed this BEFORE any
+ * customer account referencing the owner, or the account insert fails the FK. Idempotent via
+ * `ON CONFLICT (id) DO NOTHING` so several accounts can share one owner within a test.
+ * `name` is settable so a suite can prove the payee-name mask against a KNOWN holder name.
+ */
+export async function insertCustomer(
+  q: any,
+  id: string,
+  overrides: { name?: string; phone?: string; email?: string } = {},
+): Promise<{ id: string; name: string; phone: string; email: string }> {
+  const name = overrides.name ?? 'Juan Perez';
+  const phone = overrides.phone ?? '5215555550100';
+  const email = overrides.email ?? `${id}@example.test`;
+  await q.query(
+    `INSERT INTO "customer" (id, name, phone, email)
+     VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`,
+    [id, name, phone, email],
+  );
+  return { id, name, phone, email };
+}
+
+/**
+ * A locally-minted 10-digit numeric account number, unique per test run (a random 10-digit
+ * string). Used to set `account.account_number` when the harness cannot resolve the production
+ * `generateAccountNumber` helper. The DB's `uq_account_account_number` index still enforces
+ * global uniqueness; random 10-digit values keep collisions astronomically unlikely per run.
+ */
+export function localAccountNumber(): string {
+  let s = '';
+  for (let i = 0; i < 10; i++) s += String(Math.floor(Math.random() * 10));
+  return s;
 }
 
 /** A minimal valid transaction header (all NOT-NULL-without-default columns provided). */

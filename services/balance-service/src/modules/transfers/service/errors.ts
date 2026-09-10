@@ -61,3 +61,15 @@ export class InvalidTransferError extends DomainError {
     super(`Invalid transfer: ${reason}`);
   }
 }
+
+/** Initiate was called without a valid confirmation-of-payee token for THIS destination: the
+ * caller either never resolved the destination, the token expired, or the token was bound to a
+ * different destination. A transfer can only be initiated after the payer resolved+confirmed the
+ * exact destination — without that, the caller is just querying. Carries no ids or token. */
+export class DestinationNotConfirmedError extends DomainError {
+  readonly code = 'DESTINATION_NOT_CONFIRMED';
+
+  constructor() {
+    super('The destination has not been confirmed; resolve it before initiating a transfer');
+  }
+}

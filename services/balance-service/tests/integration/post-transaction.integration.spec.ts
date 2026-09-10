@@ -62,7 +62,7 @@ import {
   tcpProbe,
 } from '../support/harness';
 import { completeRawEnv } from '../support/env.fixture';
-import { insertRow, TODAY, MONTH_START } from '../support/pg';
+import { insertRow, insertCustomer, localAccountNumber, TODAY, MONTH_START } from '../support/pg';
 
 const ENABLED = process.env.BALANCE_INTEGRATION === '1';
 
@@ -170,11 +170,17 @@ suite('postTransaction — the atomic reducer (integration, needs Postgres)', ()
   // ---- seed + query helpers (committed rows) --------------------------------------------
 
   async function mkCustomer(overrides: Record<string, unknown> = {}): Promise<any> {
+    const ownerId = (overrides.owner_id as string | undefined) ?? `sub-${randomUUID()}`;
+    // owner_id FKs to customer.id (fk_account_owner) — seed the parent first, drop it AFTER the
+    // account cascade (extraCleanups runs after cleanupAccounts).
+    await insertCustomer(ds, ownerId);
+    extraCleanups.push(() => ds.query(`DELETE FROM customer WHERE id = $1`, [ownerId]));
     const acc = await insertRow(ds, 'account', {
       kind: 'customer',
-      owner_id: `sub-${randomUUID()}`,
+      owner_id: ownerId,
       currency: MXN,
       status: 'active',
+      account_number: localAccountNumber(),
       spent_today_date: TODAY,
       spent_month_date: MONTH_START,
       ...overrides,

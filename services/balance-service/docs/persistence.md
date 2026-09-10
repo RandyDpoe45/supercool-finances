@@ -40,8 +40,22 @@ created in any internal order.
 | `approval_request` | Maker-checker four-eyes for balance-affecting admin ops. |
 | `idempotency_key` | At-most-once replay safety; composite PK `(owner_id, key)`. |
 
+**Step 3 — `CreateCustomerAndAccountNumber1789084800000`**
+(`…/migrations/1789084800000-CreateCustomerAndAccountNumber.ts`) — the confirmation-of-payee
+schema: the balance-service's own **customer representation** plus the human **account number**.
+(The interstitial `SeedSystemAccounts1788998400000` is a **data** migration — the two clearing
+accounts — not a schema step.)
+
+| Table / change | Role |
+|---|---|
+| `customer` | Money-domain user profile Keycloak does not hold. PK `id` = the Keycloak `sub` (`varchar`, same value as `account.owner_id`); `name` / `phone` / `email` NOT NULL; timestamps. |
+| `account.account_number` (add) | Human destination identifier — unique 10-digit numeric on customer accounts, NULL on system accounts. |
+| `uq_account_account_number` (add) | Plain UNIQUE index on `account_number` (multiple NULLs coexist, so system accounts don't collide). |
+| `fk_account_owner` (add) | `account.owner_id → customer.id`, nullable (not checked for system accounts' NULL owner). |
+
 Each migration's `down()` drops its tables (any order for the satellites; reverse FK
-order for the spine) then removes its enum types — a clean inverse.
+order for the spine) then removes its enum types — a clean inverse. Step 3's `down()` drops the
+FK, the index, the `account_number` column, then the `customer` table.
 
 ## Enumerations — native Postgres enum types
 
@@ -100,6 +114,19 @@ not a migration.
 - `idx_account_owner (owner_id) WHERE kind = 'customer'` — partial owner lookup.
 - `uq_account_system_key (system_key) WHERE kind = 'system'` — partial UNIQUE; system
   keys (e.g. `clearing:rail-outbound`) are unique among system accounts only.
+- `owner_id` → `customer.id` (`fk_account_owner`, nullable — added in Step 3; not checked
+  for system accounts' NULL owner).
+- `account_number` — nullable `varchar`, the human destination identifier (unique 10-digit
+  numeric on customer accounts, NULL on system). `uq_account_account_number` is a **plain**
+  UNIQUE index — Postgres allows multiple NULLs, so system accounts never collide. Assigned
+  by the seed/tests via `generateAccountNumber()`; there is no create-account endpoint yet.
+
+**`customer`** (Step 3) — the money-domain user profile.
+- `id varchar` PK — the Keycloak `sub`, the same value stored in `account.owner_id` (kept
+  `varchar` so `owner_id` FKs to it with no type change / no risky ALTER).
+- `name`, `phone`, `email` — `varchar NOT NULL`; `created_at` / `updated_at` `timestamptz`.
+- Keycloak keeps only auth; this table owns the profile (name masked before it leaves the
+  service — see the transfers `maskName` helper).
 - `status` defaults to `active`.
 
 **`external_payee`**
@@ -233,7 +260,7 @@ pair lives in **sibling subfolders** under `src/database/repositories/`:
 its interface from `../interfaces/`). Consumers import the token + interface from
 `interfaces/`; only `persistence.module.ts` references `impl/` (to bind each token).
 
-`PersistenceModule` (`src/database/persistence.module.ts`) registers the ten entity
+`PersistenceModule` (`src/database/persistence.module.ts`) registers the eleven entity
 repositories via `TypeOrmModule.forFeature([...])`, binds each token to its impl
 (`{ provide: <NAME>_REPOSITORY, useClass: … }`), and **exports the tokens** so the domain
 modules inject the interfaces. It is imported by `AccountsModule` (spec 04's first domain
@@ -242,7 +269,8 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
 
 | Token | Interface | Methods |
 |---|---|---|
-| `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findByIdAndOwner(id, ownerId)`, `findBySystemKey`, `lockByIdForUpdate(queryRunner, id)` |
+| `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findByIdAndOwner(id, ownerId)`, `findBySystemKey`, `findByAccountNumber(accountNumber)`, `lockByIdForUpdate(queryRunner, id)`, `updateBalanceInTx(queryRunner, id, newBalance)` |
+| `CUSTOMER_REPOSITORY` | `ICustomerRepository` | `findById`, `create` |
 | `LEDGER_ENTRY_REPOSITORY` | `ILedgerEntryRepository` | `findById`, `create`, `findByAccount(accountId, limit)` |
 | `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create` |
 | `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create` |

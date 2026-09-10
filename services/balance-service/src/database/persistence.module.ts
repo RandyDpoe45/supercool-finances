@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { Account } from './entities/account.entity';
+import { Customer } from './entities/customer.entity';
 import { LedgerEntry } from './entities/ledger-entry.entity';
 import { Transaction } from './entities/transaction.entity';
 import { Hold } from './entities/hold.entity';
@@ -14,6 +15,8 @@ import { IdempotencyKey } from './entities/idempotency-key.entity';
 
 import { ACCOUNT_REPOSITORY } from './repositories/interfaces/account.repository.interface';
 import { AccountRepository } from './repositories/impl/account.repository';
+import { CUSTOMER_REPOSITORY } from './repositories/interfaces/customer.repository.interface';
+import { CustomerRepository } from './repositories/impl/customer.repository';
 import { LEDGER_ENTRY_REPOSITORY } from './repositories/interfaces/ledger-entry.repository.interface';
 import { LedgerEntryRepository } from './repositories/impl/ledger-entry.repository';
 import { TRANSACTION_REPOSITORY } from './repositories/interfaces/transaction.repository.interface';
@@ -47,6 +50,7 @@ import { IdempotencyKeyRepository } from './repositories/impl/idempotency-key.re
   imports: [
     TypeOrmModule.forFeature([
       Account,
+      Customer,
       LedgerEntry,
       Transaction,
       Hold,
@@ -60,6 +64,7 @@ import { IdempotencyKeyRepository } from './repositories/impl/idempotency-key.re
   ],
   providers: [
     { provide: ACCOUNT_REPOSITORY, useClass: AccountRepository },
+    { provide: CUSTOMER_REPOSITORY, useClass: CustomerRepository },
     { provide: LEDGER_ENTRY_REPOSITORY, useClass: LedgerEntryRepository },
     { provide: TRANSACTION_REPOSITORY, useClass: TransactionRepository },
     { provide: HOLD_REPOSITORY, useClass: HoldRepository },
@@ -72,6 +77,7 @@ import { IdempotencyKeyRepository } from './repositories/impl/idempotency-key.re
   ],
   exports: [
     ACCOUNT_REPOSITORY,
+    CUSTOMER_REPOSITORY,
     LEDGER_ENTRY_REPOSITORY,
     TRANSACTION_REPOSITORY,
     HOLD_REPOSITORY,

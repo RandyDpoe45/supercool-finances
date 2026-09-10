@@ -44,6 +44,7 @@ import {
   insertAccount,
   expectPgError,
   seedTestCurrency,
+  localAccountNumber,
 } from '../support/pg';
 
 const ENABLED = process.env.BALANCE_INTEGRATION === '1';
@@ -427,6 +428,68 @@ suite('balance schema — Step 1 constraints (integration, needs Postgres)', () 
         }),
         PG.UNIQUE_VIOLATION,
       );
+    });
+  });
+
+  // ---- Confirmation-of-payee migration: uq_account_account_number + fk_account_owner ----
+  // Two invariants added by CreateCustomerAndAccountNumber: a PLAIN unique index on
+  // account.account_number, and the account.owner_id -> customer.id FK. Each test below
+  // is power-bearing — it FAILS if its constraint is dropped (the number stops colliding,
+  // or the orphan owner stops being rejected) — and the multi-NULL case pins the plain-index
+  // choice the system/clearing accounts (NULL number) depend on.
+
+  it('rejects a second account reusing an existing account_number (uq_account_account_number UNIQUE)', async () => {
+    await withRollback(async (q) => {
+      await seedTestCurrency(q);
+      const number = localAccountNumber(); // one fixed 10-digit number, claimed twice
+      // System-style rows (owner_id NULL) isolate the collision to the account_number index:
+      // NULL owner_id skips fk_account_owner, and the unique index applies regardless of kind.
+      const first = await insertAccount(q, {
+        kind: 'system',
+        owner_id: null,
+        account_number: number,
+      });
+      expect(first.account_number).toBe(number);
+      // The SAME number on a second account must collide on uq_account_account_number.
+      await expectPgError(
+        insertAccount(q, { kind: 'system', owner_id: null, account_number: number }),
+        PG.UNIQUE_VIOLATION,
+      );
+    });
+  });
+
+  it('rejects a customer account whose owner_id is not a real customer (fk_account_owner FK)', async () => {
+    await withRollback(async (q) => {
+      await seedTestCurrency(q);
+      // insertRow (NOT insertAccount) so no customer parent is seeded — owner_id points at a
+      // sub absent from `customer`. Every other FK is satisfied (currency TST seeded), so the
+      // only unsatisfied reference is fk_account_owner: a 23503 here proves that FK is live.
+      await expectPgError(
+        insertRow(q, 'account', {
+          kind: 'customer',
+          currency: 'TST',
+          spent_today_date: TODAY,
+          spent_month_date: MONTH_START,
+          owner_id: `sub-${randomUUID()}`, // no such customer
+        }),
+        PG.FK_VIOLATION,
+      );
+    });
+  });
+
+  it('allows multiple accounts with account_number NULL (multi-NULL tolerance for system/clearing accounts)', async () => {
+    await withRollback(async (q) => {
+      await seedTestCurrency(q);
+      // System/clearing accounts carry a NULL account_number; a PLAIN unique index tolerates
+      // many NULLs, so BOTH inserts must succeed. A NOT-NULL default or a NULL-rejecting index
+      // regression would break the seed of the clearing accounts and fail here.
+      const a1 = await insertAccount(q, { kind: 'system', owner_id: null, account_number: null });
+      const a2 = await insertAccount(q, { kind: 'system', owner_id: null, account_number: null });
+      expect(a1.id).toBeTruthy();
+      expect(a2.id).toBeTruthy();
+      expect(a1.id).not.toBe(a2.id);
+      expect(a1.account_number).toBeNull();
+      expect(a2.account_number).toBeNull();
     });
   });
 });

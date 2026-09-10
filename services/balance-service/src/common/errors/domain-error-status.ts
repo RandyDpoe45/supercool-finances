@@ -31,6 +31,7 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   IDEMPOTENCY_KEY_REUSED: HttpStatus.CONFLICT,
   IDEMPOTENCY_IN_PROGRESS: HttpStatus.CONFLICT,
   OTP_ALREADY_ACTIVE: HttpStatus.CONFLICT,
+  DESTINATION_NOT_CONFIRMED: HttpStatus.CONFLICT,
 
   // Second-factor failures.
   INVALID_OTP: HttpStatus.UNAUTHORIZED,

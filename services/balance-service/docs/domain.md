@@ -23,6 +23,10 @@ per step:
   the `/api` transfers + OTP endpoints, the initiate=PENDING / confirm=post lifecycle, the
   QueryRunner-aware `postPendingInTx` posting seam, the DomainError→HTTP mapping, and the zod
   request validation.
+- **Step 4c — confirmation of payee + customer representation**
+  ([below](#confirmation-of-payee--customer-representation-step-4c)): the `customer` table, the
+  human `account_number`, and the resolve→token→initiate gate that makes internal transfers
+  human-usable (addressed by account number, with a masked payee name shown before initiate).
 
 Holds, external transfers, limits, and the outbox relay still arrive in later steps.
 
@@ -684,7 +688,7 @@ generic-message path.
 | `INVALID_POSTING_COMMAND`, `INVALID_TRANSFER` | 400 |
 | `ACCOUNT_NOT_FOUND`, `TRANSFER_NOT_FOUND` | 404 |
 | `CURRENCY_MISMATCH`, `INSUFFICIENT_FUNDS` | 422 |
-| `ACCOUNT_FROZEN`, `TRANSFER_NOT_PENDING`, `SUSPECTED_DUPLICATE`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `OTP_ALREADY_ACTIVE` | 409 |
+| `ACCOUNT_FROZEN`, `TRANSFER_NOT_PENDING`, `SUSPECTED_DUPLICATE`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `OTP_ALREADY_ACTIVE`, `DESTINATION_NOT_CONFIRMED` | 409 |
 | `INVALID_OTP` | 401 |
 | `OTP_LOCKED_OUT` | 429 |
 
@@ -720,6 +724,108 @@ Added to `ITransactionRepository` (interface/impl split, following the tx-aware 
   by `ApiModule` for `OtpApiController`). `AppModule` therefore **no longer** imports
   `PostingModule` / `IdempotencyModule` / `OtpModule` transitionally; it keeps the `@Global`
   `RedisModule` and the rest.
+
+## Confirmation of payee + customer representation (step 4c)
+
+Makes internal transfers **human-usable**: a customer addresses a transfer by the payee's
+**human account number**, and sees a **masked payee name** to sanity-check *who* they are
+paying **before** committing. The money/OTP machinery of step 4b is unchanged — this swaps how
+the destination is *addressed* and adds a confirmation gate in front of initiate.
+
+> **Data-model update.** This **supersedes** the earlier note that a customer's `sub → name`
+> mapping was Keycloak/UI-only. The balance DB now owns the customer profile (name/phone/email)
+> in its own `customer` table; **Keycloak keeps only authentication**. `account.owner_id` is the
+> Keycloak `sub` and is now an **FK to `customer.id`**.
+
+### Customer representation + account number (persistence)
+
+- **`customer` table** (`src/database/entities/customer.entity.ts`, migration
+  `1789084800000-CreateCustomerAndAccountNumber`): `id varchar PRIMARY KEY` (the Keycloak `sub`
+  — `varchar` to match `account.owner_id`'s existing type, so **no** `owner_id` type change and
+  **no** risky ALTER), `name` / `phone` / `email` (all `NOT NULL`), `created_at` / `updated_at`.
+  Nothing else. Bound behind `CUSTOMER_REPOSITORY` (`findById` / `create`) in `PersistenceModule`.
+- **`account.account_number`** (`varchar NULL`): the human destination identifier — a unique
+  **10-digit numeric** string on **customer accounts only** (system/clearing accounts keep NULL).
+  A **plain** `UNIQUE` index (`uq_account_account_number`) enforces uniqueness; Postgres allows
+  multiple NULLs, so the system accounts never collide. `IAccountRepository.findByAccountNumber`
+  resolves a number to an account.
+- **`fk_account_owner`** (`account.owner_id → customer.id`): nullable, so it is **not** checked
+  for system accounts (NULL owner). No customer accounts exist in the migration chain, so adding
+  the constraint cannot fail on existing data.
+- **`generateAccountNumber()`** (`src/modules/accounts/service/impl/account-number.ts`): a **pure**
+  helper minting a 10-digit zero-padded number from `crypto.randomInt`. There is **no
+  create-account endpoint** this step, so nothing generates at runtime yet — the seed (spec 08)
+  and tests use it to assign numbers; the DB unique index enforces uniqueness (callers retry on
+  a unique violation).
+
+`AccountDto` / `serializeAccount` now expose the owner's own `accountNumber` (owner-scoped reads
+already ensure a caller only sees their own accounts' numbers).
+
+### The resolve → token → initiate gate
+
+The flow that fronts initiate. **Resolving is a pure query** (no transaction); **initiating
+requires the token** it returns — a transfer can *only* be initiated once the caller resolved
+and confirmed **that** destination.
+
+| Route | Effect |
+|---|---|
+| `POST /api/transfers/resolve-destination` | Body `{ accountNumber }` (10-digit). Resolves to the payee's **masked name** + a **confirmation token** (single-purpose, caller + destination-bound, TTL-expiring — GET-validated, so an idempotent initiate retry within the window still succeeds). **200**, `ResolveDestinationDto { maskedName, currency, confirmationToken }`. No money moves. |
+| `POST /api/transfers` | Now addresses the payee by `destinationAccountNumber` and **requires** `confirmationToken`. Body `{ sourceAccountId (uuid), destinationAccountNumber (\d{10}), amount, currency, confirmationToken, confirmDuplicate? }` + `Idempotency-Key` header. |
+
+**`resolveDestination(params)` → `DestinationResolution { maskedName, currency, confirmationToken }`:**
+
+1. `accounts.findByAccountNumber(accountNumber)`; a missing account, a non-customer (system)
+   account, or a customer with a NULL owner all collapse to the **same** `TransferNotFoundError`
+   (**404**) — never reveal which case, nor that system accounts exist (anti-IDOR / anti-enum).
+2. `customers.findById(account.ownerId)` → the holder; `maskName(holder.name)`. A missing holder
+   (unreachable under the FK) also collapses to 404 rather than surfacing an empty name.
+3. Mint `confirmationToken = crypto.randomBytes(24).toString('hex')`; store in Redis at
+   **`xfer:confirm:<ownerId>:<token>`** = JSON `{ destinationAccountId, accountNumber }` with
+   `EX CONFIRM_TOKEN_TTL_SECONDS` (**300s**). The key embeds the **caller** `ownerId`, so another
+   user's token cannot be replayed.
+4. Return the masked name, the destination currency, and the token. **No transaction.**
+
+**`initiateTransfer` — the token gate.** After validating the amount/currency, owner-scoping the
+source (`findByIdAndOwner` → 404), and resolving the destination by number (non-customer → 404;
+`source.id === destination.id` → `InvalidTransferError`; currency mismatch → `CurrencyMismatchError`),
+it **`GET`s** (not `GETDEL` — an idempotent initiate retry within the TTL still works) the
+`xfer:confirm:<ownerId>:<token>` key: a **missing** token **or** a stored `destinationAccountId`
+that does **not** equal the resolved destination id → **`DestinationNotConfirmedError`** (code
+`DESTINATION_NOT_CONFIRMED` → **409**). Only then does the existing idempotency-wrapped PENDING
+insert run (unchanged), now keyed on the resolved destination id.
+
+### The masking rule
+
+`maskName(name)` (`src/modules/transfers/service/impl/mask-name.ts`, **pure**): split on whitespace
+(runs collapse), each token → its **first 3 characters + exactly two asterisks** (fixed, uniform,
+non-length-revealing), joined by single spaces. `"Juan Perez"` → `"Jua** Per**"`; empty/blank →
+`""`. It is applied **in the service** so the raw name (PII) never crosses the service boundary —
+neither the controller nor any DTO ever sees it.
+
+### Read DTOs — human account numbers + masked destination name
+
+The transfer entity stores debit/credit account **UUIDs**; the service **enriches** read results
+into view models (mirroring `getAccountStatement`'s `{ account, entries }`), and the controller
+whitelists them — the raw UUIDs and the PII name never reach the wire:
+
+- **`TransferView { transaction, sourceAccountNumber, destinationAccountNumber }`** →
+  `TransferDto { id, type, status, amount, currency, sourceAccountNumber, destinationAccountNumber,
+  createdAt, postedAt }` (the raw UUIDs are **dropped** from the wire). Returned by both
+  `initiateTransfer` and `confirmTransfer` (the posted transfer serializes the same way).
+- **`PendingAuthorizationView { …, destinationMaskedName }`** → `PendingAuthorizationDto
+  { transferId, type, amount, currency, sourceAccountNumber, destinationAccountNumber,
+  destinationMaskedName, createdAt }` — `destinationMaskedName` is `maskName` of the destination
+  account's holder, so the OTP app shows who the payment is to. Per-row account/customer lookups
+  are acceptable (prototype).
+
+### What did NOT change
+
+The OTP / confirm / posting money machinery is behaviorally intact: initiate still creates a
+PENDING header under the `Idempotency-Key`; confirm still consumes the OTP (`GETDEL`) then posts
+via the guarded PENDING→POSTED transition under the account lock. This step only changed how the
+destination is **addressed** (account number, not raw UUID) and added the **confirmation-token
+gate** in front of initiate. No create-account / create-customer endpoint is added — the seed
+(spec 08) and tests populate `customer` rows and account numbers.
 
 ## Not in this slice (later steps)
 

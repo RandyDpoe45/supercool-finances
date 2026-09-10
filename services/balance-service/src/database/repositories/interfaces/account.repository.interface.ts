@@ -19,6 +19,10 @@ export interface IAccountRepository {
   findByIdAndOwner(id: string, ownerId: string): Promise<Account | null>;
   /** Resolves a seeded system/clearing account by its stable `system_key`. */
   findBySystemKey(systemKey: string): Promise<Account | null>;
+  /** Resolves a customer account by its human `account_number` (the transfer destination
+   * identifier). System accounts have a NULL number and never match. Backed by the
+   * `uq_account_account_number` unique index. */
+  findByAccountNumber(accountNumber: string): Promise<Account | null>;
   /** `SELECT ... FOR UPDATE` on the account row — the concurrency primitive posting relies
    * on. MUST run inside the given queryRunner's active transaction. */
   lockByIdForUpdate(queryRunner: QueryRunner, id: string): Promise<Account | null>;

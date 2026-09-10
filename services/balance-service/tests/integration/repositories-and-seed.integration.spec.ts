@@ -47,7 +47,7 @@ import {
   getRepositoryToken,
 } from '../support/harness';
 import { completeRawEnv } from '../support/env.fixture';
-import { PG, TODAY, MONTH_START, insertRow, expectPgError } from '../support/pg';
+import { PG, TODAY, MONTH_START, insertRow, insertCustomer, expectPgError } from '../support/pg';
 
 const ENABLED = process.env.BALANCE_INTEGRATION === '1';
 
@@ -219,6 +219,9 @@ suite('balance persistence — Step 3 seed + repositories (integration, needs Po
 
   it('Account.create persists and Account.findById returns it (with DB defaults)', async () => {
     const ownerId = `sub-${randomUUID()}`;
+    await insertCustomer(ds, ownerId);
+    // Customer FK parent — pushed FIRST so LIFO drops it LAST, after its account.
+    cleanups.push(() => ds.query(`DELETE FROM customer WHERE id = $1`, [ownerId]));
     cleanups.push(() => ds.query(`DELETE FROM "account" WHERE owner_id = $1`, [ownerId]));
 
     const created = await repos.account.create({
@@ -245,6 +248,9 @@ suite('balance persistence — Step 3 seed + repositories (integration, needs Po
   it("Account.findByOwner is owner-scoped (returns only that owner's accounts)", async () => {
     const ownerA = `sub-${randomUUID()}`;
     const ownerB = `sub-${randomUUID()}`;
+    await insertCustomer(ds, ownerA);
+    await insertCustomer(ds, ownerB);
+    cleanups.push(() => ds.query(`DELETE FROM customer WHERE id = ANY($1)`, [[ownerA, ownerB]]));
     cleanups.push(() =>
       ds.query(`DELETE FROM "account" WHERE owner_id = ANY($1)`, [[ownerA, ownerB]]),
     );
@@ -284,13 +290,16 @@ suite('balance persistence — Step 3 seed + repositories (integration, needs Po
 
   it('Account.lockByIdForUpdate returns the row AND takes a real FOR UPDATE lock', async () => {
     // Commit a row so a second connection can see it and contend for the lock.
+    const lockOwner = `sub-${randomUUID()}`;
+    await insertCustomer(ds, lockOwner);
     const acc = await insertRow(ds, 'account', {
       kind: 'customer',
-      owner_id: `sub-${randomUUID()}`,
+      owner_id: lockOwner,
       currency: 'MXN',
       spent_today_date: TODAY,
       spent_month_date: MONTH_START,
     });
+    cleanups.push(() => ds.query(`DELETE FROM customer WHERE id = $1`, [lockOwner]));
     cleanups.push(() => ds.query(`DELETE FROM "account" WHERE id = $1`, [acc.id]));
 
     const qrA = ds.createQueryRunner();
@@ -407,14 +416,17 @@ suite('balance persistence — Step 3 seed + repositories (integration, needs Po
       initiatedBy: `sub-${randomUUID()}`,
     });
     expect(tx?.id).toBeTruthy();
+    const ledgerOwner = `sub-${randomUUID()}`;
+    await insertCustomer(ds, ledgerOwner);
     const acc = await insertRow(ds, 'account', {
       kind: 'customer',
-      owner_id: `sub-${randomUUID()}`,
+      owner_id: ledgerOwner,
       currency: 'MXN',
       spent_today_date: TODAY,
       spent_month_date: MONTH_START,
     });
-    // Push in creation order; afterEach pops LIFO -> ledger, then account, then tx.
+    // Push in creation order; afterEach pops LIFO -> ledger, then account, then tx, then customer.
+    cleanups.push(() => ds.query(`DELETE FROM customer WHERE id = $1`, [ledgerOwner]));
     cleanups.push(() => ds.query(`DELETE FROM "transaction" WHERE id = $1`, [tx.id]));
     cleanups.push(() => ds.query(`DELETE FROM "account" WHERE id = $1`, [acc.id]));
 

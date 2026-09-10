@@ -30,6 +30,12 @@ export class Account {
   @Column({ name: 'system_key', type: 'varchar', nullable: true })
   systemKey!: string | null;
 
+  /** The human destination identifier for a customer account — a unique 10-digit numeric
+   * string. NULL on system/clearing accounts (only customer accounts receive transfers). The
+   * UNIQUE index tolerates multiple NULLs, so system rows never collide. */
+  @Column({ name: 'account_number', type: 'varchar', nullable: true })
+  accountNumber!: string | null;
+
   @Column({ name: 'currency', type: 'char', length: 3 })
   currency!: string;
 

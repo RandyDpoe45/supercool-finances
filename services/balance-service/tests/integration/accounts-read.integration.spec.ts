@@ -45,7 +45,14 @@ import request from 'supertest';
 
 import { getAppModule, tcpProbe } from '../support/harness';
 import { completeRawEnv } from '../support/env.fixture';
-import { insertRow, insertLedgerEntry, TODAY, MONTH_START } from '../support/pg';
+import {
+  insertRow,
+  insertLedgerEntry,
+  insertCustomer,
+  localAccountNumber,
+  TODAY,
+  MONTH_START,
+} from '../support/pg';
 
 const ENABLED = process.env.BALANCE_INTEGRATION === '1';
 
@@ -74,6 +81,8 @@ suite(
     // Committed test rows dropped after each test (pushed in creation order, popped LIFO
     // so children are removed before their FK parents).
     const cleanups: Array<() => Promise<unknown>> = [];
+    // Customer FK parents (account.owner_id → customer.id); dropped AFTER all their accounts.
+    const seededCustomers = new Set<string>();
 
     beforeAll(async () => {
       const reachable = await tcpProbe(DB_HOST, DB_PORT);
@@ -124,6 +133,16 @@ suite(
           /* best-effort; random ids keep re-runs safe even if one cleanup fails */
         }
       }
+      // Customers go last — accounts (which FK to them) are already gone.
+      if (seededCustomers.size) {
+        const owners = Array.from(seededCustomers);
+        seededCustomers.clear();
+        try {
+          await ds.query(`DELETE FROM customer WHERE id = ANY($1)`, [owners]);
+        } catch {
+          /* best-effort */
+        }
+      }
     });
 
     afterAll(async () => {
@@ -133,9 +152,15 @@ suite(
     // ---- seed helpers (committed rows; cleanup registered in FK-safe order) ----------
 
     async function mkAccount(overrides: Record<string, unknown>): Promise<any> {
+      // A customer account's owner_id FKs to customer.id — seed the parent first.
+      if (typeof overrides.owner_id === 'string' && overrides.owner_id.length > 0) {
+        await insertCustomer(ds, overrides.owner_id);
+        seededCustomers.add(overrides.owner_id);
+      }
       const acc = await insertRow(ds, 'account', {
         kind: 'customer',
         currency: 'MXN',
+        account_number: localAccountNumber(),
         spent_today_date: TODAY,
         spent_month_date: MONTH_START,
         ...overrides,
@@ -197,16 +222,30 @@ suite(
       expect(ids).not.toContain(b1.id);
     });
 
-    it('shapes each account as the AccountDto contract (fields + money as strings)', async () => {
+    it('shapes each account as the AccountDto contract (fields + money as strings + account number)', async () => {
       const owner = `sub-${randomUUID()}`;
-      const acc = await mkAccount({ owner_id: owner, balance: 1234, held: 34 });
+      const acc = await mkAccount({
+        owner_id: owner,
+        balance: 1234,
+        held: 34,
+        account_number: '7010203040',
+      });
 
       const res = await asCustomer(owner, '/api/accounts');
       expect(res.status).toBe(200);
       const dto = res.body.accounts.find((a: any) => a.id === acc.id);
       expect(dto).toBeTruthy();
       expect(Object.keys(dto).sort()).toEqual(
-        ['available', 'balance', 'currency', 'held', 'id', 'kind', 'status'].sort(),
+        [
+          'accountNumber',
+          'available',
+          'balance',
+          'currency',
+          'held',
+          'id',
+          'kind',
+          'status',
+        ].sort(),
       );
       expect(dto.kind).toBe('customer');
       expect(dto.status).toBe('active');
@@ -217,6 +256,9 @@ suite(
       expect(dto.balance).toBe('1234');
       expect(dto.held).toBe('34');
       expect(dto.available).toBe('1200');
+      // The human account number is exposed (a deliberate whitelist field), never the owner sub.
+      expect(dto.accountNumber).toBe('7010203040');
+      expect(JSON.stringify(dto)).not.toContain(owner);
     });
 
     it('lists a FROZEN account and still serves its statement (reads do not filter by status)', async () => {

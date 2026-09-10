@@ -30,6 +30,10 @@ export class AccountRepository implements IAccountRepository {
     return this.repo.findOne({ where: { systemKey } });
   }
 
+  findByAccountNumber(accountNumber: string): Promise<Account | null> {
+    return this.repo.findOne({ where: { accountNumber } });
+  }
+
   lockByIdForUpdate(queryRunner: QueryRunner, id: string): Promise<Account | null> {
     return queryRunner.manager
       .createQueryBuilder(Account, 'account')

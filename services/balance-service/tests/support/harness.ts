@@ -541,6 +541,9 @@ export interface ResolvedDomainErrors {
   InvalidOtpError?: any;
   OtpLockedOutError?: any;
   OtpAlreadyActiveError?: any;
+  /** Confirmation-of-payee follow-up: initiate was called without a valid confirmation token
+   *  bound to the caller AND to THIS destination (code `DESTINATION_NOT_CONFIRMED` → 409). */
+  DestinationNotConfirmedError?: any;
 }
 
 /**
@@ -639,6 +642,12 @@ export function getDomainErrors(): ResolvedDomainErrors {
       'OtpAlreadyActiveError',
       'OtpActiveError',
       'OtpAlreadyActive',
+    ]),
+    // Confirmation-of-payee follow-up: the resolve→confirm→initiate gate error.
+    DestinationNotConfirmedError: findExportAcross(candidates, [
+      'DestinationNotConfirmedError',
+      'DestinationNotConfirmed',
+      'PayeeNotConfirmedError',
     ]),
   };
 }
@@ -895,5 +904,61 @@ export function getDomainErrorBase(): any {
     'the DomainError base class',
     [`${SRC}/common/errors/domain-error`, `${SRC}/common/errors/domain.error`],
     ['DomainError'],
+  );
+}
+
+// ---- Confirmation-of-payee follow-up (spec 04, step 4b follow-up) -------------------------
+// A `customer` representation, human 10-digit account numbers, and the resolve→confirm→initiate
+// gate. Resolved through the same single-seam convention: repo tokens BY name, pure helpers
+// BEST-EFFORT (undefined when absent, so a spec can honest-SKIP or fall back rather than crash
+// the whole file at import time).
+
+/** `CUSTOMER_REPOSITORY` — the DI token the persistence layer binds the customer repo to.
+ *  Reuses the multi-path repo-token resolver (probes `interfaces/<base>.repository.interface`). */
+export function getCustomerRepositoryToken(): symbol {
+  return getRepositoryToken('CUSTOMER_REPOSITORY', 'customer');
+}
+
+/**
+ * BEST-EFFORT resolution of the PURE `maskName(name)` privacy helper (the payee-name mask:
+ * each whitespace-split token → first 3 chars + exactly two asterisks). Returns `undefined`
+ * when no such export exists — the pure mask-name unit suite is skipped with a clear message
+ * when this is unresolved (prefer it resolves). Add the path/export here if the implementor
+ * names/locates it differently — the single coordination point.
+ */
+export function getMaskName(): ((name: string) => string) | undefined {
+  return findExportAcross(
+    [
+      `${SRC}/modules/transfers/service/mask-name`,
+      `${SRC}/modules/transfers/service/impl/mask-name`,
+      `${SRC}/modules/transfers/service/mask`,
+      `${SRC}/modules/transfers/service/impl/mask`,
+      `${SRC}/modules/transfers/mask-name`,
+      `${SRC}/common/text/mask-name`,
+      `${SRC}/common/pii/mask-name`,
+      `${SRC}/common/mask-name`,
+    ],
+    ['maskName', 'maskHolderName', 'maskDisplayName', 'maskPayeeName'],
+  );
+}
+
+/**
+ * BEST-EFFORT resolution of the PURE `generateAccountNumber()` helper (a 10-digit numeric
+ * string). Returns `undefined` when absent; a test that mints numbers falls back to a local
+ * 10-digit generator when this is unresolved. Add the path/export here if the implementor
+ * names/locates it differently — the single coordination point.
+ */
+export function getGenerateAccountNumber(): (() => string) | undefined {
+  return findExportAcross(
+    [
+      `${SRC}/modules/accounts/service/account-number`,
+      `${SRC}/modules/accounts/service/impl/account-number`,
+      `${SRC}/modules/accounts/service/generate-account-number`,
+      `${SRC}/modules/accounts/service/impl/generate-account-number`,
+      `${SRC}/modules/accounts/account-number`,
+      `${SRC}/common/accounts/account-number`,
+      `${SRC}/common/account-number`,
+    ],
+    ['generateAccountNumber', 'newAccountNumber', 'makeAccountNumber'],
   );
 }
