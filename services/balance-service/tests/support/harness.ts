@@ -554,6 +554,12 @@ export interface ResolvedDomainErrors {
   /** External-payee enrollment (spec 04 step 5): a duplicate `(owner_id, rail, destination_ref)`
    *  collided on `uq_payee` (code `PAYEE_ALREADY_ENROLLED` → 409). */
   PayeeAlreadyEnrolledError?: any;
+  /** External outbound (spec 04 step 5b): the addressed payee is missing or not owned by the caller
+   *  (code `PAYEE_NOT_FOUND` → 404, anti-IDOR — indistinguishable from a genuine miss). */
+  PayeeNotFoundError?: any;
+  /** External outbound (spec 04 step 5b): the payee is still inside its cooling-off window
+   *  (`now() < cooling_off_until`, DB clock) (code `PAYEE_IN_COOLING_OFF` → 409). */
+  PayeeInCoolingOffError?: any;
 }
 
 /**
@@ -674,6 +680,14 @@ export function getDomainErrors(): ResolvedDomainErrors {
       'PayeeAlreadyEnrolledError',
       'PayeeAlreadyEnrolled',
       'DuplicatePayeeError',
+    ]),
+    // Step-5b external outbound (best-effort). Owned by the transfers feature
+    // (transfers/service/errors), already in `candidates`.
+    PayeeNotFoundError: findExportAcross(candidates, ['PayeeNotFoundError', 'PayeeNotFound']),
+    PayeeInCoolingOffError: findExportAcross(candidates, [
+      'PayeeInCoolingOffError',
+      'PayeeInCoolingOff',
+      'PayeeCoolingOffError',
     ]),
   };
 }
@@ -811,6 +825,14 @@ export function getTransfersServiceToken(): symbol {
  *  guarded transitions (`insertPendingInTx`, `expireIfOverdue`, `transitionToCancelled`, …). */
 export function getTransactionRepositoryToken(): symbol {
   return getRepositoryToken('TRANSACTION_REPOSITORY', 'transaction');
+}
+
+/** `HOLD_REPOSITORY` — the DI token the persistence layer binds the hold (reservation-ledger) repo
+ *  to. Reuses the multi-path repo-token resolver so the holds/outbound suites can drive the guarded
+ *  hold transitions (`insertInTx`, `findByTransactionInTx`, `settleInTx`, `releaseInTx`) directly,
+ *  or seed rows via `tests/support/pg.ts:insertHold`. */
+export function getHoldRepositoryToken(): symbol {
+  return getRepositoryToken('HOLD_REPOSITORY', 'hold');
 }
 
 /**

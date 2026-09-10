@@ -50,6 +50,7 @@ export function serializePendingAuthorization(
     sourceAccountId: transaction.debitAccountId,
     destinationAccountNumber: pending.destinationAccountNumber,
     destinationMaskedName: pending.destinationMaskedName,
+    payeeDisplayName: pending.payeeDisplayName,
     createdAt: transaction.createdAt.toISOString(),
     expiresAt: transaction.expiresAt ? transaction.expiresAt.toISOString() : null,
   };

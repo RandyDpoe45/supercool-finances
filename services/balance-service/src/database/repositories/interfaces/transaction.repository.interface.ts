@@ -26,6 +26,14 @@ export interface ITransactionRepository {
    * OTP app's pending-authorization feed; `initiated_by` equals the debit-account owner by
    * construction at initiate. */
   findPendingByInitiator(initiatedBy: string): Promise<Transaction | null>;
+  /** The initiator's single active PENDING transfer, read INSIDE the caller's transaction (so it
+   * sees the tx's own uncommitted writes). Used by external-outbound initiate to load the prior
+   * pending under the same tx and — for an external prior — RELEASE its hold before the
+   * expire/supersede flip. Returns `null` when the initiator has no live pending. */
+  findPendingByInitiatorInTx(
+    queryRunner: QueryRunner,
+    initiatedBy: string,
+  ): Promise<Transaction | null>;
   /** Guarded `PENDING → POSTED` transition inside the caller's transaction:
    * `UPDATE ... SET status = POSTED, posted_at = now() WHERE id = :id AND status = 'PENDING'`.
    * Returns `true` iff exactly one row was updated; `false` (0 rows) means the transfer was
@@ -47,10 +55,18 @@ export interface ITransactionRepository {
    * 'PENDING' AND expires_at IS NOT NULL AND expires_at <= now()`. Returns `true` iff it flipped
    * the row (it WAS overdue). Used by confirm / read to expire a specific id via the DB clock. */
   expireIfOverdue(id: string): Promise<boolean>;
+  /** {@link expireIfOverdue} INSIDE the caller's transaction (same guarded, DB-clock UPDATE via
+   * `queryRunner.manager`), so an EXTERNAL pending's expiry can flip the row AND release its hold
+   * (+ `held -= amount`) atomically under the source lock. Returns `true` iff it flipped the row. */
+  expireIfOverdueInTx(queryRunner: QueryRunner, id: string): Promise<boolean>;
   /** Guarded explicit cancel of ONE pending transfer (single atomic statement on the plain repo):
    * `UPDATE ... SET status = CANCELLED, failure_reason = 'cancelled_by_user', failed_at = now()
    * WHERE id = :id AND status = 'PENDING'`. Returns `true` iff it flipped the row; `false` means
    * it was already terminal (concurrently posted / expired / cancelled). Terminal rows are
    * retained, never deleted. */
   transitionToCancelled(id: string): Promise<boolean>;
+  /** {@link transitionToCancelled} INSIDE the caller's transaction (same guarded UPDATE via
+   * `queryRunner.manager`), so an EXTERNAL pending's cancel can flip the row AND release its hold
+   * (+ `held -= amount`) atomically under the source lock. Returns `true` iff it flipped the row. */
+  transitionToCancelledInTx(queryRunner: QueryRunner, id: string): Promise<boolean>;
 }

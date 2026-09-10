@@ -31,8 +31,13 @@ per step:
   ([below](#external-payee-enrollment-step-5)): the `POST /api/payees` / `GET /api/payees`
   surface, the constant outbound rail, the env-configured cooling-off, and the DB-clock,
   date-gated usability. No money movement yet.
+- **Step 5b — holds + external outbound transfers**
+  ([below](#step-5b--holds--external-outbound-transfers)): the external-outbound transfer flow —
+  `POST /api/transfers/external` places a hold + PENDING transaction, and the SHARED confirm
+  **settles** it (customer → clearing) at OTP-confirm; the `Hold` reservation ledger + `account.held`
+  lifecycle around the posting keystone.
 
-Holds, external outbound money movement, limits, and the outbox relay still arrive in later steps.
+Limits and the outbox relay still arrive in later steps.
 
 ## Module structure
 
@@ -1031,10 +1036,160 @@ enrollment per external account per customer. `listPayees` is a straight `findBy
 `env.schema.ts` and surfaced as `AppConfig.payees.coolingOffSeconds` (a `PayeesConfig` interface,
 mirroring `OtpConfig`) in `configuration.ts`. Tests / compose override the default.
 
+## Step 5b — holds + external outbound transfers
+
+The external-outbound money flow: a customer sends to an **enrolled payee** (spec 04 step 5),
+two-phase and OTP-gated like an internal transfer, but reserving funds with a **hold** at initiate
+and **settling** that hold — moving the money customer → outbound clearing — at OTP-confirm. The
+initiate is a **dedicated endpoint**; confirm / cancel / the pending feed are **shared** with
+internal transfers and branch on the transaction **type**. Three developer decisions are LOCKED:
+address by enrolled **`payeeId`**; a dedicated `POST /api/transfers/external` initiate but a
+**shared** `POST /api/transfers/:id/confirm`; and **settle at confirm** (the step-5c rail callback
+finalizes the clearing side, not built here).
+
+### Endpoint
+
+| Route | Effect |
+|---|---|
+| `POST /api/transfers/external` | Initiate an external outbound to an enrolled payee. Body `{ sourceAccountId (uuid), payeeId (uuid), amount, currency, confirmDuplicate? }` (`.strict()`), required `Idempotency-Key` header. **Places a hold** + creates a **PENDING** `external_outbound` transaction — **no balance moves**. **201**, `TransferDto` (the same write DTO; `sourceAccountId` = the debit account, `expiresAt` = the 2-minute deadline). |
+
+Confirm (`POST /api/transfers/:id/confirm`), cancel (`POST /api/transfers/:id/cancel`) and the feed
+(`GET /api/pending-authorization`) are the SAME routes as internal — the service branches on the
+loaded transaction's `type`. The pending feed's `PendingAuthorizationDto` gains **`payeeDisplayName`**
+(the enrolled payee's label, unmasked — the caller's own label, not PII) for external rows;
+`destinationAccountNumber` / `destinationMaskedName` are null for external, and `payeeDisplayName`
+is null for internal.
+
+### Initiate — place a hold (no balance moves)
+
+`TransfersService.initiateExternalTransfer(params)`:
+
+1. **Shape** — positive minor-unit `amount`, currency present (defense-in-depth; the zod schema
+   also enforces, `.strict()`).
+2. **Source** — `findByIdAndOwner(sourceAccountId, ownerId)` → `TransferNotFoundError` (404) if
+   missing/non-owned; `source.currency !== currency` → `CurrencyMismatchError` (422).
+3. **Payee** — `externalPayees.findById(payeeId)`; **missing OR not owned by the caller** →
+   `PayeeNotFoundError` (404, anti-IDOR — the two cases are indistinguishable, never revealing
+   another user's payee). **Cooling-off gate on the DB clock**: `readDbNow()` (a `SELECT now()`,
+   never the app clock) `< payee.coolingOffUntil` → `PayeeInCoolingOffError` (409).
+4. **Clearing** — `findBySystemKey('clearing:rail-outbound')` is the credit side; its absence is a
+   system misconfiguration (a missing seed) → an internal **500-class** `Error`, not a client
+   fault; `clearing.currency !== currency` → `CurrencyMismatchError`.
+5. **Under the idempotency wrapper** (`fingerprint = { type: 'external_outbound', source,
+   destination: payeeId, amount, currency }`), inside its single READ COMMITTED, deadlock-retried
+   transaction:
+   1. **Release-then-supersede the prior single pending** — the single-active-pending rule spans
+      types. `findPendingByInitiatorInTx` loads the initiator's current pending; if it is
+      `external_outbound`, its hold is **released FIRST** (locking its source, guarded
+      `PLACED → EXPIRED` if the prior is overdue by the DB clock else `→ RELEASED`, `held -=
+      holdAmount` — but only when the guarded release actually flipped, so a concurrently-settled
+      prior never double-decrements). Then the existing `expireOverduePendingByInitiator` +
+      `supersedeActivePendingByInitiator` sweeps flip the prior transaction (overdue → EXPIRED, else
+      → CANCELLED `'superseded'`). The hold status agrees with the transaction status because both
+      use the **same tx `now()`** (`transaction_timestamp`, constant in the tx).
+   2. **Place the hold + PENDING txn** — lock the source `FOR UPDATE`; require
+      `available = balance − held ≥ amount` (`InsufficientFundsError`) and a non-frozen source
+      (`AccountFrozenError`); `insertPendingInTx` the `external_outbound` header (DB-clock
+      `expires_at`, `debit = source`, `credit = clearing`, `payeeId`); `updateHeldInTx(source,
+      held + amount)`; `holds.insertInTx` a `PLACED` hold on the `rail-outbound` rail carrying the
+      header's `expires_at`. **No balance change.**
+   - The `uq_one_pending_per_initiator` partial index still guards a truly-concurrent
+     same-initiator initiate → 23505 → `PendingTransferConflictError` (409). The idempotent
+     same-key replay returns the original id without re-running any of this.
+
+### Confirm — branch on type; settle at confirm
+
+`confirmTransfer` is shared. After the existing owner-scope + POSTED-idempotent-return + expiry
+check + OTP consume, it branches on `current.type`:
+
+- **internal** → the unchanged `postPendingInTx` path (no hold).
+- **external_outbound** → **settle** in ONE `runInTransactionWithRetry` transaction
+  (`settleExternalTransfer`), in this **exact order**:
+  1. **Lock the source** `FOR UPDATE`; read its current `held`.
+  2. **`updateHeldInTx(source, held − amount)` FIRST.** This is essential: the funds are already
+     reserved, so releasing the held **before** the reducer's debit makes the reducer's
+     `available = balance − held` funds check pass. The initiate-time check guaranteed
+     `balance − held_before ≥ amount` and set `held = held_before + amount`, so after the decrement
+     `held = held_before` and `available = balance − held_before ≥ amount`. Without the decrement
+     first, the reservation would be **double-counted** and the debit would spuriously fail.
+  3. **`postPendingInTx`** posts the **customer → clearing** double-entry (`[{source, −amount},
+     {clearing, +amount}]`), transitions PENDING → POSTED, and writes **one** outbox row — the
+     single balance/ledger/outbox keystone. Its guarded transition throws if the transfer is no
+     longer PENDING, which **rolls the whole tx back** (undoing the held decrement), so the held
+     decrement can never persist without the post.
+  4. **`settleInTx(holdId)`** flips the hold `PLACED → SETTLED`.
+
+  The OTP is consumed **before** this tx (existing ordering), so a settle failure spends the code
+  and leaves the transfer PENDING — retryable with a fresh code until expiry, exactly like internal.
+  The **hold is never double-counted**: the reducer's balance debit is the SOLE source of the
+  customer's outflow, and `held` nets to zero for the transfer. Money leaves the customer into the
+  outbound clearing account (the net **in transit**); the **step-5c** rail callback finalizes the
+  clearing side (not built here).
+
+### Cancel / expiry — release the hold
+
+For an `external_outbound` pending, both the explicit **cancel** (`cancelTransfer`) and the **lazy
+expiry** access points (the pending READ, and the pre-OTP expiry check in confirm) must **release
+the hold** in the SAME transaction as the status flip, under the source lock:
+
+- **Cancel** (`cancelExternalPendingReleasingHold`): lock source → guarded
+  `transitionToCancelledInTx` (`PENDING → CANCELLED`) → if it flipped, release the hold
+  (`PLACED → RELEASED`) + `held -= amount`.
+- **Expiry** (`expireExternalPendingReleasingHold`, used by the read feed and the confirm pre-OTP
+  check): lock source → guarded `expireIfOverdueInTx` (`PENDING & overdue → EXPIRED`, DB clock) →
+  if it flipped, release the hold (`PLACED → EXPIRED`) + `held -= amount`; returns whether it
+  expired (so confirm rejects with `TransferExpiredError` **without** consuming the OTP).
+
+Internal cancel/expiry stay on the plain single-statement `transitionToCancelled` / `expireIfOverdue`
+(no hold). Releasing/expiring returns the reservation with **no ledger entry** — only settlement
+writes to the main ledger.
+
+### Concurrency & lock ordering (the deadlock-free invariant)
+
+Every hold-mutating path — initiate, settle, cancel, expiry — locks the **SOURCE account `FOR
+UPDATE` before touching the transaction row**, a single consistent order that removes the classic
+opposite-order deadlock (e.g. a cancel racing a settle: without source-first ordering, one would
+hold the transaction-row lock wanting the source while the other holds the source wanting the
+transaction row). All of it runs in ONE READ COMMITTED, deadlock-retried transaction. The guarded
+transitions (`WHERE status = 'PENDING'` on the transaction, `WHERE status = 'PLACED'` on the hold)
+make every concurrent loser a **0-row no-op** rather than a double-apply, and the `held` decrement
+is applied **only** when the guarded hold release actually flipped — so `SUM(PLACED holds per
+account) == account.held` holds at every commit and `held >= 0` (DB-enforced) is never violated.
+
+**Source-before-clearing (a forward invariant for step 5c).** An external settle locks the
+customer **source** first (to read/adjust `held`), then `postPendingInTx` locks the affected rows
+canonically by ascending id — which includes the `clearing:rail-outbound` account. Within step 5b
+this cannot deadlock (external settles are the only ops touching a customer account **and** the
+clearing account, and two settles share only the clearing row — no 2-cycle). Step 5c's rail
+callback (compensating reversal / inbound credit) **will** touch both a customer account and a
+clearing account, so it MUST acquire the **customer account before the clearing account** — the
+same source-first order a settle uses — otherwise a 5c op locking `clearing → customer` could
+deadlock against a settle holding `source → clearing`. Encode this as the rule for every future
+clearing-touching operation.
+
+### New domain errors
+
+| Class | `code` | Status | Meaning |
+|---|---|---|---|
+| `PayeeNotFoundError` | `PAYEE_NOT_FOUND` | 404 | The addressed payee is missing or not owned by the caller (anti-IDOR — indistinguishable). |
+| `PayeeInCoolingOffError` | `PAYEE_IN_COOLING_OFF` | 409 | `now() < cooling_off_until` (DB clock) — the payee cannot receive money yet. |
+
+Both extend `DomainError` (transfers `service/errors.ts`) and are mapped in
+`domain-error-status.ts`. The reducer's `InsufficientFundsError` / `CurrencyMismatchError` /
+`AccountFrozenError` are reused at their existing codes.
+
+### Reconciliation invariant
+
+`SUM(amount) WHERE status = 'PLACED'` per account **==** `account.held` at every commit — the
+holds analogue of `sum(ledger delta) == account.balance`. A place increments both sides
+(`held += amount`, a new PLACED row); a settle nets the transfer to zero (`held -= amount`, hold
+→ SETTLED); a release/expiry decrements both (`held -= amount`, hold → RELEASED/EXPIRED). Clearing
+is a system account (exempt from the funds/frozen checks, may go negative — net in transit).
+
 ## Not in this slice (later steps)
 
-Holds + external **outbound money movement** + external inbound, the outbox **relay worker**,
-limits, and admin ops + maker-checker + external rails. The external-payee **usability check at
-outbound time** (the authoritative `now() >= cooling_off_until` gate) lands with the outbound money
-step — this step only records the payee. Statement pagination beyond the first page is likewise
-deferred — the read slice returns only the most recent `STATEMENT_PAGE_LIMIT` legs.
+External **inbound**, the outbox **relay worker** (SKIP LOCKED across instances), limits, and admin
+ops + maker-checker + external rails. The **step-5c** rail settlement callback that finalizes the
+outbound clearing side (success → draw down / reconcile; failure → compensating reversal) lands
+next. Statement pagination beyond the first page is likewise deferred — the read slice returns only
+the most recent `STATEMENT_PAGE_LIMIT` legs.

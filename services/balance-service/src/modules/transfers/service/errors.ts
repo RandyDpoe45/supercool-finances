@@ -87,6 +87,31 @@ export class PendingTransferConflictError extends DomainError {
   }
 }
 
+/** An external outbound initiate addressed a payee that does not exist, or is not owned by the
+ * caller. Both collapse to the SAME 404 (anti-IDOR / anti-enumeration) so a caller cannot probe
+ * which payee ids exist by watching the status: the message never reveals which case occurred nor
+ * that another user's payee exists. Carries no ids. */
+export class PayeeNotFoundError extends DomainError {
+  readonly code = 'PAYEE_NOT_FOUND';
+
+  constructor() {
+    super('Payee not found');
+  }
+}
+
+/** An external outbound initiate addressed a payee that is still inside its cooling-off window
+ * (`now() < cooling_off_until`, judged on the DB clock — never the app clock). The payee cannot
+ * yet receive money; the caller must wait until the cooling-off lapses. The cooling-off delay is
+ * the anti-fraud control on a freshly enrolled beneficiary. Maps to 409 Conflict; carries no ids
+ * or timestamps. */
+export class PayeeInCoolingOffError extends DomainError {
+  readonly code = 'PAYEE_IN_COOLING_OFF';
+
+  constructor() {
+    super('The payee is still in its cooling-off period and cannot receive money yet');
+  }
+}
+
 /** Initiate was called without a valid confirmation-of-payee token for THIS destination: the
  * caller either never resolved the destination, the token expired, or the token was bound to a
  * different destination. A transfer can only be initiated after the payer resolved+confirmed the

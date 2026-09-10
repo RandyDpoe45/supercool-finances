@@ -552,6 +552,13 @@ suite(
       expect((await acct(dst.id)).balance).toBe('1500');
       expect(await txStatus(transferId)).toBe('PENDING');
       expect(await legsForTx(transferId)).toHaveLength(0);
+      // Regression lock (5b extended the SHARED insertPendingInTx to persist payee_id for external
+      // transfers): an INTERNAL transfer has no payee, so its header's payee_id MUST stay NULL.
+      const [{ payee_id: internalPayeeId }] = await ds.query(
+        `SELECT payee_id FROM "transaction" WHERE id = $1`,
+        [transferId],
+      );
+      expect(internalPayeeId).toBeNull();
 
       const code = await generateOtp(owner);
       const confirmed = await confirm(owner, transferId, code);

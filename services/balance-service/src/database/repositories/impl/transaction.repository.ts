@@ -40,8 +40,8 @@ export class TransactionRepository implements ITransactionRepository {
     await queryRunner.manager.query(
       `INSERT INTO "transaction"
          ("id", "type", "status", "amount", "currency", "debit_account_id",
-          "credit_account_id", "initiated_by", "posted_at", "expires_at")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + interval '2 minutes')`,
+          "credit_account_id", "payee_id", "initiated_by", "posted_at", "expires_at")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now() + interval '2 minutes')`,
       [
         id,
         data.type,
@@ -50,6 +50,7 @@ export class TransactionRepository implements ITransactionRepository {
         data.currency,
         data.debitAccountId ?? null,
         data.creditAccountId ?? null,
+        data.payeeId ?? null,
         data.initiatedBy,
         data.postedAt ?? null,
       ],
@@ -71,6 +72,19 @@ export class TransactionRepository implements ITransactionRepository {
     // The partial unique index guarantees ≤1 PENDING per initiator; `take: 1` + the ordering is
     // defensive so a (theoretically impossible) duplicate still resolves deterministically.
     return this.repo.findOne({
+      where: { initiatedBy, status: TransactionStatus.Pending },
+      order: { createdAt: 'DESC', id: 'DESC' },
+    });
+  }
+
+  findPendingByInitiatorInTx(
+    queryRunner: QueryRunner,
+    initiatedBy: string,
+  ): Promise<Transaction | null> {
+    // Same query as findPendingByInitiator, but via the queryRunner's manager so it participates
+    // in (and sees) the caller's open transaction — external-outbound initiate reads the prior
+    // pending here to release its hold before superseding it.
+    return queryRunner.manager.findOne(Transaction, {
       where: { initiatedBy, status: TransactionStatus.Pending },
       order: { createdAt: 'DESC', id: 'DESC' },
     });
@@ -144,10 +158,41 @@ export class TransactionRepository implements ITransactionRepository {
     return (result.affected ?? 0) > 0;
   }
 
+  async expireIfOverdueInTx(queryRunner: QueryRunner, id: string): Promise<boolean> {
+    // Same guarded, DB-clock expiry as expireIfOverdue, but via queryRunner.manager so it commits
+    // (or rolls back) together with the external pending's hold release + held decrement.
+    const result = await queryRunner.manager
+      .createQueryBuilder()
+      .update(Transaction)
+      .set({ status: TransactionStatus.Expired, failedAt: () => 'now()' })
+      .where('id = :id AND status = :pending AND expires_at IS NOT NULL AND expires_at <= now()', {
+        id,
+        pending: TransactionStatus.Pending,
+      })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
   async transitionToCancelled(id: string): Promise<boolean> {
     // Guarded explicit cancel: PENDING → CANCELLED, retained. affected > 0 means THIS call
     // cancelled it; 0 means it was already terminal (concurrently posted / expired / cancelled).
     const result = await this.repo
+      .createQueryBuilder()
+      .update(Transaction)
+      .set({
+        status: TransactionStatus.Cancelled,
+        failureReason: 'cancelled_by_user',
+        failedAt: () => 'now()',
+      })
+      .where('id = :id AND status = :pending', { id, pending: TransactionStatus.Pending })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
+  async transitionToCancelledInTx(queryRunner: QueryRunner, id: string): Promise<boolean> {
+    // Same guarded cancel as transitionToCancelled, but via queryRunner.manager so it commits
+    // (or rolls back) together with the external pending's hold release + held decrement.
+    const result = await queryRunner.manager
       .createQueryBuilder()
       .update(Transaction)
       .set({
