@@ -231,6 +231,11 @@ not a migration.
 - `id` IS the `event_id` the analytics consumer dedups on.
 - `idx_outbox_unpublished (created_at) WHERE published_at IS NULL` — partial index for the
   relay poll (claimed `FOR UPDATE SKIP LOCKED`, stamped `published_at` when published).
+- **Relay read side (spec 04 step 6).** `IOutboxEventRepository.pollUnpublished(qr, limit)` claims
+  a batch of unpublished rows oldest-first with `FOR UPDATE SKIP LOCKED` (so concurrent relay
+  instances claim disjoint rows), and `markPublished(qr, ids)` stamps `published_at = now()` in the
+  same tx — after the XADD, for at-least-once delivery. See
+  [domain.md](./domain.md#step-6--outbox-relay-worker).
 
 **`audit_log`** — immutable admin-action log
 - `id bigint GENERATED ALWAYS AS IDENTITY` PK (append-only order; DB-generated, mapped via
@@ -344,7 +349,7 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
 | `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create`, `insertInTx` (PLACED), `findByTransactionInTx`, `settleInTx` (guarded PLACED→SETTLED), `releaseInTx(qr, id, RELEASED\|EXPIRED)` (guarded PLACED→terminal), `recordExternalRefInTx(qr, id, externalRef)` (guarded `external_ref IS NULL` — step 5c) |
 | `EXTERNAL_PAYEE_REPOSITORY` | `IExternalPayeeRepository` | `findById`, `create`, `findByOwner`, `createEnrollment(ownerId, displayName, rail, destinationRef, coolingOffSeconds)` (DB-clock `cooling_off_until`) |
 | `USER_LIMITS_REPOSITORY` | `IUserLimitsRepository` | `findById`, `create`, `findByOwner` |
-| `OUTBOX_EVENT_REPOSITORY` | `IOutboxEventRepository` | `findById`, `create` |
+| `OUTBOX_EVENT_REPOSITORY` | `IOutboxEventRepository` | `findById`, `create`, `insertInTx`, `pollUnpublished(qr, limit)` (claim unpublished rows `FOR UPDATE SKIP LOCKED` — step 6), `markPublished(qr, ids)` (stamp `published_at = now()` — step 6) |
 | `AUDIT_LOG_REPOSITORY` | `IAuditLogRepository` | `findById`, `create` |
 | `APPROVAL_REQUEST_REPOSITORY` | `IApprovalRequestRepository` | `findById`, `create` |
 | `IDEMPOTENCY_KEY_REPOSITORY` | `IIdempotencyKeyRepository` | `findByOwnerAndKey(ownerId, key)`, `create`, `findByOwnerAndKeyInTx`, `claimInTx` (INSERT … ON CONFLICT DO NOTHING), `markCompletedInTx`, `findRecentByFingerprintInTx` |
@@ -394,10 +399,10 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
   `external_ref` only `WHERE external_ref IS NULL` — the SUCCESS callback's reconcile, so a retried
   success never overwrites and writes NO balance/held/ledger. See
   [domain.md](./domain.md#step-5c--external-rail-webhooks).
-- **Deferred to the domain step (driven by real callers):** outbox `pollUnpublished`
-  (FOR UPDATE SKIP LOCKED) + `markPublished`; ledger reconstruction / delta-sum;
+- **Deferred to the domain step (driven by real callers):** ledger reconstruction / delta-sum;
   transaction-by-debit-account history; and the remaining status-transition helpers. These are
   intentionally absent now to avoid speculative, caller-less query surface. (The idempotency
   soft-duplicate-window lookup — `findRecentByFingerprintInTx` — landed with spec 04 step 3; the
-  `Hold` lifecycle methods with step 5b; and the rail-webhook gates —
-  `transitionToReversedInTx` / `recordExternalRefInTx` — with step 5c.)
+  `Hold` lifecycle methods with step 5b; the rail-webhook gates —
+  `transitionToReversedInTx` / `recordExternalRefInTx` — with step 5c; and the outbox relay poll —
+  `pollUnpublished` (FOR UPDATE SKIP LOCKED) + `markPublished` — with step 6.)

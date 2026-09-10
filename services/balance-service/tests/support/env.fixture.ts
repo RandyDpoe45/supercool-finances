@@ -27,6 +27,13 @@ export function completeRawEnv(overrides: Record<string, unknown> = {}): Record<
     // (`X-Rail-Signature`; env.schema requires >= 16 chars). Used by the e2e to sign a valid
     // request and to prove 401 on a wrong secret / stale timestamp / mismatched body.
     RAILS_WEBHOOK_SIGNING_SECRET: 'test-rails-webhook-signing-secret-0123456789',
+    // Step-6 outbox relay (spec 04 "Outbox + relay worker"): DISABLE the in-process background
+    // poll loop for every suite that boots AppModule, so a spun-up timer never drains outbox rows
+    // out from under a test's assertions (or races another suite's committed rows on the shared
+    // DB). Tests drive the relay EXPLICITLY via `drainOnce()`; the relay integration suite still
+    // calls `drainOnce()` regardless of this flag. The relay's own "RELAY_ENABLED=false ⇒ no
+    // auto-run" proof depends on booting under exactly this value.
+    RELAY_ENABLED: 'false',
     ...overrides,
   };
 }

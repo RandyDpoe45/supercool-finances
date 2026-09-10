@@ -419,6 +419,86 @@ export async function outboxCountForTx(q: any, txId: string): Promise<number> {
   return rows[0].count as number;
 }
 
+// ---- Outbox + relay worker (spec 04 step 6) --------------------------------------------------
+
+/**
+ * Options for {@link insertOutboxRow} — one `outbox_event` row the relay-worker suite seeds to
+ * drive `drainOnce()`. `transactionId` is REQUIRED: `outbox_event.transaction_id` is NOT NULL with
+ * an FK to `transaction` (`fk_outbox_transaction`), so seed a `transaction` first (via
+ * {@link insertTransaction}). `payload` is written to the `jsonb` column (JSON-stringified so
+ * Postgres parses it back into jsonb and the read-back deep-equals the original). `createdAt`
+ * accepts a JS `Date` so the ORDERING proof can seed rows with distinct creation instants
+ * (the relay drains oldest-first, `ORDER BY created_at`). `publishedAt` stays NULL (unpublished —
+ * the drainable state) unless set to a `Date` (already published — must NOT be re-drained). `id`
+ * (the `event_id` the stream carries + the analytics dedup key) defaults to a DB-generated uuid.
+ */
+export interface InsertOutboxRowOpts {
+  id?: string;
+  transactionId: string;
+  eventType?: string;
+  payload?: Record<string, unknown>;
+  createdAt?: Date;
+  publishedAt?: Date | null;
+}
+
+/**
+ * An `outbox_event` row. Returns the inserted row (RETURNING *) — `id` is the `event_id` the relay
+ * publishes. Only the keys the caller sets beyond the defaults are written, so an unset
+ * `created_at` keeps the `now()` DB default and an unset `published_at` stays NULL (unpublished).
+ */
+export async function insertOutboxRow(q: any, opts: InsertOutboxRowOpts): Promise<any> {
+  const payload = opts.payload ?? { kind: 'test.event', at: new Date().toISOString() };
+  const row: Record<string, unknown> = {
+    transaction_id: opts.transactionId,
+    event_type: opts.eventType ?? 'transaction.posted',
+    // jsonb column: pass a JSON STRING so Postgres parses text → jsonb (the read-back is a parsed
+    // object that deep-equals the original), instead of relying on driver object coercion.
+    payload: JSON.stringify(payload),
+  };
+  if (opts.id !== undefined) row.id = opts.id;
+  if (opts.createdAt !== undefined) row.created_at = opts.createdAt;
+  if (opts.publishedAt !== undefined) row.published_at = opts.publishedAt;
+  return insertRow(q, 'outbox_event', row);
+}
+
+/**
+ * Read one `outbox_event` row by id (the `event_id`) for relay assertions — its `event_type`,
+ * the parsed `payload` (jsonb → JS object), and crucially `published_at` (NULL until the relay
+ * has drained it; a set value proves the mark step ran). Returns `null` when the id does not
+ * exist. The single seam a relay test uses to assert "the row is (not) marked published".
+ */
+export async function getOutboxRow(
+  q: any,
+  id: string,
+): Promise<{
+  id: string;
+  transaction_id: string;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: Date;
+  published_at: Date | null;
+} | null> {
+  const rows = await q.query(
+    `SELECT "id", "transaction_id", "event_type", "payload", "created_at", "published_at"
+       FROM "outbox_event" WHERE "id" = $1`,
+    [id],
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+/** Count the still-unpublished (`published_at IS NULL`) outbox rows among a set of ids — the
+ * left-hand side of the relay's at-least-once invariant: after a successful drain every claimed
+ * row is marked (count 0); after a FAILED publish tick the row survives UNMARKED (count > 0). */
+export async function countUnpublishedOutbox(q: any, ids: string[]): Promise<number> {
+  if (!ids.length) return 0;
+  const rows = await q.query(
+    `SELECT COUNT(*)::int AS count FROM "outbox_event"
+       WHERE "id" = ANY($1) AND "published_at" IS NULL`,
+    [ids],
+  );
+  return rows[0].count as number;
+}
+
 // ---- Limits (spec 04 step 7) -----------------------------------------------------------------
 
 /**

@@ -12,6 +12,7 @@ import { AdminModule } from './modules/admin/admin.module';
 import { ApiModule } from './modules/api/api.module';
 import { ExternalModule } from './modules/external/external.module';
 import { InternalModule } from './modules/internal/internal.module';
+import { RelayModule } from './modules/relay/relay.module';
 import { RedisModule } from './redis/redis.module';
 
 /**
@@ -24,6 +25,10 @@ import { RedisModule } from './redis/redis.module';
  * `TransfersModule` (which imports `PostingModule` + `IdempotencyModule` + `OtpModule`) and
  * `OtpModule` are reached via {@link ApiModule} — so the former transitional `PostingModule` /
  * `IdempotencyModule` / `OtpModule` imports here have been removed.
+ *
+ * {@link RelayModule} (the outbox relay worker) IS imported here transitionally: it is a
+ * service-only module with no controller, so nothing else pulls it into the graph — importing it
+ * here is what makes the in-process poll loop run in the real service (`RELAY_ENABLED` gates it).
  *
  * The identity guards and the error filter are bound GLOBALLY (APP_GUARD / APP_FILTER) so no
  * endpoint can skip them — each guard scopes itself to its own prefix (`/api`+`/admin` vs
@@ -46,6 +51,8 @@ import { RedisModule } from './redis/redis.module';
     AdminModule,
     InternalModule,
     ExternalModule,
+    // Transitional: service-only, no controller — imported here so the poll loop runs.
+    RelayModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: GatewayIdentityGuard },
