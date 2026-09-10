@@ -38,4 +38,26 @@ export interface IAccountRepository {
    * so the `SUM(PLACED holds) == account.held` invariant holds at every commit. `newHeld` is a
    * canonical minor-unit string; the `held >= 0` DB check must never be violated. */
   updateHeldInTx(queryRunner: QueryRunner, id: string, newHeld: string): Promise<void>;
+  /** The current fixed-window boundaries off the DB clock in UTC (`today` = today's date,
+   * `monthStart` = the first of the current month), each an ISO `YYYY-MM-DD` string. Used by the
+   * reducer to lazily reset the per-account spend counters: a `spent_*_date` lexically before the
+   * matching boundary is stale (ISO dates sort chronologically) and its counter zeroes before the
+   * add. Uses the DB clock (not the app clock), consistent with `expires_at` / hold expiry. */
+  currentSpendWindowInTx(queryRunner: QueryRunner): Promise<{ today: string; monthStart: string }>;
+  /** Targeted UPDATE of the four fixed-window spend counters (and `updated_at`) for one account,
+   * joined to the given queryRunner's transaction — the limits-side sibling of
+   * {@link updateBalanceInTx}. The reducer calls this under the account's `FOR UPDATE` lock, after
+   * the balance/ledger fold and before the outbox insert, when `limitAccountId` opted the movement
+   * into limit enforcement. The values (post-reset, post-add counters + the current window dates)
+   * are computed by the reducer; the counters can never exceed the cap because both the check and
+   * this write happen under the same lock. Money values are canonical minor-unit strings; dates are
+   * ISO `YYYY-MM-DD`. */
+  updateSpendCountersInTx(
+    queryRunner: QueryRunner,
+    accountId: string,
+    spentToday: string,
+    spentTodayDate: string,
+    spentMonth: string,
+    spentMonthDate: string,
+  ): Promise<void>;
 }

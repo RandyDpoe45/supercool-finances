@@ -24,6 +24,7 @@ export interface PostingLeg {
  *   admin/service identity).
  * - `payeeId` / `reversesTransactionId` are optional links (external payee, the transaction
  *   this one reverses); null when not applicable.
+ * - `limitAccountId` opts this movement into limit enforcement — see the field doc.
  */
 export interface PostTransactionCommand {
   type: TransactionType;
@@ -33,4 +34,13 @@ export interface PostTransactionCommand {
   initiatedBy: string;
   payeeId?: string | null;
   reversesTransactionId?: string | null;
+  /**
+   * When set, the id of the CUSTOMER debit leg whose fixed-window spend this movement counts
+   * against. The reducer resolves the applicable caps, lazily resets the window off the DB
+   * clock, rejects with LIMIT_EXCEEDED if a cap would be breached, and increments
+   * `spent_today`/`spent_month` — all under the same `FOR UPDATE` lock already taken for that
+   * account (it must be one of the legs). Unset for movements that don't count against a
+   * customer's spend (inbound credits, reversals).
+   */
+  limitAccountId?: string;
 }

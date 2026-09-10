@@ -537,6 +537,11 @@ export class TransfersService implements ITransfersService {
         { accountId: creditAccountId, delta: current.amount },
       ],
       initiatedBy: ownerId,
+      // Confirm-time limit enforcement: this is the customer-initiated outbound path (internal
+      // post AND external settle share this command), so the debited (customer sender) account's
+      // fixed-window spend counts against the resolved caps inside the reducer's lock. Inbound
+      // credits / reversals go through postFreshInTx WITHOUT this, so they never count.
+      limitAccountId: debitAccountId,
     };
 
     if (current.type === TransactionType.ExternalOutbound) {

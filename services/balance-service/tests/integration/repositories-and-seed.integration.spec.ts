@@ -188,16 +188,25 @@ suite('balance persistence — Step 3 seed + repositories (integration, needs Po
     }
   });
 
-  it('does NOT over-seed: no other system accounts, and NO global user_limits row', async () => {
+  it('does NOT over-seed: exactly the two system accounts and exactly ONE global user_limits row', async () => {
     const [{ system_count }] = await ds.query(
       `SELECT count(*)::int AS system_count FROM account WHERE kind = 'system'`,
     );
     expect(system_count).toBe(2); // exactly the two clearing accounts — nothing else
 
+    // Spec 04 step-7 UPDATE: the global limits BASELINE is now seeded here (a migration constant,
+    // like the system accounts), no longer deferred. Exactly ONE global row (the customer/demo
+    // OVERRIDE data still defers to spec 08). Its caps are asserted in full by
+    // tests/integration/limits-seed.integration.spec.ts.
     const [{ global_limits }] = await ds.query(
       `SELECT count(*)::int AS global_limits FROM user_limits WHERE scope = 'global'`,
     );
-    expect(global_limits).toBe(0); // global limits deliberately deferred to spec 08
+    expect(global_limits).toBe(1);
+
+    const [{ customer_limits }] = await ds.query(
+      `SELECT count(*)::int AS customer_limits FROM user_limits WHERE scope = 'customer'`,
+    );
+    expect(customer_limits).toBe(0); // per-customer override data still deferred to spec 08
   });
 
   it('MXN currency is present (seed sanity)', async () => {

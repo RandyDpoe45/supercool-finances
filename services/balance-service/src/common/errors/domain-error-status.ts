@@ -27,6 +27,7 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   // Semantically valid but unprocessable given the money state.
   CURRENCY_MISMATCH: HttpStatus.UNPROCESSABLE_ENTITY,
   INSUFFICIENT_FUNDS: HttpStatus.UNPROCESSABLE_ENTITY,
+  LIMIT_EXCEEDED: HttpStatus.UNPROCESSABLE_ENTITY,
 
   // Conflict with current state / a concurrent or duplicate request.
   ACCOUNT_FROZEN: HttpStatus.CONFLICT,

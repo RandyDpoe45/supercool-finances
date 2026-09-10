@@ -19,6 +19,7 @@ import { CreateBalanceSatellites1788912000000 } from './migrations/1788912000000
 import { SeedSystemAccounts1788998400000 } from './migrations/1788998400000-SeedSystemAccounts';
 import { CreateCustomerAndAccountNumber1789084800000 } from './migrations/1789084800000-CreateCustomerAndAccountNumber';
 import { AddTransactionLifecycle1789171200000 } from './migrations/1789171200000-AddTransactionLifecycle';
+import { SeedBaselineUserLimits1789257600000 } from './migrations/1789257600000-SeedBaselineUserLimits';
 
 /**
  * Single source of truth for the TypeORM DataSource options, shared by the Nest
@@ -57,6 +58,7 @@ export function buildDataSourceOptions(config: AppConfig): DataSourceOptions {
       SeedSystemAccounts1788998400000,
       CreateCustomerAndAccountNumber1789084800000,
       AddTransactionLifecycle1789171200000,
+      SeedBaselineUserLimits1789257600000,
     ],
     migrationsRun: true,
     synchronize: false,

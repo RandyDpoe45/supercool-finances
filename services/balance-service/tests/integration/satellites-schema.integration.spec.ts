@@ -309,10 +309,10 @@ suite('balance schema — Step 2 satellite tables (integration, needs Postgres)'
   it('rejects a SECOND global user_limits row (unique NULLS NOT DISTINCT on scope+owner_id)', async () => {
     await withRollback(async (q) => {
       await seedTestCurrency(q);
-      await insertRow(q, 'user_limits', { scope: 'global', owner_id: null, currency: 'TST' });
-      // A plain UNIQUE would treat the two NULL owner_ids as distinct and WRONGLY allow
-      // a second global row; NULLS NOT DISTINCT must reject it. This is the whole point
-      // of the constraint (exactly one global baseline).
+      // Spec 04 step-7 UPDATE: the migration now SEEDS the single global baseline row, so the
+      // (scope='global', owner_id NULL) slot is already occupied. NULLS NOT DISTINCT treats the two
+      // NULL owner_ids as equal, so ANY additional global row must be rejected (a plain UNIQUE would
+      // WRONGLY allow it). This is the whole point of the constraint — exactly one global baseline.
       await expectPgError(
         insertRow(q, 'user_limits', { scope: 'global', owner_id: null, currency: 'TST' }),
         PG.UNIQUE_VIOLATION,
@@ -320,22 +320,20 @@ suite('balance schema — Step 2 satellite tables (integration, needs Postgres)'
     });
   });
 
-  it('allows a global baseline and a per-customer override to coexist', async () => {
+  it('allows the seeded global baseline and a per-customer override to coexist', async () => {
     await withRollback(async (q) => {
       await seedTestCurrency(q);
-      const g = await insertRow(q, 'user_limits', {
-        scope: 'global',
-        owner_id: null,
-        currency: 'TST',
-      });
+      // The global baseline is already seeded (step-7 migration); a per-customer override has a
+      // DIFFERENT (scope, owner_id) key, so it coexists — only SAME-key rows collide.
+      const seededGlobal = await q.query(`SELECT id FROM user_limits WHERE scope = 'global'`);
+      expect(seededGlobal.length).toBe(1);
       const c = await insertRow(q, 'user_limits', {
         scope: 'customer',
         owner_id: `sub-${randomUUID()}`,
         currency: 'TST',
       });
-      expect(g.id).toBeTruthy();
       expect(c.id).toBeTruthy();
-      expect(g.id).not.toBe(c.id);
+      expect(c.id).not.toBe(seededGlobal[0].id);
     });
   });
 

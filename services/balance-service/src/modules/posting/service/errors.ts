@@ -44,6 +44,23 @@ export class AccountFrozenError extends DomainError {
   }
 }
 
+/**
+ * A customer-initiated outbound movement would breach the owner's own spend cap
+ * (per-transaction, daily, or monthly), checked under the same `FOR UPDATE` lock as the funds
+ * check BEFORE any balance mutation. `cap` names which limit was hit; because it is the
+ * owner's own limit, naming it is safe to surface.
+ */
+export class LimitExceededError extends DomainError {
+  readonly code = 'LIMIT_EXCEEDED';
+
+  constructor(
+    readonly cap: 'per_transaction' | 'daily' | 'monthly',
+    readonly accountId: string,
+  ) {
+    super(`Transfer exceeds the ${cap.replace('_', '-')} limit on account ${accountId}`);
+  }
+}
+
 /** The guarded `PENDING → POSTED` transition affected 0 rows: the header was already posted
  * (or otherwise not pending), so the reducer refuses to touch any balance — the "money moves
  * once" gate. The reducer OWNS this transition, so it owns the error. The `code` is

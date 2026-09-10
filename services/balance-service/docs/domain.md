@@ -43,8 +43,15 @@ per step:
   with a customer-first lock + `POSTED → REVERSED` + `reverses_transaction_id`) and the **inbound
   credit** (`clearing:rail-inbound → customer` by account number, not OTP-gated, idempotent by the
   rail `externalRef`, frozen-can-be-credited); plus the `postFreshInTx` reducer seam.
+- **Step 7 — limits enforcement**
+  ([below](#step-7--limits-enforcement)): per-transaction / daily / monthly amount caps enforced
+  **inside the reducer**, under the same `FOR UPDATE` lock as the funds check, on
+  customer-initiated outbound only — resolve the caps (customer override else global baseline),
+  lazily reset the fixed window off the DB clock (UTC), reject on breach (422 `LIMIT_EXCEEDED`),
+  and increment the per-account `spent_today`/`spent_month` atomically with the post. The global
+  baseline is seeded by a migration.
 
-Limits and the outbox relay still arrive in later steps.
+The outbox relay and admin ops still arrive in later steps.
 
 ## Module structure
 
@@ -281,10 +288,12 @@ transaction; every other error propagates. `applyPosting` is the `fn` run inside
 
 ### Deferred scope (NOT in the reducer yet)
 
-Per-period **spend-counter / limit** updates (step 7), **hold / `held`** mutation (step 5),
-and **idempotency-key** handling (step 3) are intentionally absent — but the funds check
-**does** subtract existing `held` when computing `available`, so it is already
-hold-aware. No endpoints, OTP, or transfer lifecycle here.
+At step 2, per-period **spend-counter / limit** updates, **hold / `held`** mutation, and
+**idempotency-key** handling were all intentionally absent — but the funds check **does**
+subtract existing `held` when computing `available`, so it is already hold-aware. Since then:
+spend-counter/limit enforcement moved **into** the reducer in **step 7** (only when the caller
+opts in via `command.limitAccountId` — see [below](#step-7--limits-enforcement)); hold/`held`
+mutation still lives in the transfers layer (step 5b); idempotency is the wrapper's job (step 3).
 
 ### Transaction-aware repository seam
 
@@ -318,6 +327,7 @@ live in the service, not in transport. A small cross-cutting base
 | `AccountNotFoundError` | `ACCOUNT_NOT_FOUND` | A leg references a missing account. |
 | `InsufficientFundsError` | `INSUFFICIENT_FUNDS` | Customer debit exceeds `available`. |
 | `AccountFrozenError` | `ACCOUNT_FROZEN` | Debit on a frozen customer account. |
+| `LimitExceededError` | `LIMIT_EXCEEDED` | Customer-initiated outbound would breach a per-transaction / daily / monthly cap (step 7; → 422). |
 | `CurrencyMismatchError` | `CURRENCY_MISMATCH` | Leg account currency ≠ transaction currency. |
 | `TransactionNotPendingError` | `TRANSFER_NOT_PENDING` | Guarded `PENDING → POSTED` transition affected 0 rows (already posted / not pending). Shares the `TRANSFER_NOT_PENDING` code with the transfers service's pre-check; both → 409. |
 
@@ -703,7 +713,7 @@ generic-message path.
 |---|---|
 | `INVALID_POSTING_COMMAND`, `INVALID_TRANSFER` | 400 |
 | `ACCOUNT_NOT_FOUND`, `TRANSFER_NOT_FOUND`, `SETTLEMENT_TARGET_NOT_FOUND`, `INBOUND_DESTINATION_NOT_FOUND` | 404 |
-| `CURRENCY_MISMATCH`, `INSUFFICIENT_FUNDS` | 422 |
+| `CURRENCY_MISMATCH`, `INSUFFICIENT_FUNDS`, `LIMIT_EXCEEDED` | 422 |
 | `ACCOUNT_FROZEN`, `TRANSFER_NOT_PENDING`, `PENDING_TRANSFER_CONFLICT`, `SUSPECTED_DUPLICATE`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `OTP_ALREADY_ACTIVE`, `DESTINATION_NOT_CONFIRMED`, `PAYEE_ALREADY_ENROLLED`, `INVALID_SETTLEMENT_STATE` | 409 |
 | `TRANSFER_EXPIRED` | 410 |
 | `INVALID_OTP` | 401 |
@@ -711,7 +721,7 @@ generic-message path.
 
 (`TRANSFER_EXPIRED` / `PENDING_TRANSFER_CONFLICT` added by the pending-lifecycle step below;
 `SETTLEMENT_TARGET_NOT_FOUND` / `INBOUND_DESTINATION_NOT_FOUND` / `INVALID_SETTLEMENT_STATE` by
-step 5c.)
+step 5c; `LIMIT_EXCEEDED` by step 7.)
 
 ### zod request validation
 
@@ -1385,9 +1395,96 @@ outbound holds are already SETTLED from 5b, so reconcile/reverse don't change `h
 `SUM(PLACED holds) == held` / `held >= 0` continue to hold. `clearing:rail-inbound` may go negative
 (a system account, exempt — net in transit).
 
+## Step 7 — limits enforcement
+
+Per-transaction, daily, and monthly **amount** caps (fixed calendar windows — never rolling, no
+count-based velocity), enforced **inside the reducer** under the SAME `FOR UPDATE` account lock as
+the funds check. Because the lock, the check, and the counter increment all sit in one critical
+section, a concurrent race can never push a counter past its cap — the same guarantee that makes
+the overdraft check safe. No new lock, no second transaction, no scheduler.
+
+### Where it lives (and where it does not)
+
+- The check + increment are a **new phase of `applyPosting`** (`PostingService`), between the
+  per-leg `checkAndFold` (funds/currency/frozen) and the balance-mutation loop for the *check*,
+  and between the balance/ledger fold and the outbox insert for the *counter write* — so a breach
+  throws BEFORE any balance moves, and the counters commit in the SAME tx as the movement.
+- It runs **only when the caller opts in** via `command.limitAccountId` (the customer debit leg).
+  This is set on the **shared confirm-time command** in `TransfersService.confirmTransfer`, which
+  backs BOTH outbound flows — the internal `postPendingInTx` post and the external
+  `settleExternalTransfer` settle. Inbound credits and reversals post through `postFreshInTx`
+  **without** it, so they never touch a counter (spec 04: inbound / reversals never count, and a
+  rail-failure reversal does **not** give the slot back — the fixed window holds it until reset).
+
+### The model — per-account counters, per-owner caps
+
+- **Counters are per-account** (`account.spent_today` / `spent_month`, with their `*_date` window
+  markers), incremented on the debited account only.
+- **Caps are per-owner or global.** `IUserLimitsRepository.resolveInTx(qr, ownerId, currency)`
+  resolves them **row-level, customer-wins**: the `customer` row (`owner_id = ownerId`) wins
+  **wholesale** when present, else the `global` baseline row, else `null` (uncapped). A NULL cap
+  **field** inside the chosen row is uncapped for that field. This per-account-counter /
+  per-owner-cap asymmetry is **from the spec** — spend is **not** aggregated across a customer's
+  several accounts.
+
+### The fixed-window lazy reset (DB clock, UTC)
+
+`IAccountRepository.currentSpendWindowInTx(qr)` reads the boundaries off the **DB clock in UTC**
+(`(now() AT TIME ZONE 'UTC')::date` for `today`, `date_trunc('month', …)` for `monthStart`),
+consistent with how `expires_at` / hold expiry use the DB clock. Both surface as ISO `YYYY-MM-DD`
+strings, which sort **chronologically == lexicographically**, so the stale check is a plain string
+`<`: if `spent_today_date < today` the day rolled over → the effective today-spend is `0` before
+the add (same for the month against `monthStart`). The reset is **lazy** — it happens on the next
+spend, no scheduler ever zeroes a counter.
+
+### The check (BigInt minor units, first breach wins)
+
+All arithmetic is exact `BigInt` on minor-unit strings (never `Number`/float). With
+`amount = BigInt(command.amount)`, `newToday = effToday + amount`, `newMonth = effMonth + amount`:
+
+1. `perTransactionMax != null && amount > perTransactionMax` → `LimitExceededError('per_transaction')`
+2. `dailyMax != null && newToday > dailyMax` → `LimitExceededError('daily')`
+3. `monthlyMax != null && newMonth > monthlyMax` → `LimitExceededError('monthly')`
+
+First breach wins. On success the reducer writes `spent_today = newToday`, `spent_today_date =
+today`, `spent_month = newMonth`, `spent_month_date = monthStart` via
+`IAccountRepository.updateSpendCountersInTx` (the limits-side sibling of `updateBalanceInTx`).
+A malformed directive — `limitAccountId` not among the legs, not a debit (`delta >= 0`), or not a
+customer account — throws `InvalidPostingCommandError` (defensive; the transfers layer only ever
+points it at the customer sender).
+
+### The domain error
+
+`LimitExceededError` (posting `service/errors.ts`, `code = 'LIMIT_EXCEEDED'`) carries the breached
+cap kind (`per_transaction` / `daily` / `monthly`) and the account id; it names the cap in its
+message (safe — it is the owner's own limit). Mapped to **422** in `domain-error-status.ts`, in the
+"unprocessable given the money state" group beside `INSUFFICIENT_FUNDS`.
+
+### New repository methods
+
+Added (interface/impl split, following the tx-aware `…InTx` seam):
+
+| Method | Effect |
+|---|---|
+| `IUserLimitsRepository.resolveInTx(qr, ownerId, currency)` | Resolve the applicable caps (customer row wins over global; `null` if neither). Two bound queries; a global row is selected by `owner_id IS NULL`. |
+| `IAccountRepository.currentSpendWindowInTx(qr)` | `{ today, monthStart }` off the DB clock in UTC as ISO `YYYY-MM-DD` strings. |
+| `IAccountRepository.updateSpendCountersInTx(qr, id, spentToday, spentTodayDate, spentMonth, spentMonthDate)` | Targeted UPDATE of the four counter columns (+ `updated_at`); values pre-computed by the reducer. |
+
+### The seeded global baseline
+
+`SeedBaselineUserLimits1789257600000` (`…/migrations/1789257600000-SeedBaselineUserLimits.ts`)
+seeds the ONE global baseline `user_limits` row on boot — a system constant, like the clearing
+accounts and the MXN currency (spec 04: "the global baseline is seeded, like the system accounts").
+Idempotent `INSERT … ON CONFLICT ON CONSTRAINT "uq_user_limits_scope" DO NOTHING`; `down()` deletes
+that global row. Per-customer overrides and the admin `PUT /limits` surface are a later step.
+
+| scope | owner_id | currency | per_transaction_max | daily_max | monthly_max |
+|---|---|---|---|---|---|
+| `global` | NULL | MXN | `5000000` (50,000.00) | `10000000` (100,000.00) | `100000000` (1,000,000.00) |
+
 ## Not in this slice (later steps)
 
-The outbox **relay worker** (SKIP LOCKED across instances), limits, and admin ops + maker-checker
-(including the admin-triggered *simulated* inbound, a separate deferred admin-surface concern).
-Statement pagination beyond the first page is likewise deferred — the read slice returns only the
-most recent `STATEMENT_PAGE_LIMIT` legs.
+The outbox **relay worker** (SKIP LOCKED across instances) and admin ops + maker-checker (including
+the admin `PUT /limits` **configuration** surface and the admin-triggered *simulated* inbound, a
+separate deferred admin-surface concern). Statement pagination beyond the first page is likewise
+deferred — the read slice returns only the most recent `STATEMENT_PAGE_LIMIT` legs.
