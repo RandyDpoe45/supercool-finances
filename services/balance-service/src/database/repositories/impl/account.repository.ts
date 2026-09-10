@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, QueryRunner, Repository } from 'typeorm';
 import { Account } from '../../entities/account.entity';
+import { AccountStatus } from '../../entities/enums';
 import { IAccountRepository } from '../interfaces/account.repository.interface';
 
 /** TypeORM implementation of {@link IAccountRepository}, bound to `ACCOUNT_REPOSITORY` in
@@ -47,6 +48,19 @@ export class AccountRepository implements IAccountRepository {
       .createQueryBuilder()
       .update(Account)
       .set({ balance: newBalance, updatedAt: () => 'now()' })
+      .where('id = :id', { id })
+      .execute();
+  }
+
+  async updateStatusInTx(
+    queryRunner: QueryRunner,
+    id: string,
+    status: AccountStatus,
+  ): Promise<void> {
+    await queryRunner.manager
+      .createQueryBuilder()
+      .update(Account)
+      .set({ status, updatedAt: () => 'now()' })
       .where('id = :id', { id })
       .execute();
   }

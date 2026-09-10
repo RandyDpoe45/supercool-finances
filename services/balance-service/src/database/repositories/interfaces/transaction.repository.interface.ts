@@ -1,8 +1,21 @@
 import { DeepPartial, QueryRunner } from 'typeorm';
+import { TransactionStatus, TransactionType } from '../../entities/enums';
 import { Transaction } from '../../entities/transaction.entity';
 
 /** DI token for {@link ITransactionRepository}. */
 export const TRANSACTION_REPOSITORY = Symbol('TRANSACTION_REPOSITORY');
+
+/** Filter for the admin transaction query ({@link ITransactionRepository.query}). Every field is
+ * optional except the already-clamped `limit`/`offset` (the service bounds them). `accountId`
+ * matches EITHER the debit or the credit leg; `ownerId` matches `initiated_by`. */
+export interface TransactionQueryFilter {
+  ownerId?: string;
+  accountId?: string;
+  status?: TransactionStatus;
+  type?: TransactionType;
+  limit: number;
+  offset: number;
+}
 
 /** Persistence port for {@link Transaction}. */
 export interface ITransactionRepository {
@@ -77,4 +90,11 @@ export interface ITransactionRepository {
    * `reverses_transaction_id` are posted only when this returns `true`. MUST run inside the given
    * queryRunner's active transaction. */
   transitionToReversedInTx(queryRunner: QueryRunner, id: string): Promise<boolean>;
+  /** Admin-scoped transaction query (spec 04 "Admin ops" — `GET /transactions`, view ANY
+   * transaction). A parameterized SELECT with the optional filters bound, `ORDER BY created_at
+   * DESC` (id tiebreak for determinism), `LIMIT`/`OFFSET` from the (already-clamped) filter.
+   * `accountId` matches the debit OR credit account; `ownerId` matches `initiated_by`. This is a
+   * plain read (no `FOR UPDATE`) and is DELIBERATELY NOT owner-scoped — it returns any transaction
+   * for the role-gated admin surface. */
+  query(filter: TransactionQueryFilter): Promise<Transaction[]>;
 }

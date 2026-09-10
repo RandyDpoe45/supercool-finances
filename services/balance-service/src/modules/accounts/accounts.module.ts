@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PersistenceModule } from '../../database/persistence.module';
+import { AuditModule } from '../audit/audit.module';
 import { AccountsService } from './service/impl/accounts.service';
 import { ACCOUNTS_SERVICE } from './service/interfaces/accounts.service.interface';
 
@@ -11,10 +12,11 @@ import { ACCOUNTS_SERVICE } from './service/interfaces/accounts.service.interfac
  * the accounts service behind the `ACCOUNTS_SERVICE` token (interface/impl split — consumers
  * depend on `IAccountsService`, never the concrete class). Importing {@link PersistenceModule}
  * wires the repository interface tokens (`ACCOUNT_REPOSITORY`, `LEDGER_ENTRY_REPOSITORY`) the
- * service depends on by token, never the concrete classes.
+ * service depends on by token, never the concrete classes. It also imports {@link AuditModule}
+ * for the `AUDIT_SERVICE` the freeze/unfreeze admin op writes its audit row through.
  */
 @Module({
-  imports: [PersistenceModule],
+  imports: [PersistenceModule, AuditModule],
   providers: [{ provide: ACCOUNTS_SERVICE, useClass: AccountsService }],
   exports: [ACCOUNTS_SERVICE],
 })

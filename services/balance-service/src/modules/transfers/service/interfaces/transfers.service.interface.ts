@@ -1,8 +1,24 @@
+import { TransactionStatus, TransactionType } from '../../../../database/entities/enums';
 import { Transaction } from '../../../../database/entities/transaction.entity';
 
-/** DI token for {@link ITransfersService}. Consumers (the `/api` surface controller) depend on
- * the interface via this token, never the concrete class. */
+/** DI token for {@link ITransfersService}. Consumers (the `/api` + `/admin` surface controllers)
+ * depend on the interface via this token, never the concrete class. */
 export const TRANSFERS_SERVICE = Symbol('TRANSFERS_SERVICE');
+
+/**
+ * The admin transaction-list query ({@link ITransfersService.listTransactions}, `GET
+ * /admin/transactions`). All filters optional; `limit` / `offset` are the caller's requested paging
+ * and are CLAMPED by the service (default 50, max 200, offset ≥ 0). `accountId` matches EITHER
+ * transfer leg; `ownerId` matches the initiator.
+ */
+export interface ListTransactionsQuery {
+  ownerId?: string;
+  accountId?: string;
+  status?: TransactionStatus;
+  type?: TransactionType;
+  limit?: number;
+  offset?: number;
+}
 
 /** Inputs to {@link ITransfersService.resolveDestination} — the confirmation-of-payee query. */
 export interface ResolveDestinationParams {
@@ -167,4 +183,13 @@ export interface ITransfersService {
    * with the destination holder's masked name. Lazily expires an overdue pending (→ EXPIRED) and
    * returns `null` in that case — reading is one of the lazy-expiry access points. */
   getPendingAuthorization(ownerId: string): Promise<PendingAuthorization | null>;
+
+  /**
+   * Admin `GET /admin/transactions` — view ANY transaction (spec 04 "Admin ops"). DELIBERATELY NOT
+   * owner-scoped: unlike every `/api` read on this service, this returns transactions for any owner,
+   * for the role-gated admin surface only. Clamps the requested paging (default 50, max 200, offset
+   * ≥ 0 — never an unbounded scan) and delegates to the repository's parameterized `query`. A pure
+   * READ — it writes NO audit row. Returns entities; the controller serializes them.
+   */
+  listTransactions(query: ListTransactionsQuery): Promise<Transaction[]>;
 }

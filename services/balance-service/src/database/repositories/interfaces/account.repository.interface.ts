@@ -1,5 +1,6 @@
 import { DeepPartial, QueryRunner } from 'typeorm';
 import { Account } from '../../entities/account.entity';
+import { AccountStatus } from '../../entities/enums';
 
 /** DI token for {@link IAccountRepository}. Consumers depend on the interface, never the
  * concrete TypeORM implementation (ADR: depend on interfaces/tokens). */
@@ -31,6 +32,11 @@ export interface IAccountRepository {
    * account's `FOR UPDATE` lock, BEFORE inserting the ledger entry (balance-then-ledger,
    * ADR-13). `newBalance` is a canonical minor-unit string. */
   updateBalanceInTx(queryRunner: QueryRunner, id: string, newBalance: string): Promise<void>;
+  /** Targeted UPDATE of the account `status` (and `updated_at`) for one account, joined to the
+   * given queryRunner's transaction. The admin freeze/unfreeze op calls this under the account's
+   * `FOR UPDATE` lock, in the SAME tx as its audit row. A frozen account can still be credited —
+   * the reducer only blocks customer DEBITS on a frozen account. */
+  updateStatusInTx(queryRunner: QueryRunner, id: string, status: AccountStatus): Promise<void>;
   /** Targeted UPDATE of the materialized `held` (and `updated_at`) for one account, joined to
    * the given queryRunner's transaction — the reservation-side sibling of
    * {@link updateBalanceInTx}. The transfers service calls this under the account's `FOR UPDATE`

@@ -15,6 +15,8 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   // Malformed / invalid request shape.
   INVALID_POSTING_COMMAND: HttpStatus.BAD_REQUEST,
   INVALID_TRANSFER: HttpStatus.BAD_REQUEST,
+  // Admin ops (step 8a): the `PUT /limits` body violated the scope/ownerId invariant.
+  INVALID_LIMITS: HttpStatus.BAD_REQUEST,
 
   // Resource does not exist (or is not owned — indistinguishable, anti-IDOR).
   ACCOUNT_NOT_FOUND: HttpStatus.NOT_FOUND,
@@ -42,6 +44,8 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   PAYEE_IN_COOLING_OFF: HttpStatus.CONFLICT,
   // External rail webhooks (step 5c): the callback contradicts the transfer's current money state.
   INVALID_SETTLEMENT_STATE: HttpStatus.CONFLICT,
+  // Admin ops (step 8a): freeze/unfreeze targeted a system/clearing account (not freezable).
+  ACCOUNT_NOT_FREEZABLE: HttpStatus.CONFLICT,
 
   // The resource was valid but is no longer available (a lapsed pending transfer).
   TRANSFER_EXPIRED: HttpStatus.GONE,

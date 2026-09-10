@@ -21,6 +21,11 @@ import { TRANSFERS_SERVICE } from './service/interfaces/transfers.service.interf
  * app-wide `DataSource` is injected via `@InjectDataSource()`. These three former service-only
  * feature modules are now reached through this module (and `OtpModule` also directly by
  * `ApiModule` for its own controller), so `AppModule` no longer imports them transitionally.
+ *
+ * The service also owns the admin-scoped, NON-owner-scoped `listTransactions` read (spec 04 step 8a
+ * — view ANY transaction), consumed by the `/admin` surface registry ({@link AdminModule}) which
+ * declares `TransfersAdminController`. It reuses the already-injected `TRANSACTION_REPOSITORY` — no
+ * new collaborator.
  */
 @Module({
   imports: [PersistenceModule, PostingModule, IdempotencyModule, OtpModule],

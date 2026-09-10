@@ -4,7 +4,11 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+import { runInTransactionWithRetry } from '../../../../common/db/run-in-transaction';
 import { Account } from '../../../../database/entities/account.entity';
+import { AccountKind, AccountStatus } from '../../../../database/entities/enums';
 import { LedgerEntry } from '../../../../database/entities/ledger-entry.entity';
 import {
   ACCOUNT_REPOSITORY,
@@ -14,6 +18,12 @@ import {
   ILedgerEntryRepository,
   LEDGER_ENTRY_REPOSITORY,
 } from '../../../../database/repositories/interfaces/ledger-entry.repository.interface';
+import {
+  AUDIT_ACTIONS,
+  AUDIT_SERVICE,
+  IAuditService,
+} from '../../../audit/service/interfaces/audit.service.interface';
+import { AccountNotFoundError, AccountNotFreezableError } from '../errors';
 import { IAccountsService } from '../interfaces/accounts.service.interface';
 
 /** Upper bound on ledger legs returned by one statement read. The underlying query
@@ -41,9 +51,14 @@ function assertOwnerScope(ownerId: string): void {
  */
 @Injectable()
 export class AccountsService implements IAccountsService {
+  // NOTE: the repo params stay FIRST (in their step-1 order) — DI binds each param by its decorator
+  // regardless of position, so `dataSource`/`audit` are appended without disturbing existing
+  // positional instantiation of this service.
   constructor(
     @Inject(ACCOUNT_REPOSITORY) private readonly accounts: IAccountRepository,
     @Inject(LEDGER_ENTRY_REPOSITORY) private readonly ledger: ILedgerEntryRepository,
+    @InjectDataSource() private readonly dataSource: DataSource,
+    @Inject(AUDIT_SERVICE) private readonly audit: IAuditService,
   ) {}
 
   /** The caller's own accounts only — `findByOwner` excludes system accounts (NULL owner). */
@@ -69,5 +84,42 @@ export class AccountsService implements IAccountsService {
     }
     const entries = await this.ledger.findByAccount(account.id, STATEMENT_PAGE_LIMIT);
     return { account, entries };
+  }
+
+  /**
+   * Admin single-actor freeze / unfreeze (spec 04 "Admin ops"). ONE transaction: lock the account
+   * `FOR UPDATE` (so a concurrent flip serializes and the audited `previousStatus` is truthful),
+   * reject a missing account (→ 404) or a system/clearing account (→ 409), flip `status`, and write
+   * the audit row via {@link IAuditService.recordInTx} in the SAME tx — the change and its audit
+   * commit or roll back together. The updated row is re-read AFTER commit so the returned entity
+   * carries the DB-stamped `updated_at`.
+   */
+  async setFrozen(actorId: string, accountId: string, frozen: boolean): Promise<Account> {
+    const newStatus = frozen ? AccountStatus.Frozen : AccountStatus.Active;
+    await runInTransactionWithRetry(this.dataSource, async (queryRunner) => {
+      const account = await this.accounts.lockByIdForUpdate(queryRunner, accountId);
+      if (!account) {
+        throw new AccountNotFoundError(accountId);
+      }
+      if (account.kind !== AccountKind.Customer) {
+        throw new AccountNotFreezableError(accountId);
+      }
+      const previousStatus = account.status;
+      await this.accounts.updateStatusInTx(queryRunner, accountId, newStatus);
+      await this.audit.recordInTx(queryRunner, {
+        actorId,
+        action: frozen ? AUDIT_ACTIONS.ACCOUNT_FREEZE : AUDIT_ACTIONS.ACCOUNT_UNFREEZE,
+        targetType: 'account',
+        targetId: accountId,
+        metadata: { previousStatus, newStatus },
+      });
+    });
+
+    const updated = await this.accounts.findById(accountId);
+    if (!updated) {
+      // Unreachable: the row was locked and updated in the just-committed transaction.
+      throw new AccountNotFoundError(accountId);
+    }
+    return updated;
   }
 }
