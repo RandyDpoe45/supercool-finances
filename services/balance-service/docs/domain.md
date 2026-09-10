@@ -43,6 +43,12 @@ per step:
   with a customer-first lock + `POSTED → REVERSED` + `reverses_transaction_id`) and the **inbound
   credit** (`clearing:rail-inbound → customer` by account number, not OTP-gated, idempotent by the
   rail `externalRef`, frozen-can-be-credited); plus the `postFreshInTx` reducer seam.
+- **Step 6 — outbox relay worker**
+  ([below](#step-6--outbox-relay-worker)): the in-process poll loop that drains the transactional
+  outbox onto the `events:transactions` Redis stream — one drain tick per transaction claims
+  unpublished rows `FOR UPDATE SKIP LOCKED` (never double-publishing across instances), `XADD`s
+  each **before** marking it published (at-least-once), and commits. Config-gated
+  (`RELAY_ENABLED`).
 - **Step 7 — limits enforcement**
   ([below](#step-7--limits-enforcement)): per-transaction / daily / monthly amount caps enforced
   **inside the reducer**, under the same `FOR UPDATE` lock as the funds check, on
@@ -51,7 +57,7 @@ per step:
   and increment the per-account `spent_today`/`spent_month` atomically with the post. The global
   baseline is seeded by a migration.
 
-The outbox relay and admin ops still arrive in later steps.
+Admin ops (freeze / limits config / reversals + maker-checker) still arrive in a later step.
 
 ## Module structure
 
@@ -1482,9 +1488,122 @@ that global row. Per-customer overrides and the admin `PUT /limits` surface are 
 |---|---|---|---|---|---|
 | `global` | NULL | MXN | `5000000` (50,000.00) | `10000000` (100,000.00) | `100000000` (1,000,000.00) |
 
+## Step 6 — outbox relay worker
+
+The read side of the transactional outbox. The reducer already writes exactly one `OutboxEvent`
+row in the SAME tx as every money change (step 2); this step **drains** those rows onto the
+`events:transactions` Redis stream for the analytics consumer. It closes the atomicity story:
+money moved ⇔ event recorded (outbox) ⇒ event delivered at-least-once (relay), with no
+`DB + publish` dual-write that could half-fail (ARCHITECTURE.md §7).
+
+### An in-process poll loop, not a cron or a separate process
+
+The relay is a **background poll loop INSIDE the balance service** — not an OS cron (whose
+1-minute floor is too slow) and not a separate process. **Every** balance-service instance runs
+its own loop; the `FOR UPDATE SKIP LOCKED` claim (below) is what lets them run concurrently
+without ever double-publishing a row. Reusing the one Redis for both OTP and the stream is the
+deliberate demo simplification recorded in ARCHITECTURE.md §7.
+
+### Module structure
+
+`src/modules/relay/` — a **service-only feature module** (module-layout + interface/impl
+conventions): the root holds only `relay.module.ts`; the service lives under `service/`
+(interface + `RELAY_SERVICE` token in `service/interfaces/`, the concrete class in
+`service/impl/`). It has **no controller** — the loop runs itself, and `drainOnce()` is the seam.
+
+| File | Role |
+|---|---|
+| `relay.module.ts` | Binds `{ provide: RELAY_SERVICE, useClass: RelayService }`, exports the token; imports `PersistenceModule` (for `OUTBOX_EVENT_REPOSITORY`). |
+| `service/interfaces/relay.service.interface.ts` | `IRelayService` + the `RELAY_SERVICE` Symbol token. Exposes `drainOnce(): Promise<number>`. |
+| `service/impl/relay.service.ts` | `RelayService implements IRelayService, OnApplicationBootstrap, OnModuleDestroy` — the drain tick + the self-rescheduling loop, plus the exported `TRANSACTION_STREAM_KEY` constant. |
+
+`RelayModule` is a service-only module with no consuming surface, so it is imported
+**transitionally by `AppModule`** (like the former `OtpModule` / `IdempotencyModule`) — that
+import is what makes the loop run in the real service. The `REDIS_CLIENT`, the default
+`DataSource`, and `APP_CONFIG` the service injects all come from `@Global` / root modules, so
+they are NOT imported by `RelayModule`. It **reuses** the existing lifecycle-managed
+`REDIS_CLIENT` and `DataSource` — never its own client/pool.
+
+### The drain tick (`drainOnce`) — one tick, one transaction
+
+`drainOnce()` publishes ONE batch and returns how many rows it published (`0` when the outbox is
+empty). It opens ONE plain **READ COMMITTED** transaction on a fresh `QueryRunner`
+(connect → start → try/commit → catch rollback+rethrow → finally release — the same tx shape as
+`runInTransactionWithRetry`, but without the deadlock-retry: `SKIP LOCKED` skips locked rows
+rather than waiting, so a claim never deadlocks). Inside, in strict order:
+
+1. **Claim** — `IOutboxEventRepository.pollUnpublished(qr, batchSize)`:
+   `SELECT * FROM outbox_event WHERE published_at IS NULL ORDER BY created_at FOR UPDATE SKIP
+   LOCKED LIMIT :batchSize`, served by the partial index `idx_outbox_unpublished`. Empty → commit,
+   return `0`.
+2. **Publish** — for each claimed row **in order**, `XADD events:transactions * event_id <id>
+   event_type <eventType> payload <JSON.stringify(payload)>` via the injected client.
+3. **Mark** — `IOutboxEventRepository.markPublished(qr, ids)` stamps `published_at = now()` on the
+   claimed ids.
+4. **Commit**, return the batch size.
+
+**XADD BEFORE mark (at-least-once).** The publish precedes the mark, and both live in the same tx
+as the claim. If a row's XADD throws (Redis down), the WHOLE tick's tx rolls back — **nothing is
+marked published** — so the entire batch republishes on the next tick. A crash between the XADD
+and the commit likewise leaves the rows unpublished, so they re-publish (a **duplicate**), and the
+analytics consumer dedups on `event_id`. It is never mark-then-XADD, which could lose an event.
+No dead-letter / attempt counter — a failed tick simply retries (spec 04).
+
+### The stream entry contract (`events:transactions`)
+
+The balance↔analytics **contract of record** (each side keeps its own copy; the spec keeps them in
+sync — ADR-16). Every entry `XADD`ed to the fixed stream key `events:transactions` carries exactly
+three fields:
+
+| Field | Value |
+|---|---|
+| `event_id` | `OutboxEvent.id` — the consumer's **dedup key** (at-least-once ⇒ duplicates possible). |
+| `event_type` | `OutboxEvent.eventType` (e.g. `transaction.posted`). |
+| `payload` | `JSON.stringify(OutboxEvent.payload)` — the reducer's JSON ([the provisional transaction-event payload](#outbox-payload-provisional-transaction-event-contract)); stringified because `payload` is a `jsonb` object and stream fields are strings. |
+
+### The background loop (self-rescheduling, non-overlapping)
+
+On `onApplicationBootstrap()`, when `config.relay.enabled`, the service starts a
+**self-rescheduling `setTimeout` chain** — NOT a fixed `setInterval`, so ticks can never overlap
+(the next is scheduled only after the current finishes). Each tick calls `drainOnce()`; then:
+
+- a **full batch** (`published === batchSize`) reschedules **immediately** (0ms) to drain a backlog
+  fast;
+- otherwise it reschedules after `pollIntervalMs`.
+
+Every tick is wrapped so a rejected XADD (Redis outage) or a DB error is **logged and swallowed** —
+it must never crash the loop or the process; the unpublished rows simply republish next tick. (The
+`REDIS_CLIENT`'s swallowing `'error'` handler covers connection-noise events, but command promises
+can still reject, so the tick's own try/catch is required.)
+
+**Shutdown.** The service tracks a `stopped` flag + the active timer handle. On `onModuleDestroy`
+it sets `stopped`, clears the pending timer, and **awaits any in-flight tick** so a running drain
+finishes (never abandons its open transaction); once stopped, no further tick is ever scheduled.
+It uses **`OnModuleDestroy`, not `OnApplicationShutdown`**: `main.ts` does not call
+`app.enableShutdownHooks()`, and `onModuleDestroy` fires on `app.close()` (which the tests use)
+without it — so the loop is reliably stopped on teardown.
+
+### Config knobs
+
+| Env var | `AppConfig.relay` | Default | Meaning |
+|---|---|---|---|
+| `RELAY_ENABLED` | `enabled` | `true` | Whether the poll loop runs. Parsed from the literals `'true'`/`'false'` only — **not** `z.coerce.boolean()`, whose `Boolean('false')` would be truthy. The e2e/integration env fixture sets `'false'` so booting `AppModule` doesn't spin the timer. |
+| `RELAY_POLL_INTERVAL_MS` | `pollIntervalMs` | `500` | Idle poll cadence (ms), positive int. Sub-second (below cron's 1-min floor). |
+| `RELAY_BATCH_SIZE` | `batchSize` | `100` | Rows claimed + published per tick, positive int. A full batch fast-drains the backlog. |
+
+### New repository methods
+
+Added to `IOutboxEventRepository` (interface/impl split, following the tx-aware `…InTx` seam;
+the interface **reserved** these names for this step):
+
+| Method | Effect |
+|---|---|
+| `pollUnpublished(qr, limit)` | Claim ≤ `limit` unpublished rows oldest-first with `FOR UPDATE SKIP LOCKED` (via `setLock('pessimistic_write')` + `setOnLocked('skip_locked')`, and `.limit()` — not `.take()` — so the lock stays on the base rows and the SQL is a plain `LIMIT`). |
+| `markPublished(qr, ids)` | `UPDATE outbox_event SET published_at = now() WHERE id IN (:...ids)` on the same qr; no-op on an empty list. |
+
 ## Not in this slice (later steps)
 
-The outbox **relay worker** (SKIP LOCKED across instances) and admin ops + maker-checker (including
-the admin `PUT /limits` **configuration** surface and the admin-triggered *simulated* inbound, a
-separate deferred admin-surface concern). Statement pagination beyond the first page is likewise
-deferred — the read slice returns only the most recent `STATEMENT_PAGE_LIMIT` legs.
+Admin ops + maker-checker (including the admin `PUT /limits` **configuration** surface and the
+admin-triggered *simulated* inbound, a separate deferred admin-surface concern). Statement
+pagination beyond the first page is likewise deferred — the read slice returns only the most recent
+`STATEMENT_PAGE_LIMIT` legs.

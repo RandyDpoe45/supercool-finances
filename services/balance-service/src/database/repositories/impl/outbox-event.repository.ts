@@ -24,4 +24,35 @@ export class OutboxEventRepository implements IOutboxEventRepository {
     // preset), so this is always a straight INSERT.
     return queryRunner.manager.save(queryRunner.manager.create(OutboxEvent, data));
   }
+
+  pollUnpublished(queryRunner: QueryRunner, limit: number): Promise<OutboxEvent[]> {
+    // `pessimistic_write` + `skip_locked` render `... FOR UPDATE SKIP LOCKED` on Postgres, so a
+    // second relay instance polling at the same instant claims the NEXT unlocked rows instead of
+    // blocking — disjoint claims, never a double-publish. `.limit()` (not `.take()`) emits a plain
+    // `LIMIT n` with no wrapping subquery, keeping the row-level lock on the base rows. Oldest
+    // first (`created_at ASC`), served by the partial index `idx_outbox_unpublished`.
+    return queryRunner.manager
+      .createQueryBuilder(OutboxEvent, 'outbox')
+      .setLock('pessimistic_write')
+      .setOnLocked('skip_locked')
+      .where('outbox.publishedAt IS NULL')
+      .orderBy('outbox.createdAt', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  async markPublished(queryRunner: QueryRunner, ids: string[]): Promise<void> {
+    // No-op on an empty batch — an `IN ()` predicate is invalid SQL and there is nothing to mark.
+    if (ids.length === 0) {
+      return;
+    }
+    // `published_at = now()` uses the DB clock (consistent with the other tx-aware writes). Runs on
+    // the SAME queryRunner as pollUnpublished, so the mark commits with the claim. Ids are bound.
+    await queryRunner.manager
+      .createQueryBuilder()
+      .update(OutboxEvent)
+      .set({ publishedAt: () => 'now()' })
+      .where('id IN (:...ids)', { ids })
+      .execute();
+  }
 }

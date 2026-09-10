@@ -40,6 +40,16 @@ export interface RailsConfig {
   webhookSigningSecret: string;
 }
 
+export interface RelayConfig {
+  /** Whether the in-process outbox relay poll loop runs (spec 04 step 6). Disabled in the
+   *  e2e/integration fixtures so booting AppModule doesn't spin the timer. */
+  enabled: boolean;
+  /** Poll cadence in ms between drain ticks when idle (not draining a backlog). Positive. */
+  pollIntervalMs: number;
+  /** Max outbox rows claimed + published per drain tick. A full batch fast-drains the backlog. */
+  batchSize: number;
+}
+
 export interface AppConfig {
   nodeEnv: Env['NODE_ENV'];
   port: number;
@@ -49,6 +59,7 @@ export interface AppConfig {
   otp: OtpConfig;
   payees: PayeesConfig;
   rails: RailsConfig;
+  relay: RelayConfig;
 }
 
 /**
@@ -81,6 +92,12 @@ export function buildConfig(env: Env): AppConfig {
 
   const rails: RailsConfig = { webhookSigningSecret: env.RAILS_WEBHOOK_SIGNING_SECRET };
 
+  const relay: RelayConfig = {
+    enabled: env.RELAY_ENABLED,
+    pollIntervalMs: env.RELAY_POLL_INTERVAL_MS,
+    batchSize: env.RELAY_BATCH_SIZE,
+  };
+
   return {
     nodeEnv: env.NODE_ENV,
     port: env.PORT,
@@ -90,6 +107,7 @@ export function buildConfig(env: Env): AppConfig {
     otp,
     payees,
     rails,
+    relay,
   };
 }
 

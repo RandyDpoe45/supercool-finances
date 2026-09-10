@@ -18,6 +18,13 @@ function portOf(cfg: any): unknown {
   return cfg?.PORT ?? cfg?.port ?? cfg?.app?.port;
 }
 
+/** Read the parsed relay-enabled flag tolerant of the flat env (RELAY_ENABLED) vs a built-config
+ *  nested (relay.enabled) shape. `??` is safe because the value is a real boolean (false is not
+ *  nullish) — that is exactly the property under test. */
+function relayEnabledOf(cfg: any): unknown {
+  return cfg?.relay?.enabled ?? cfg?.RELAY_ENABLED;
+}
+
 describe('config validation (fail-fast, zod)', () => {
   it('accepts a complete valid env and returns a config object', () => {
     const cfg = validateEnv(completeRawEnv());
@@ -79,5 +86,26 @@ describe('config validation (fail-fast, zod)', () => {
     // Proves these are optional-with-default, not required — and that a default env
     // still validates once the required secrets are present.
     expect(() => validateEnv(rawEnvWithout('DB_PORT', 'REDIS_PORT'))).not.toThrow();
+  });
+
+  // ---- RELAY_ENABLED: the string-literal union must parse to a REAL boolean (spec 04 step 6) ----
+  // The dangerous regression this locks out: `z.coerce.boolean()`, whose `Boolean('false')` is
+  // TRUTHY — it would silently read RELAY_ENABLED='false' as `true` and spin the background relay
+  // loop in every fixture that disables it. The `'true'|'false'` union + transform must instead map
+  // the literal 'false' to `false`, default to `true` when omitted, and REJECT anything else.
+
+  it("parses RELAY_ENABLED='false' to the boolean false (NOT truthy-string true)", () => {
+    const cfg = validateEnv(completeRawEnv({ RELAY_ENABLED: 'false' }));
+    expect(relayEnabledOf(cfg)).toBe(false);
+  });
+
+  it('defaults RELAY_ENABLED to boolean true when omitted', () => {
+    const cfg = validateEnv(rawEnvWithout('RELAY_ENABLED'));
+    expect(relayEnabledOf(cfg)).toBe(true);
+  });
+
+  it("rejects a non-'true'/'false' RELAY_ENABLED (e.g. 'yes') instead of coercing it", () => {
+    // A coercing boolean would accept 'yes' as true; the explicit union must fail-fast.
+    expect(() => validateEnv(completeRawEnv({ RELAY_ENABLED: 'yes' }))).toThrow();
   });
 });

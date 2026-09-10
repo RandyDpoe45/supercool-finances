@@ -1266,3 +1266,46 @@ export function railSignatureHeader(
   const hmacHex = createHmac('sha256', secret).update(`${t}.${rawBody}`).digest('hex');
   return `t=${t},v1=${hmacHex}`;
 }
+
+// ---- Relay module (spec 04 "Outbox + relay worker", step 6) -------------------------------
+// The in-process poll loop that drains the transactional outbox to the Redis stream
+// `events:transactions` (SELECT ... WHERE published_at IS NULL ORDER BY created_at FOR UPDATE
+// SKIP LOCKED LIMIT n → XADD each → markPublished → commit; XADD BEFORE mark ⇒ at-least-once).
+// Resolved through the same single-seam convention: the running instance BY TOKEN through the
+// app graph (integration), and the CLASS for the pure unit spec that drives it with mocked deps.
+// The stream is read back through the app's REDIS_CLIENT (getRedisClientToken above); the outbox
+// rows are seeded/read via tests/support/pg.ts (insertOutboxRow / getOutboxRow).
+
+/** `RELAY_SERVICE` — the DI token the RelayModule binds the RelayService to (resolved by token,
+ *  never by class, per the interface/impl split). Reuses the shared service-token probe. The
+ *  public seam is `drainOnce(): Promise<number>` (publishes one batch, returns rows published). */
+export function getRelayServiceToken(): symbol {
+  return resolveServiceToken('RELAY_SERVICE', 'relay');
+}
+
+/**
+ * The `RelayService` CLASS, for the pure unit spec (driven through a Nest TestingModule so the
+ * injection is order-independent, like the rails/transfers/payees unit specs). Scanned with
+ * `findExportAcross`; if the implementor moves/renames it, add the path/export HERE — the single
+ * coordination point. Returns `undefined` when the step-6 module is not yet built, so the unit
+ * spec honest-SKIPs (loudly) rather than crashing the default `npm test` run.
+ */
+export function getRelayService(): any | undefined {
+  return findExportAcross(
+    [
+      `${SRC}/modules/relay/service/impl/relay.service`,
+      `${SRC}/modules/relay/impl/relay.service`,
+      `${SRC}/modules/relay/relay.service`,
+      `${SRC}/modules/relay/service/relay.service`,
+    ],
+    ['RelayService'],
+  );
+}
+
+/** `OUTBOX_EVENT_REPOSITORY` — the DI token the persistence layer binds the outbox-event repo to
+ *  (the relay's `pollUnpublished(queryRunner, limit)` / `markPublished(queryRunner, ids)` port).
+ *  Reuses the multi-path repo-token resolver so the relay unit spec can mock it BY token and the
+ *  integration suite can drive it directly if needed. */
+export function getOutboxEventRepositoryToken(): symbol {
+  return getRepositoryToken('OUTBOX_EVENT_REPOSITORY', 'outbox-event');
+}

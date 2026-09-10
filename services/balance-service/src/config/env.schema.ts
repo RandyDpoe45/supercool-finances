@@ -37,6 +37,22 @@ export const EnvSchema = z.object({
   // DISTINCT trust domain from the `/internal` service token and the `/api` gateway identity;
   // min 16 chars.
   RAILS_WEBHOOK_SIGNING_SECRET: z.string().min(16),
+
+  // --- Outbox relay worker (spec 04 step 6) ---
+  // Whether the in-process relay poll loop runs. Env values are STRINGS, and JS `Boolean('false')`
+  // is truthy, so `z.coerce.boolean()` would read 'false' as true — parse the two literals
+  // EXPLICITLY instead (fail-fast on anything else), then map to a real boolean. Default true;
+  // e2e/integration fixtures set 'false' so booting AppModule doesn't spin the loop.
+  RELAY_ENABLED: z
+    .union([z.literal('true'), z.literal('false')])
+    .default('true')
+    .transform((v) => v === 'true'),
+  // Poll cadence in ms between drain ticks when idle / not draining a backlog (default 500ms —
+  // sub-second, far below cron's 1-minute floor, per ARCHITECTURE.md).
+  RELAY_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(500),
+  // Max outbox rows claimed + published per drain tick (default 100). A full batch triggers an
+  // immediate next tick to drain a backlog fast.
+  RELAY_BATCH_SIZE: z.coerce.number().int().positive().default(100),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

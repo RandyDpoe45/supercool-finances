@@ -176,9 +176,17 @@ whole prompt is about — correctness here is the deliverable.
   their pending transfer; expose `GET /api/pending-authorization` (the caller's single active
   pending transfer, or none) for the OTP app.
 - **Outbox + relay worker** — write the `OutboxEvent` in the **same DB
-  transaction** as the ledger change; a background worker polls with
-  `SELECT ... FOR UPDATE SKIP LOCKED`, `XADD`s to `events:transactions`, then marks
-  the row published (at-least-once).
+  transaction** as the ledger change; an **in-process** short-interval poll loop (a worker
+  inside the balance service — not an OS cron; see `docs/ARCHITECTURE.md`) drains it. Each
+  drain tick, in one transaction: `SELECT ... WHERE published_at IS NULL ORDER BY created_at
+  FOR UPDATE SKIP LOCKED LIMIT n` (so multiple balance-service instances never double-publish),
+  `XADD`s each row to **`events:transactions`**, then `markPublished` (`published_at = now()`),
+  then commits. **XADD BEFORE mark** so a crash between them re-publishes (a duplicate), never
+  loses — **at-least-once**; the consumer dedups on the event id. The stream **entry contract**
+  (balance↔analytics contract of record; analytics keeps its own copy): fields **`event_id`**
+  (= the `OutboxEvent.id`, the dedup key), **`event_type`**, and **`payload`** (the JSON the
+  reducer built). Config knobs: `RELAY_ENABLED` (default true), `RELAY_POLL_INTERVAL_MS`,
+  `RELAY_BATCH_SIZE`. No dead-letter/attempts in the prototype — a failed tick simply retries.
 - **Admin ops (`/admin`)** — freeze/unfreeze, configure limits, reversals (behind
   **maker-checker**), view any transaction + audit, trigger a simulated external
   inbound. All admin actions write the **audit log**.
