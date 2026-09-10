@@ -25,6 +25,11 @@ export const EnvSchema = z.object({
 
   // Pepper for hashing OTP codes at rest (keyed HMAC); never stored in Redis.
   OTP_HASH_SECRET: z.string().min(16),
+
+  // External-payee cooling-off window, in seconds: how long after enrollment a new payee
+  // must wait before it is a usable destination (`now() >= cooling_off_until`). The
+  // anti-fraud delay; default 24h. Tests / compose override it.
+  PAYEE_COOLING_OFF_SECONDS: z.coerce.number().int().positive().default(86400),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

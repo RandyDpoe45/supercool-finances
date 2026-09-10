@@ -24,6 +24,13 @@ export interface OtpConfig {
   hashSecret: string;
 }
 
+export interface PayeesConfig {
+  /** External-payee cooling-off window in seconds: enrollment stamps
+   *  `cooling_off_until = now() + coolingOffSeconds`, and a payee is a usable destination
+   *  from that instant on. A validated positive integer (never user input). */
+  coolingOffSeconds: number;
+}
+
 export interface AppConfig {
   nodeEnv: Env['NODE_ENV'];
   port: number;
@@ -31,6 +38,7 @@ export interface AppConfig {
   redis: RedisConfig;
   internalServiceToken: string;
   otp: OtpConfig;
+  payees: PayeesConfig;
 }
 
 /**
@@ -59,6 +67,8 @@ export function buildConfig(env: Env): AppConfig {
 
   const otp: OtpConfig = { hashSecret: env.OTP_HASH_SECRET };
 
+  const payees: PayeesConfig = { coolingOffSeconds: env.PAYEE_COOLING_OFF_SECONDS };
+
   return {
     nodeEnv: env.NODE_ENV,
     port: env.PORT,
@@ -66,6 +76,7 @@ export function buildConfig(env: Env): AppConfig {
     redis,
     internalServiceToken: env.INTERNAL_SERVICE_TOKEN,
     otp,
+    payees,
   };
 }
 

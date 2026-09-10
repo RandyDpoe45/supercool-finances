@@ -104,7 +104,18 @@ whole prompt is about — correctness here is the deliverable.
   the account's fixed-window spend counters (`spent_today` / `spent_month`) under the
   row lock. Configurable (global baseline + per-customer override).
 - **External payees** — enrollment with a **cooling-off period** before a new payee
-  can receive money.
+  can receive money. Registration input is minimal — **`{ displayName, destinationRef }`**
+  (`destination_ref` = the **external bank account number**, the human-identifier
+  convention); the **rail is a single constant outbound rail** (not user-supplied — the
+  prototype clears all external outbound through one mocked rail). Usability is
+  **date-gated, not status-driven**: enrollment stamps **`cooling_off_until` = `now()` +
+  `PAYEE_COOLING_OFF_SECONDS`**, and a payee is a valid destination from that instant on
+  (`now() >= cooling_off_until`) — **no PENDING→ACTIVE transition** (the `status` column is
+  reserved for a future admin/self-disable flow, unused for now). Uniqueness
+  `(owner_id, rail, destination_ref)` (with a constant rail, effectively one enrollment per
+  external account per customer) → a duplicate is a **409**. Enrollment is **not** OTP-gated
+  and has **no resolve/confirm step** (no external name to look up — the user supplies
+  `display_name`); the cooling-off delay is the anti-fraud control.
 - **OTP module** (bounded; [ADR-11](../docs/DECISIONS.md#adr-11--service-boundaries--data-ownership))
   — a **user-scoped** one-time code (`otp:<sub>`), **not** transaction-scoped: **at
   most one active code per user**, **single-use via atomic `GETDEL`**, TTL-bound. It is
@@ -148,7 +159,7 @@ whole prompt is about — correctness here is the deliverable.
 
 - `/api`: `GET /accounts`, `GET /accounts/:id/transactions`,
   `POST /transfers/resolve-destination`, `POST /transfers`, `POST /transfers/:id/confirm`,
-  `POST /transfers/:id/cancel`, `POST /otp`, `POST /payees`, `GET /pending-authorization`.
+  `POST /transfers/:id/cancel`, `POST /otp`, `POST /payees`, `GET /payees`, `GET /pending-authorization`.
   `POST /transfers/resolve-destination` is the **confirmation-of-payee query**: body
   `{ accountNumber }` (10-digit numeric) → `{ maskedName, currency, confirmationToken }`
   (no money moves). `POST /transfers` addresses the payee by
@@ -159,6 +170,8 @@ whole prompt is about — correctness here is the deliverable.
   at transfer initiation. `POST /transfers/:id/cancel` cancels the caller's pending transfer
   (guarded `PENDING → CANCELLED`, retained); `GET /pending-authorization` returns the caller's
   **single** active pending transfer (or none), with the destination's masked holder name.
+  `POST /payees` enrolls an external beneficiary (`{ displayName, destinationRef }` → the new
+  payee with its `coolingOffUntil`); `GET /payees` lists the caller's enrolled payees.
 - `/admin`: `POST /accounts/:id/freeze`, `PUT /limits`, `POST /transfers/:id/reverse`,
   `POST /approvals/:id/approve`, `GET /transactions`, `POST /external/inbound`.
 - `/internal`: `POST /rails/settlement-callback`, `GET /health`.

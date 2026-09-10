@@ -551,6 +551,9 @@ export interface ResolvedDomainErrors {
   /** Pending-lifecycle follow-up: a same-initiator concurrent initiate collided on the
    *  single-pending unique index (code `PENDING_TRANSFER_CONFLICT` → 409). */
   PendingTransferConflictError?: any;
+  /** External-payee enrollment (spec 04 step 5): a duplicate `(owner_id, rail, destination_ref)`
+   *  collided on `uq_payee` (code `PAYEE_ALREADY_ENROLLED` → 409). */
+  PayeeAlreadyEnrolledError?: any;
 }
 
 /**
@@ -579,6 +582,8 @@ export function getDomainErrors(): ResolvedDomainErrors {
     `${SRC}/modules/transfers/errors`,
     // Step-4b: the transfers feature owns its domain errors under `service/errors`.
     `${SRC}/modules/transfers/service/errors`,
+    // Step-5: the payees feature owns its domain errors under `service/errors`.
+    `${SRC}/modules/payees/service/errors`,
     `${SRC}/modules/otp/service/errors`,
     `${SRC}/modules/otp/otp.errors`,
     `${SRC}/modules/otp/errors`,
@@ -663,6 +668,12 @@ export function getDomainErrors(): ResolvedDomainErrors {
     PendingTransferConflictError: findExportAcross(candidates, [
       'PendingTransferConflictError',
       'PendingTransferConflict',
+    ]),
+    // Step-5 external-payee enrollment (best-effort).
+    PayeeAlreadyEnrolledError: findExportAcross(candidates, [
+      'PayeeAlreadyEnrolledError',
+      'PayeeAlreadyEnrolled',
+      'DuplicatePayeeError',
     ]),
   };
 }
@@ -997,4 +1008,122 @@ export function getGenerateAccountNumber(): (() => string) | undefined {
     ],
     ['generateAccountNumber', 'newAccountNumber', 'makeAccountNumber'],
   );
+}
+
+// ---- Payees module (spec 04 "External payees", Step-5: enrollment) ------------------------
+// Resolved through the same single-seam convention as everything else: the running instance BY
+// TOKEN through the app graph (integration), and the CLASS for the pure unit spec. The
+// `PayeeAlreadyEnrolledError` domain class is resolved via `getDomainErrors()` above.
+
+/** `PAYEES_SERVICE` — the DI token the PayeesModule binds the PayeesService to (resolved by token,
+ *  never by class, per the interface/impl split). Reuses the shared service-token probe. */
+export function getPayeesServiceToken(): symbol {
+  return resolveServiceToken('PAYEES_SERVICE', 'payees');
+}
+
+/** `EXTERNAL_PAYEE_REPOSITORY` — the DI token the persistence layer binds the external-payee repo
+ *  to. Reuses the multi-path repo-token resolver so a suite can drive `createEnrollment` /
+ *  `findByOwner` directly (or seed rows via `tests/support/pg.ts:insertExternalPayee`). */
+export function getExternalPayeeRepositoryToken(): symbol {
+  return getRepositoryToken('EXTERNAL_PAYEE_REPOSITORY', 'external-payee');
+}
+
+/**
+ * The `PayeesService` CLASS, for the pure unit spec (driven through a Nest TestingModule so the
+ * injection is order-independent). Scanned with `findExportAcross`; if the implementor moves/renames
+ * it, add the path/export HERE — the single coordination point.
+ */
+export function getPayeesService(): any {
+  const cls = findExportAcross(
+    [
+      `${SRC}/modules/payees/service/impl/payees.service`,
+      `${SRC}/modules/payees/impl/payees.service`,
+      `${SRC}/modules/payees/payees.service`,
+      `${SRC}/modules/payees/service/payees.service`,
+    ],
+    ['PayeesService'],
+  );
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the PayeesService class. If the implementor named/placed ` +
+        `it differently, add the path/export to tests/support/harness.ts:getPayeesService — the ` +
+        `single coordination point.`,
+    );
+  }
+  return cls;
+}
+
+/**
+ * The controller-boundary payee serializer `serializePayee(entity) => PayeeDto` (an explicit
+ * whitelist to `{ id, displayName, destinationRef, coolingOffUntil, usable, createdAt }` — NEVER
+ * `ownerId` / `rail` / `status` / `activatedAt`). Scanned with `findExportAcross`; if the
+ * implementor names/locates it differently, add the path/export here — the single coordination
+ * point.
+ */
+export function getPayeeSerializer(): (payee: any) => any {
+  const fn = findExportAcross(
+    [
+      `${SRC}/modules/payees/api/serializers/payees.serializer`,
+      `${SRC}/modules/payees/api/serializers/payee.serializer`,
+      `${SRC}/modules/payees/api/serializers`,
+      `${SRC}/modules/payees/serializers`,
+    ],
+    ['serializePayee', 'toPayeeDto', 'payeeToDto'],
+  );
+  if (fn === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the payee serializer (serializePayee). If the implementor ` +
+        `put it elsewhere, add the path/export to tests/support/harness.ts:getPayeeSerializer — the ` +
+        `single coordination point.`,
+    );
+  }
+  return fn as (payee: any) => any;
+}
+
+/**
+ * The constant outbound rail id (`OUTBOUND_RAIL` = 'rail-outbound') — all external outbound clears
+ * through this single rail; enrollment stores it on `external_payee.rail`. Returned so a suite can
+ * assert the seeded rail / compute the `uq_payee` uniqueness key without hard-coding the literal.
+ * The single coordination point if the implementor moves/renames it.
+ */
+export function getOutboundRail(): string {
+  return resolveOrThrow(
+    'the constant outbound rail id (OUTBOUND_RAIL)',
+    [`${SRC}/common/rails/outbound-rail`, `${SRC}/common/rails`],
+    ['OUTBOUND_RAIL'],
+  );
+}
+
+/**
+ * The external-payee cooling-off window in SECONDS, read from the RESOLVED `AppConfig`. Pass the
+ * config resolved from the app graph (`app.get(getAppConfigToken())`); called bare, it falls back
+ * to building the config from the current environment (`loadConfig()`), which works in the
+ * env-configured integration run. This is the single coordination point for the config PATH: if
+ * the implementor names the field differently, edit here. The value lets a suite compute the
+ * expected `cooling_off_until` (`enrolledAt + coolingOffSeconds`).
+ */
+export function getPayeeCoolingOffSeconds(config?: any): number {
+  const resolved = config ?? buildConfigFromEnv();
+  const seconds = resolved?.payees?.coolingOffSeconds;
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) {
+    throw new Error(
+      `[test harness] Could not read payees.coolingOffSeconds from the resolved AppConfig. Pass ` +
+        `the config resolved from the app graph (app.get(getAppConfigToken())); if the implementor ` +
+        `names the field differently, update tests/support/harness.ts:getPayeeCoolingOffSeconds — ` +
+        `the single coordination point.`,
+    );
+  }
+  return seconds;
+}
+
+/** Resolve + call the production `loadConfig()` (env → typed `AppConfig`), so a bare
+ * `getPayeeCoolingOffSeconds()` reads the SAME config the app builds. Throws the config loader's
+ * own (env-validation) error if the environment is incomplete. */
+function buildConfigFromEnv(): any {
+  const loadConfig = resolveOrThrow(
+    'the config loader (loadConfig)',
+    [`${SRC}/config/configuration`],
+    ['loadConfig'],
+  ) as () => any;
+  return loadConfig();
 }

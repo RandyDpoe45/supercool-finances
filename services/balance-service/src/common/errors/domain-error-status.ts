@@ -33,6 +33,7 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   IDEMPOTENCY_IN_PROGRESS: HttpStatus.CONFLICT,
   OTP_ALREADY_ACTIVE: HttpStatus.CONFLICT,
   DESTINATION_NOT_CONFIRMED: HttpStatus.CONFLICT,
+  PAYEE_ALREADY_ENROLLED: HttpStatus.CONFLICT,
 
   // The resource was valid but is no longer available (a lapsed pending transfer).
   TRANSFER_EXPIRED: HttpStatus.GONE,
