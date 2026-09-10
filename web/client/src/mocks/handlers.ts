@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw';
 import type { AccountsResponse, StatementResponse } from '../services/api/contracts/accounts';
 import type { ErrorResponse } from '../services/api/contracts/error';
+import type { PayeesResponse } from '../services/api/contracts/payees';
 import type {
   PendingAuthorizationResponse,
   TransferDto,
@@ -8,10 +9,19 @@ import type {
 import { fixtureAccounts } from './fixtures/accounts';
 import { fixtureStatements } from './fixtures/statements';
 import {
+  findPayee,
+  isPayeeUsable,
+  listPayees,
+  registerPayee,
+  serializePayeeDto,
+} from './state/payeeStore';
+import {
   cancelTransfer,
   confirmTransfer,
   getPendingAuthorization,
+  initiateExternalTransfer,
   initiateTransfer,
+  projectAccounts,
   resolveDestination,
 } from './state/transferStore';
 
@@ -65,12 +75,20 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
+/** Mirror a Zod `.strict()` body: reject any key outside the allowlist (defense against param
+ * smuggling — a client must not send `rail` / `status` / `coolingOffUntil` / `ownerId`, etc.). */
+function hasOnlyKeys(body: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(body).every((key) => allowed.includes(key));
+}
+
 export const handlers = [
   http.get('/api/accounts', ({ request }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
-    const body: AccountsResponse = { accounts: fixtureAccounts };
+    // Fold any live external-outbound holds over the fixtures so `available` reflects a placed hold
+    // (with no external activity this is byte-identical to the pristine fixtures).
+    const body: AccountsResponse = { accounts: projectAccounts() };
     return HttpResponse.json(body);
   }),
 
@@ -238,5 +256,139 @@ export const handlers = [
     }
     const body: PendingAuthorizationResponse = { authorization: getPendingAuthorization() };
     return HttpResponse.json(body);
+  }),
+
+  // The caller's enrolled external payees, each with its cooling-off status.
+  http.get('/api/payees', ({ request }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const body: PayeesResponse = { payees: listPayees().map(serializePayeeDto) };
+    return HttpResponse.json(body);
+  }),
+
+  // Enroll an external beneficiary. Minimal `.strict()` body `{ displayName, destinationRef }` — the
+  // rail/status/coolingOffUntil/ownerId are server-owned and rejected as unknown keys.
+  http.post('/api/payees', async ({ request }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body !== 'object') {
+      return badRequest('Malformed request body');
+    }
+    if (!hasOnlyKeys(body, ['displayName', 'destinationRef'])) {
+      return badRequest('Unexpected field in payee enrollment');
+    }
+    const displayName = typeof body.displayName === 'string' ? body.displayName.trim() : '';
+    if (displayName.length < 1 || displayName.length > 120) {
+      return badRequest('displayName must be 1–120 characters');
+    }
+    const destinationRef = body.destinationRef;
+    if (typeof destinationRef !== 'string' || !/^\d{6,20}$/.test(destinationRef)) {
+      return badRequest('destinationRef must be a 6–20 digit numeric string');
+    }
+    const result = registerPayee({ displayName, destinationRef });
+    if (result.outcome === 'already-enrolled') {
+      return errorResponse(
+        409,
+        'PAYEE_ALREADY_ENROLLED',
+        'A payee for this destination is already enrolled',
+      );
+    }
+    return HttpResponse.json(serializePayeeDto(result.payee), { status: 201 });
+  }),
+
+  // Initiate an external outbound transfer to an ENROLLED payee (addressed by payeeId) — PLACES A
+  // HOLD + creates a PENDING transaction (available drops now). `.strict()` body; requires the
+  // Idempotency-Key header. No confirmation token (external has no resolve/confirm step).
+  http.post('/api/transfers/external', async ({ request }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const idempotencyKey = request.headers.get('idempotency-key');
+    if (!isNonEmptyString(idempotencyKey)) {
+      return badRequest('Idempotency-Key header is required');
+    }
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body !== 'object') {
+      return badRequest('Malformed request body');
+    }
+    if (
+      !hasOnlyKeys(body, ['sourceAccountId', 'payeeId', 'amount', 'currency', 'confirmDuplicate'])
+    ) {
+      return badRequest('Unexpected field in external transfer');
+    }
+    const { sourceAccountId, payeeId, amount, currency } = body;
+    if (typeof sourceAccountId !== 'string' || !UUID_PATTERN.test(sourceAccountId)) {
+      return badRequest('sourceAccountId must be a uuid');
+    }
+    if (typeof payeeId !== 'string' || !UUID_PATTERN.test(payeeId)) {
+      return badRequest('payeeId must be a uuid');
+    }
+    if (typeof amount !== 'string' || !UNSIGNED_MINOR_UNITS.test(amount) || BigInt(amount) <= 0n) {
+      return badRequest('amount must be an unsigned minor-unit integer greater than zero');
+    }
+    if (typeof currency !== 'string' || currency.length !== 3) {
+      return badRequest('currency must be a 3-letter code');
+    }
+    const confirmDuplicate = body.confirmDuplicate;
+    if (confirmDuplicate !== undefined && typeof confirmDuplicate !== 'boolean') {
+      return badRequest('confirmDuplicate must be a boolean');
+    }
+
+    // Source is the caller's own account (a missing/non-owned source collapses to 404, anti-IDOR).
+    const source = fixtureAccounts.find((account) => account.id === sourceAccountId);
+    if (!source) {
+      return errorResponse(404, 'TRANSFER_NOT_FOUND', 'Transfer not found');
+    }
+    if (source.currency !== currency) {
+      return errorResponse(422, 'CURRENCY_MISMATCH', 'The source and transfer currencies differ');
+    }
+    if (source.status === 'frozen') {
+      return errorResponse(409, 'ACCOUNT_FROZEN', 'The source account is frozen');
+    }
+
+    // The destination is an ENROLLED payee — missing/non-owned → 404 (anti-enumeration); still
+    // cooling off → 409 (the AUTHORITATIVE gate, judged on the current clock, not the DTO hint).
+    const payee = findPayee(payeeId);
+    if (!payee) {
+      return errorResponse(404, 'PAYEE_NOT_FOUND', 'Payee not found');
+    }
+    if (!isPayeeUsable(payee)) {
+      return errorResponse(
+        409,
+        'PAYEE_IN_COOLING_OFF',
+        'The payee is still in its cooling-off period and cannot receive money yet',
+      );
+    }
+
+    const result = initiateExternalTransfer({
+      idempotencyKey,
+      sourceAccountId,
+      payeeId,
+      payeeDisplayName: payee.displayName,
+      amount,
+      currency,
+      confirmDuplicate: confirmDuplicate === true,
+    });
+    if (result.outcome === 'duplicate') {
+      return errorResponse(
+        409,
+        'SUSPECTED_DUPLICATE',
+        'A semantically identical transfer was seen within the last 60 seconds; confirm the duplicate to proceed',
+      );
+    }
+    if (result.outcome === 'key-reused') {
+      return errorResponse(
+        409,
+        'IDEMPOTENCY_KEY_REUSED',
+        'The Idempotency-Key was already used for a request with different details',
+      );
+    }
+    if (result.outcome === 'insufficient-funds') {
+      return errorResponse(422, 'INSUFFICIENT_FUNDS', 'Insufficient funds for the hold');
+    }
+    return HttpResponse.json(result.transfer, { status: 201 });
   }),
 ];

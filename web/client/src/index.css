@@ -215,3 +215,31 @@ main {
   cursor: pointer;
   font: inherit;
 }
+
+/* Payees */
+.payee-card__status {
+  margin: 0.25rem 0 0.5rem;
+}
+
+.cooling-off--ready {
+  color: #15803d;
+}
+
+.cooling-off--waiting {
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.payee-enrolled {
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.accounts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+}

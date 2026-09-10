@@ -89,6 +89,24 @@ export interface InitiateTransferRequest {
   confirmDuplicate?: boolean;
 }
 
+/**
+ * Arguments to the `initiateExternalTransfer` mutation — an external outbound to an ENROLLED payee,
+ * addressed by `payeeId` (there is NO resolve/confirmation-token step; the cooling-off delay is the
+ * anti-fraud gate). The service schema is `.strict()`, so ONLY the wire fields below may be sent.
+ * `idempotencyKey` rides the `Idempotency-Key` HEADER (not the body) and is REUSED across retries of
+ * the same logical transfer. Unlike an internal initiate, this places a HOLD immediately — the
+ * source account's `available` drops at once — so its cache invalidation differs (see
+ * `transfersApi`). `amount` is a minor-unit integer string.
+ */
+export interface InitiateExternalTransferRequest {
+  idempotencyKey: string;
+  sourceAccountId: string;
+  payeeId: string;
+  amount: string;
+  currency: string;
+  confirmDuplicate?: boolean;
+}
+
 /** Arguments to the `confirmTransfer` mutation — the pending transfer id + the out-of-band code
  * the user obtained from the OTP app (a numeric string). */
 export interface ConfirmTransferRequest {
