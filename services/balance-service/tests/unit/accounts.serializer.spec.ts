@@ -19,7 +19,17 @@ import { getAccountSerializers } from '../support/harness';
 
 const { serializeAccount, serializeStatementEntry } = getAccountSerializers();
 
-const ACCOUNT_DTO_KEYS = ['available', 'balance', 'currency', 'held', 'id', 'kind', 'status'];
+const ACCOUNT_DTO_KEYS = [
+  'available',
+  'balance',
+  'currency',
+  'held',
+  'id',
+  'kind',
+  'status',
+  // Confirmation-of-payee follow-up: the human account number is a deliberate, whitelisted field.
+  'accountNumber',
+];
 const ENTRY_DTO_KEYS = ['balanceAfter', 'createdAt', 'currency', 'delta', 'id', 'transactionId'];
 
 // Fields that live on the Account entity but MUST NOT reach a customer-facing DTO.
@@ -41,6 +51,7 @@ function fullAccount(overrides: Record<string, unknown> = {}): any {
     ownerId: 'sub-SECRET-owner-do-not-leak',
     kind: 'customer',
     systemKey: null,
+    accountNumber: '1234567890',
     currency: 'MXN',
     status: 'active',
     balance: '5000',
@@ -75,8 +86,16 @@ describe('serializeAccount — entity -> AccountDto whitelist (pure, no DB)', ()
     expect(dto.kind).toBe('customer');
     expect(dto.balance).toBe('5000');
     expect(dto.held).toBe('2000');
+    expect(dto.accountNumber).toBe('1234567890'); // the human number is passed through verbatim
     expect(typeof dto.balance).toBe('string');
     expect(typeof dto.available).toBe('string');
+  });
+
+  it('passes a null accountNumber through unchanged (system/unassigned accounts)', () => {
+    const dto = serializeAccount(fullAccount({ accountNumber: null }));
+    expect(dto.accountNumber).toBeNull();
+    // The whitelist is exact even when the number is null — the key is present, not dropped.
+    expect(Object.keys(dto).sort()).toEqual([...ACCOUNT_DTO_KEYS].sort());
   });
 
   it('derives available = balance − held with BigInt math (no float loss near 2^63)', () => {

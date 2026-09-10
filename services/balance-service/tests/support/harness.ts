@@ -541,6 +541,16 @@ export interface ResolvedDomainErrors {
   InvalidOtpError?: any;
   OtpLockedOutError?: any;
   OtpAlreadyActiveError?: any;
+  /** Confirmation-of-payee follow-up: initiate was called without a valid confirmation token
+   *  bound to the caller AND to THIS destination (code `DESTINATION_NOT_CONFIRMED` → 409). */
+  DestinationNotConfirmedError?: any;
+  /** Pending-lifecycle follow-up: a PENDING transfer whose 2-minute `expires_at` lapsed —
+   *  confirm/read lazily transitions it to EXPIRED and confirm rejects WITHOUT consuming the OTP
+   *  (code `TRANSFER_EXPIRED` → 410). Distinct class from `TransferNotPendingError`. */
+  TransferExpiredError?: any;
+  /** Pending-lifecycle follow-up: a same-initiator concurrent initiate collided on the
+   *  single-pending unique index (code `PENDING_TRANSFER_CONFLICT` → 409). */
+  PendingTransferConflictError?: any;
 }
 
 /**
@@ -639,6 +649,20 @@ export function getDomainErrors(): ResolvedDomainErrors {
       'OtpAlreadyActiveError',
       'OtpActiveError',
       'OtpAlreadyActive',
+    ]),
+    // Confirmation-of-payee follow-up: the resolve→confirm→initiate gate error.
+    DestinationNotConfirmedError: findExportAcross(candidates, [
+      'DestinationNotConfirmedError',
+      'DestinationNotConfirmed',
+      'PayeeNotConfirmedError',
+    ]),
+    // Pending-lifecycle follow-up: the two new transfers/service errors. Distinct classes (like
+    // the TransferNotPendingError / TransactionNotPendingError split), resolved under their own
+    // keys so an `instanceof` proof targets the right one.
+    TransferExpiredError: findExportAcross(candidates, ['TransferExpiredError', 'TransferExpired']),
+    PendingTransferConflictError: findExportAcross(candidates, [
+      'PendingTransferConflictError',
+      'PendingTransferConflict',
     ]),
   };
 }
@@ -771,6 +795,27 @@ export function getTransfersServiceToken(): symbol {
   return resolveServiceToken('TRANSFERS_SERVICE', 'transfers');
 }
 
+/** `TRANSACTION_REPOSITORY` — the DI token the persistence layer binds the transaction repo to.
+ *  Reuses the multi-path repo-token resolver so the pending-lifecycle suites can drive the new
+ *  guarded transitions (`insertPendingInTx`, `expireIfOverdue`, `transitionToCancelled`, …). */
+export function getTransactionRepositoryToken(): symbol {
+  return getRepositoryToken('TRANSACTION_REPOSITORY', 'transaction');
+}
+
+/**
+ * The `TransactionStatus` enum (native-Postgres-enum mirror) — including the new terminal
+ * `EXPIRED` / `CANCELLED` labels — so a suite can assert the lifecycle status of a transfer row
+ * without hard-coding the string values. Resolved from the entities barrel; the single
+ * coordination point if the implementor moves it.
+ */
+export function getTransactionStatus(): Record<string, string> {
+  return resolveOrThrow(
+    'the TransactionStatus enum',
+    [`${SRC}/database/entities/enums`],
+    ['TransactionStatus'],
+  );
+}
+
 /**
  * The `TransfersService` CLASS, for the pure unit spec (driven through a Nest TestingModule so the
  * injection is order-independent — see tests/unit/transfers.service.spec.ts). Scanned with
@@ -895,5 +940,61 @@ export function getDomainErrorBase(): any {
     'the DomainError base class',
     [`${SRC}/common/errors/domain-error`, `${SRC}/common/errors/domain.error`],
     ['DomainError'],
+  );
+}
+
+// ---- Confirmation-of-payee follow-up (spec 04, step 4b follow-up) -------------------------
+// A `customer` representation, human 10-digit account numbers, and the resolve→confirm→initiate
+// gate. Resolved through the same single-seam convention: repo tokens BY name, pure helpers
+// BEST-EFFORT (undefined when absent, so a spec can honest-SKIP or fall back rather than crash
+// the whole file at import time).
+
+/** `CUSTOMER_REPOSITORY` — the DI token the persistence layer binds the customer repo to.
+ *  Reuses the multi-path repo-token resolver (probes `interfaces/<base>.repository.interface`). */
+export function getCustomerRepositoryToken(): symbol {
+  return getRepositoryToken('CUSTOMER_REPOSITORY', 'customer');
+}
+
+/**
+ * BEST-EFFORT resolution of the PURE `maskName(name)` privacy helper (the payee-name mask:
+ * each whitespace-split token → first 3 chars + exactly two asterisks). Returns `undefined`
+ * when no such export exists — the pure mask-name unit suite is skipped with a clear message
+ * when this is unresolved (prefer it resolves). Add the path/export here if the implementor
+ * names/locates it differently — the single coordination point.
+ */
+export function getMaskName(): ((name: string) => string) | undefined {
+  return findExportAcross(
+    [
+      `${SRC}/modules/transfers/service/mask-name`,
+      `${SRC}/modules/transfers/service/impl/mask-name`,
+      `${SRC}/modules/transfers/service/mask`,
+      `${SRC}/modules/transfers/service/impl/mask`,
+      `${SRC}/modules/transfers/mask-name`,
+      `${SRC}/common/text/mask-name`,
+      `${SRC}/common/pii/mask-name`,
+      `${SRC}/common/mask-name`,
+    ],
+    ['maskName', 'maskHolderName', 'maskDisplayName', 'maskPayeeName'],
+  );
+}
+
+/**
+ * BEST-EFFORT resolution of the PURE `generateAccountNumber()` helper (a 10-digit numeric
+ * string). Returns `undefined` when absent; a test that mints numbers falls back to a local
+ * 10-digit generator when this is unresolved. Add the path/export here if the implementor
+ * names/locates it differently — the single coordination point.
+ */
+export function getGenerateAccountNumber(): (() => string) | undefined {
+  return findExportAcross(
+    [
+      `${SRC}/modules/accounts/service/account-number`,
+      `${SRC}/modules/accounts/service/impl/account-number`,
+      `${SRC}/modules/accounts/service/generate-account-number`,
+      `${SRC}/modules/accounts/service/impl/generate-account-number`,
+      `${SRC}/modules/accounts/account-number`,
+      `${SRC}/common/accounts/account-number`,
+      `${SRC}/common/account-number`,
+    ],
+    ['generateAccountNumber', 'newAccountNumber', 'makeAccountNumber'],
   );
 }

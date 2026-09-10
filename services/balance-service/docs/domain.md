@@ -23,6 +23,10 @@ per step:
   the `/api` transfers + OTP endpoints, the initiate=PENDING / confirm=post lifecycle, the
   QueryRunner-aware `postPendingInTx` posting seam, the DomainError→HTTP mapping, and the zod
   request validation.
+- **Step 4c — confirmation of payee + customer representation**
+  ([below](#confirmation-of-payee--customer-representation-step-4c)): the `customer` table, the
+  human `account_number`, and the resolve→token→initiate gate that makes internal transfers
+  human-usable (addressed by account number, with a masked payee name shown before initiate).
 
 Holds, external transfers, limits, and the outbox relay still arrive in later steps.
 
@@ -684,9 +688,12 @@ generic-message path.
 | `INVALID_POSTING_COMMAND`, `INVALID_TRANSFER` | 400 |
 | `ACCOUNT_NOT_FOUND`, `TRANSFER_NOT_FOUND` | 404 |
 | `CURRENCY_MISMATCH`, `INSUFFICIENT_FUNDS` | 422 |
-| `ACCOUNT_FROZEN`, `TRANSFER_NOT_PENDING`, `SUSPECTED_DUPLICATE`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `OTP_ALREADY_ACTIVE` | 409 |
+| `ACCOUNT_FROZEN`, `TRANSFER_NOT_PENDING`, `PENDING_TRANSFER_CONFLICT`, `SUSPECTED_DUPLICATE`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `OTP_ALREADY_ACTIVE`, `DESTINATION_NOT_CONFIRMED` | 409 |
+| `TRANSFER_EXPIRED` | 410 |
 | `INVALID_OTP` | 401 |
 | `OTP_LOCKED_OUT` | 429 |
+
+(`TRANSFER_EXPIRED` / `PENDING_TRANSFER_CONFLICT` added by the pending-lifecycle step below.)
 
 ### zod request validation
 
@@ -720,6 +727,219 @@ Added to `ITransactionRepository` (interface/impl split, following the tx-aware 
   by `ApiModule` for `OtpApiController`). `AppModule` therefore **no longer** imports
   `PostingModule` / `IdempotencyModule` / `OtpModule` transitionally; it keeps the `@Global`
   `RedisModule` and the rest.
+
+## Confirmation of payee + customer representation (step 4c)
+
+Makes internal transfers **human-usable**: a customer addresses a transfer by the payee's
+**human account number**, and sees a **masked payee name** to sanity-check *who* they are
+paying **before** committing. The money/OTP machinery of step 4b is unchanged — this swaps how
+the destination is *addressed* and adds a confirmation gate in front of initiate.
+
+> **Data-model update.** This **supersedes** the earlier note that a customer's `sub → name`
+> mapping was Keycloak/UI-only. The balance DB now owns the customer profile (name/phone/email)
+> in its own `customer` table; **Keycloak keeps only authentication**. `account.owner_id` is the
+> Keycloak `sub` and is now an **FK to `customer.id`**.
+
+### Customer representation + account number (persistence)
+
+- **`customer` table** (`src/database/entities/customer.entity.ts`, migration
+  `1789084800000-CreateCustomerAndAccountNumber`): `id varchar PRIMARY KEY` (the Keycloak `sub`
+  — `varchar` to match `account.owner_id`'s existing type, so **no** `owner_id` type change and
+  **no** risky ALTER), `name` / `phone` / `email` (all `NOT NULL`, with `phone` / `email` **UNIQUE**
+  via `uq_customer_phone` / `uq_customer_email` — `email` **case-insensitively**, as a functional
+  index on `LOWER(email)`, so a future email lookup must query on `LOWER(email)`), `created_at` / `updated_at`.
+  Nothing else. Bound behind `CUSTOMER_REPOSITORY` (`findById` / `create`) in `PersistenceModule`.
+- **`account.account_number`** (`varchar NULL`): the human destination identifier — a unique
+  **10-digit numeric** string on **customer accounts only** (system/clearing accounts keep NULL).
+  A **plain** `UNIQUE` index (`uq_account_account_number`) enforces uniqueness; Postgres allows
+  multiple NULLs, so the system accounts never collide. `IAccountRepository.findByAccountNumber`
+  resolves a number to an account.
+- **`fk_account_owner`** (`account.owner_id → customer.id`): nullable, so it is **not** checked
+  for system accounts (NULL owner). No customer accounts exist in the migration chain, so adding
+  the constraint cannot fail on existing data.
+- **`generateAccountNumber()`** (`src/modules/accounts/service/impl/account-number.ts`): a **pure**
+  helper minting a 10-digit zero-padded number from `crypto.randomInt`. There is **no
+  create-account endpoint** this step, so nothing generates at runtime yet — the seed (spec 08)
+  and tests use it to assign numbers; the DB unique index enforces uniqueness (callers retry on
+  a unique violation).
+
+`AccountDto` / `serializeAccount` now expose the owner's own `accountNumber` (owner-scoped reads
+already ensure a caller only sees their own accounts' numbers).
+
+### The resolve → token → initiate gate
+
+The flow that fronts initiate. **Resolving is a pure query** (no transaction); **initiating
+requires the token** it returns — a transfer can *only* be initiated once the caller resolved
+and confirmed **that** destination.
+
+| Route | Effect |
+|---|---|
+| `POST /api/transfers/resolve-destination` | Body `{ accountNumber }` (10-digit). Resolves to the payee's **masked name** + a **confirmation token** (single-purpose, caller + destination-bound, TTL-expiring — GET-validated, so an idempotent initiate retry within the window still succeeds). **200**, `ResolveDestinationDto { maskedName, currency, confirmationToken }`. No money moves. |
+| `POST /api/transfers` | Now addresses the payee by `destinationAccountNumber` and **requires** `confirmationToken`. Body `{ sourceAccountId (uuid), destinationAccountNumber (\d{10}), amount, currency, confirmationToken, confirmDuplicate? }` + `Idempotency-Key` header. |
+
+**`resolveDestination(params)` → `DestinationResolution { maskedName, currency, confirmationToken }`:**
+
+1. `accounts.findByAccountNumber(accountNumber)`; a missing account, a non-customer (system)
+   account, or a customer with a NULL owner all collapse to the **same** `TransferNotFoundError`
+   (**404**) — never reveal which case, nor that system accounts exist (anti-IDOR / anti-enum).
+2. `customers.findById(account.ownerId)` → the holder; `maskName(holder.name)`. A missing holder
+   (unreachable under the FK) also collapses to 404 rather than surfacing an empty name.
+3. Mint `confirmationToken = crypto.randomBytes(24).toString('hex')`; store in Redis at
+   **`xfer:confirm:<ownerId>:<token>`** = JSON `{ destinationAccountId, accountNumber }` with
+   `EX CONFIRM_TOKEN_TTL_SECONDS` (**300s**). The key embeds the **caller** `ownerId`, so another
+   user's token cannot be replayed.
+4. Return the masked name, the destination currency, and the token. **No transaction.**
+
+**`initiateTransfer` — the token gate.** After validating the amount/currency, owner-scoping the
+source (`findByIdAndOwner` → 404), and resolving the destination by number (non-customer → 404;
+`source.id === destination.id` → `InvalidTransferError`; currency mismatch → `CurrencyMismatchError`),
+it **`GET`s** (not `GETDEL` — an idempotent initiate retry within the TTL still works) the
+`xfer:confirm:<ownerId>:<token>` key: a **missing** token **or** a stored `destinationAccountId`
+that does **not** equal the resolved destination id → **`DestinationNotConfirmedError`** (code
+`DESTINATION_NOT_CONFIRMED` → **409**). Only then does the existing idempotency-wrapped PENDING
+insert run (unchanged), now keyed on the resolved destination id.
+
+### The masking rule
+
+`maskName(name)` (`src/modules/transfers/service/impl/mask-name.ts`, **pure**): split on whitespace
+(runs collapse), each token → its **first 3 characters + exactly two asterisks** (fixed, uniform,
+non-length-revealing), joined by single spaces. `"Juan Perez"` → `"Jua** Per**"`; empty/blank →
+`""`. It is applied **in the service** so the raw name (PII) never crosses the service boundary —
+neither the controller nor any DTO ever sees it.
+
+### Read DTOs — source account id + destination account number & masked name
+
+The transfer entity stores debit/credit account **UUIDs**. The **source** is the caller's OWN
+account, so it stays the account **id** (`sourceAccountId` = the transaction's `debitAccountId`,
+exactly as `AccountDto.id` is exposed to its owner — no lookup); only the **destination** (credit)
+UUID is resolved to its human account **number**. The service **enriches** read results into view
+models (mirroring `getAccountStatement`'s `{ account, entries }`), and the controller whitelists
+them — the raw credit UUID and the PII name never reach the wire:
+
+- **`TransferView { transaction, sourceAccountId, destinationAccountNumber }`** →
+  `TransferDto { id, type, status, amount, currency, sourceAccountId, destinationAccountNumber,
+  createdAt, postedAt }` (the credit UUID is **dropped**; `sourceAccountId` comes straight from
+  `debitAccountId`, no lookup). Returned by both `initiateTransfer` and `confirmTransfer` (the
+  posted transfer serializes the same way).
+- **`PendingAuthorizationView { …, destinationMaskedName }`** → `PendingAuthorizationDto
+  { transferId, type, amount, currency, sourceAccountId, destinationAccountNumber,
+  destinationMaskedName, createdAt }` — `destinationMaskedName` is `maskName` of the destination
+  account's holder, so the OTP app shows who the payment is to. Only the **destination** needs a
+  per-row account/customer lookup (prototype); the source is the raw id.
+
+> **Superseded by the pending-lifecycle step below.** `TransferView` is **removed** — the write
+> methods now return the `Transaction` entity directly (`serializeTransfer(transaction)`), and
+> `TransferDto` drops `destinationAccountNumber` and adds `expiresAt`. `PendingAuthorizationView`
+> is renamed to the domain projection **`PendingAuthorization`** and `PendingAuthorizationDto` adds
+> `expiresAt`; the pending feed is now the SINGLE-object `GET /api/pending-authorization`. See
+> [Pending authorization: single + time-boxed](#pending-authorization-single--time-boxed-review-fix-step).
+
+### What did NOT change
+
+The OTP / confirm / posting money machinery is behaviorally intact: initiate still creates a
+PENDING header under the `Idempotency-Key`; confirm still consumes the OTP (`GETDEL`) then posts
+via the guarded PENDING→POSTED transition under the account lock. This step only changed how the
+destination is **addressed** (account number, not raw UUID) and added the **confirmation-token
+gate** in front of initiate. No create-account / create-customer endpoint is added — the seed
+(spec 08) and tests populate `customer` rows and account numbers.
+
+## Pending authorization: single + time-boxed (review-fix step)
+
+A pending transfer is now **single per user** and **time-boxed to 2 minutes**, with an **explicit
+cancel** and **lazy expiry**. This also lands a layering fix (services return entities; only the
+pending read returns a domain projection). Two design decisions are LOCKED: the TTL is enforced by
+a nullable `expires_at` column + **lazy** expiry against the **DB clock** (`now()`, **no
+scheduler**); and initiating while an active pending exists **auto-supersedes** the old one
+(→ CANCELLED, retained).
+
+### Schema (Step-4 migration `AddTransactionLifecycle1789171200000`)
+
+- `transaction_status` gains **`EXPIRED`** and **`CANCELLED`** (terminal, **retained** for
+  compliance — never deleted). See [persistence.md](./persistence.md#tables--migrations) for the
+  ADD-VALUE-in-a-transaction PG note.
+- `transaction.expires_at timestamptz NULL` — the 2-minute deadline, stamped from the DB clock at
+  initiate (`now() + interval '2 minutes'`), NULL on directly-posted movements.
+- `uq_one_pending_per_initiator` — a **partial** unique index `("initiated_by") WHERE status =
+  'PENDING'`: at most one live pending per user, enforced by the DB, and the concurrency backstop
+  against a double-initiate race.
+
+### Lifecycle rules
+
+- **Single pending (structural).** The partial unique index — not just a service check — caps a
+  user at one PENDING transfer. A truly-concurrent same-initiator initiate (two different
+  `Idempotency-Key`s at once) collides on it (SQLSTATE 23505); the service catches that (matched on
+  the constraint name) and throws **`PendingTransferConflictError`** (`PENDING_TRANSFER_CONFLICT` →
+  **409**). The idempotent same-key **replay never re-inserts**, so it never trips this.
+- **Auto-supersede at initiate.** Inside the idempotency-wrapped transaction, BEFORE inserting the
+  new pending: (1) `expireOverduePendingByInitiator` (overdue pending → EXPIRED, DB clock), then
+  (2) `supersedeActivePendingByInitiator` (any remaining active pending → CANCELLED,
+  `failure_reason = 'superseded'`, retained), then (3) `insertPendingInTx` (the new PENDING with a
+  DB-clock `expires_at`). So a fresh initiate always leaves exactly one live pending — the new one.
+- **Lazy expiry (no scheduler).** An overdue PENDING transfer transitions to EXPIRED on the next
+  **access** — confirm, the pending read, or the next initiate — judged by `now() >= expires_at`
+  via a guarded single-statement UPDATE (`expireIfOverdue` for a specific id;
+  `expireOverduePendingByInitiator` for the initiate sweep). The DB clock is the single source of
+  truth.
+- **Confirm checks expiry BEFORE consuming the OTP (money-safety).** `confirmTransfer` loads +
+  owner-scopes the transfer, returns an already-POSTED one idempotently, rejects a terminal
+  EXPIRED/CANCELLED (and any non-PENDING) with `TransferNotPendingError` (409), then calls
+  `expireIfOverdue(id)`: if it flips the row, it WAS overdue → throw **`TransferExpiredError`**
+  (`TRANSFER_EXPIRED` → **410**) WITHOUT consuming the code, so an expired transfer never burns the
+  caller's one-time code. Only a validly-PENDING (not overdue) transfer proceeds to consume the OTP
+  and post. A concurrent transition is caught by a re-read before the OTP is consumed; the ultimate
+  money-once gate remains the OTP single-use + the guarded PENDING→POSTED transition.
+- **Explicit cancel.** `cancelTransfer({ ownerId, transferId })` loads + owner-scopes on the DEBIT
+  account exactly like confirm (404 on missing/non-owned). POSTED → `TransferNotPendingError`
+  (cannot cancel posted money, 409); already CANCELLED / EXPIRED → returned as-is (idempotent);
+  PENDING → guarded `transitionToCancelled` (`failure_reason = 'cancelled_by_user'`), then reload +
+  return the (now CANCELLED, or concurrently-terminal) entity. Terminal rows are retained.
+
+### Endpoints (changed)
+
+| Route | Effect |
+|---|---|
+| `POST /api/transfers/:id/cancel` | Cancel the caller's pending transfer (guarded `PENDING → CANCELLED`, retained). `:id` via `ParseUUIDPipe`. **200**, `TransferDto`. |
+| `GET /api/pending-authorization` | The caller's **SINGLE** active pending transfer, or none. Reading lazily expires an overdue pending. **200**, `{ authorization: PendingAuthorizationDto \| null }` (a single object or null — **not** an array; supersedes the earlier plural `GET /api/pending-authorizations` → `{ authorizations: [] }`). |
+
+`TransferDto` now **drops** `destinationAccountNumber` (the client supplied it at initiate / holds
+the id) and **adds** `expiresAt` (ISO-8601 or null). `PendingAuthorizationDto` **adds** `expiresAt`.
+Both still whitelist explicitly and never leak `initiatedBy` / `failureReason` / `failedAt` /
+`payeeId` / `reversesTransactionId` / the raw credit UUID.
+
+### Layering fix (review comment)
+
+The service now returns **domain objects / entities**, and the controller serializes:
+
+- `initiateTransfer` / `confirmTransfer` / `cancelTransfer` return the plain **`Transaction`**
+  entity — `serializeTransfer(transaction)` whitelists it. The old `TransferView` and the
+  write-path enrichment helpers (`toTransferView`, `accountNumberOf`) are **removed** (their
+  surface was too narrow and only fed the write path; the client already holds the destination).
+- The pending READ is the one exception: `getPendingAuthorization(ownerId)` returns a **domain
+  projection** `PendingAuthorization { transaction, destinationAccountNumber, destinationMaskedName }`
+  (renamed from `PendingAuthorizationView`). **Masking stays in the service** — resolving the
+  destination holder and masking the raw name (PII) is a service-owned security rule, so the read
+  returns a projection rather than the raw entity. The source account id is left on the
+  `transaction` (`debitAccountId`) for the controller to whitelist at serialize time.
+
+### New / changed repository methods
+
+Added to / changed on `ITransactionRepository` (all guarded, DB-clock, following the `…InTx` seam):
+
+| Method | Effect |
+|---|---|
+| `insertPendingInTx(qr, data)` | Insert a PENDING transfer with `expires_at = now() + interval '2 minutes'` (DB clock, parameterized INSERT), re-read within the tx. `insertInTx` stays as-is for the posting path. |
+| `findPendingByInitiator(id)` | Now returns a **single** `Transaction \| null` (was a list) — the index guarantees ≤1; `take 1` is defensive. |
+| `expireOverduePendingByInitiator(qr, id)` | `PENDING & overdue → EXPIRED` for all of an initiator's rows (initiate sweep). |
+| `supersedeActivePendingByInitiator(qr, id)` | remaining `PENDING → CANCELLED` (`'superseded'`) for an initiator (initiate). |
+| `expireIfOverdue(id)` | Guarded single-statement `PENDING & overdue → EXPIRED`; returns `affected > 0`. Used by confirm / read. |
+| `transitionToCancelled(id)` | Guarded single-statement `PENDING → CANCELLED` (`'cancelled_by_user'`); returns `affected > 0`. Used by the cancel endpoint. |
+
+### Forward implication
+
+The single-pending rule spans **all** user-initiated transfer types. When step 5 adds **external
+outbound**, its initiate shares the SAME `uq_one_pending_per_initiator` index and the same
+expire → supersede → insert sequence (plus its hold), so a user still holds at most one pending
+authorization across internal and external-outbound alike.
 
 ## Not in this slice (later steps)
 

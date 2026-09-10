@@ -13,8 +13,8 @@ import { ApiController } from './api.controller';
  * surface convention (see CLAUDE.md § Controller surfaces):
  * - `ApiController` — the foundation `whoami` guard probe.
  * - `AccountsApiController` — the accounts reads, injecting `ACCOUNTS_SERVICE` ({@link AccountsModule}).
- * - `TransfersApiController` — initiate/confirm/pending-authorizations, injecting
- *   `TRANSFERS_SERVICE` ({@link TransfersModule}).
+ * - `TransfersApiController` — resolve/initiate/confirm/cancel + the single pending-authorization
+ *   read, injecting `TRANSFERS_SERVICE` ({@link TransfersModule}).
  * - `OtpApiController` — mint the caller's one-time code, injecting `OTP_SERVICE`
  *   ({@link OtpModule}). `TransfersModule` also imports `OtpModule`; module singletons make the
  *   shared import safe.

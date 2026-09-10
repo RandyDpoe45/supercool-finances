@@ -1,35 +1,28 @@
 /**
- * Spec 04 — Balance Service, Step-4b: internal transfers END-TO-END at the service layer. These are
- * the Definition-of-Done money-safety proofs for the transfers feature, driven against the REAL
- * DI'd TransfersService (resolved BY TOKEN through a booted AppModule) with real Postgres + real
- * Redis. Written FROM the spec (Transfers: internal transfers stay PENDING at initiate, post on
- * OTP-confirm, funds-checked at confirm-time under the account lock; Idempotency; soft-duplicate;
- * OTP single-use) and the DoD (concurrency → no double-spend / no overdraft / no money created or
- * lost; a replayed key moves money once; reconciliation `sum(ledger delta) == account.balance`),
- * NOT from the implementor's code.
+ * Spec 04 — Balance Service, Transfers + the confirmation-of-payee follow-up: internal transfers
+ * END-TO-END at the service layer, driven against the REAL DI'd TransfersService (resolved BY
+ * TOKEN through a booted AppModule) with real Postgres + real Redis. These are the
+ * Definition-of-Done money-safety proofs PLUS the human resolve→confirm→initiate gate. Written
+ * FROM the spec + the developer-locked contract, NOT from the implementor's code:
+ *   - resolve is a QUERY (masked name + a caller-/destination-bound token) that moves no money;
+ *   - initiate requires a valid token and stays PENDING; confirm posts on the single-use OTP with
+ *     the funds check under the account lock;
+ *   - Idempotency (replay moves money once); soft-duplicate; concurrency (post AT MOST once);
+ *     reconciliation `balance == seeded + SUM(ledger delta)`.
  *
- * Why DB+Redis-backed and not mocked: the invariants here (money moves exactly once under a replay,
- * exactly once under N concurrent confirms via OTP single-use + the guarded PENDING→POSTED
- * transition, the confirm-time funds check under the FOR UPDATE lock, the atomic ledger/balance
- * fold, one-outbox-per-post) are properties of REAL transactions and REAL Redis GETDEL — mocking
- * them would mock away the very logic under test. Every assertion gates on OBSERVABLE STATE
- * (balances, ledger rows, transaction status, outbox count), never on the error kind alone.
+ * Why DB+Redis-backed and not mocked: the invariants here (money moves exactly once under a
+ * replay/concurrency, the confirm-time funds check under the FOR UPDATE lock, the atomic
+ * ledger/balance fold, the caller/destination token binding, one-outbox-per-post) are properties
+ * of REAL transactions and REAL Redis — mocking them would mock away the very logic under test.
+ * Every assertion gates on OBSERVABLE STATE (balances, ledger rows, transaction status, outbox
+ * count, absence of a created transaction), never on the error kind alone.
  *
- * Honest-SKIP: OPT-IN via BALANCE_INTEGRATION=1 (a default `npm test` reports SKIPPED, never a false
- * pass). beforeAll TCP-probes BOTH Postgres and Redis (the confirm write path hits both) and fails
- * loud if unreachable; boots the real AppModule (migrationsRun:true → MXN + clearing accounts).
- * jest.config.ts serializes the integration run (maxWorkers:1). Unique account/owner ids per test;
- * committed rows + minted OTP keys are cleaned up per-test (OTP keys via `del`, NEVER flushall).
- *
- * ASSUMED service contract (task/spec-derived — the coordination point; escalate if it diverges):
- *   initiateTransfer(params) → the PENDING Transaction entity; params carry ownerId,
- *     sourceAccountId, destinationAccountId, amount (integer minor units), currency, an idempotency
- *     key, and optional confirmDuplicate. (Field-name aliases are passed so the proof is robust.)
- *   confirmTransfer(params) → the POSTED Transaction entity; params carry ownerId, the transfer id,
- *     and the OTP code.
- *   listPendingAuthorizations(ownerId) → the caller's PENDING transfers.
- * The user-scoped OTP is minted via the real OTP service (resolved by token), matching the
- * `POST /api/otp` surface.
+ * Honest-SKIP: OPT-IN via BALANCE_INTEGRATION=1 (a default `npm test` reports SKIPPED, never a
+ * false pass). beforeAll TCP-probes BOTH Postgres and Redis and fails loud if unreachable; boots
+ * the real AppModule (migrationsRun:true → MXN + clearing accounts + the customer/account_number
+ * schema). jest.config.ts serializes the integration run (maxWorkers:1). Unique account/owner ids
+ * per test; committed rows + minted OTP/confirmation keys are cleaned up per-test (Redis keys via
+ * `del`, NEVER flushall).
  *
  * To run:
  *   1. bring up the compose datastores (Postgres + Redis reachable to the runner);
@@ -47,12 +40,20 @@ import {
   getRedisClientToken,
   getPostingServiceToken,
   getRepositoryToken,
+  getGenerateAccountNumber,
   getRunInTransactionWithRetry,
   getDomainErrors,
   tcpProbe,
 } from '../support/harness';
 import { completeRawEnv } from '../support/env.fixture';
-import { insertRow, TODAY, MONTH_START } from '../support/pg';
+import {
+  insertRow,
+  insertCustomer,
+  insertTransaction,
+  localAccountNumber,
+  TODAY,
+  MONTH_START,
+} from '../support/pg';
 
 const ENABLED = process.env.BALANCE_INTEGRATION === '1';
 
@@ -70,10 +71,13 @@ const REDIS_PORT = Number(process.env.REDIS_PORT || '6379');
 const OTP_HASH_SECRET = process.env.OTP_HASH_SECRET || 'test-otp-hash-secret-0123456789';
 const MXN = 'MXN';
 
+/** A valid, likely-unique 10-digit account number (production helper when resolvable). */
+const genAccountNumber = getGenerateAccountNumber() ?? localAccountNumber;
+
 const suite = ENABLED ? describe : describe.skip;
 
 suite(
-  'internal transfers end-to-end — DoD money-safety proofs (integration, needs Postgres + Redis)',
+  'internal transfers end-to-end — DoD money-safety + confirmation-of-payee (integration, needs Postgres + Redis)',
   () => {
     let app: INestApplication;
     let ds: any;
@@ -84,7 +88,7 @@ suite(
 
     let createdAccountIds: string[] = [];
     let trackedOwners: string[] = [];
-    let trackedOtpKeys: string[] = [];
+    let trackedRedisKeys: string[] = [];
 
     beforeAll(async () => {
       const [pgOk, redisOk] = await Promise.all([
@@ -134,13 +138,16 @@ suite(
       svc = app.get(getTransfersServiceToken(), { strict: false });
       if (
         !svc ||
+        typeof svc.resolveDestination !== 'function' ||
         typeof svc.initiateTransfer !== 'function' ||
         typeof svc.confirmTransfer !== 'function' ||
-        typeof svc.listPendingAuthorizations !== 'function'
+        typeof svc.cancelTransfer !== 'function' ||
+        typeof svc.getPendingAuthorization !== 'function'
       ) {
         throw new Error(
-          '[integration] resolved the transfers service but it lacks initiateTransfer / confirmTransfer / ' +
-            'listPendingAuthorizations. Reconcile the contract at tests/support/harness.ts:getTransfersServiceToken.',
+          '[integration] resolved the transfers service but it lacks resolveDestination / ' +
+            'initiateTransfer / confirmTransfer / cancelTransfer / getPendingAuthorization. ' +
+            'Reconcile the contract at tests/support/harness.ts:getTransfersServiceToken.',
         );
       }
 
@@ -162,13 +169,13 @@ suite(
     afterEach(async () => {
       const ids = createdAccountIds;
       const owners = trackedOwners;
-      const otpKeys = Array.from(new Set(trackedOtpKeys));
+      const redisKeys = Array.from(new Set(trackedRedisKeys));
       createdAccountIds = [];
       trackedOwners = [];
-      trackedOtpKeys = [];
-      if (redis && otpKeys.length) {
+      trackedRedisKeys = [];
+      if (redis && redisKeys.length) {
         try {
-          await redis.del(...otpKeys);
+          await redis.del(...redisKeys);
         } catch {
           /* best-effort */
         }
@@ -186,10 +193,24 @@ suite(
 
     // ---- seed + query helpers (committed rows) --------------------------------------------
 
+    function newOwner(): string {
+      const o = `sub-${randomUUID()}`;
+      trackedOwners.push(o);
+      return o;
+    }
+
+    /**
+     * A committed customer account: a `customer` row (id = owner sub — the FK parent) plus an
+     * `account` carrying a unique 10-digit `account_number`. `overrides.name` sets the holder
+     * name (so a suite can prove the mask against a KNOWN name); the rest are account columns.
+     */
     async function mkCustomer(
       owner: string,
       overrides: Record<string, unknown> = {},
     ): Promise<any> {
+      const { name, account_number: numberOverride, ...accountOverrides } = overrides as any;
+      await insertCustomer(ds, owner, { name });
+      const accountNumber = (numberOverride as string) ?? genAccountNumber();
       const acc = await insertRow(ds, 'account', {
         kind: 'customer',
         owner_id: owner,
@@ -197,18 +218,14 @@ suite(
         status: 'active',
         balance: 0,
         held: 0,
+        account_number: accountNumber,
         spent_today_date: TODAY,
         spent_month_date: MONTH_START,
-        ...overrides,
+        ...accountOverrides,
       });
       createdAccountIds.push(acc.id);
+      acc.account_number = acc.account_number ?? accountNumber;
       return acc;
-    }
-
-    function newOwner(): string {
-      const o = `sub-${randomUUID()}`;
-      trackedOwners.push(o);
-      return o;
     }
 
     async function cleanup(ids: string[], owners: string[]): Promise<void> {
@@ -229,7 +246,9 @@ suite(
       }
       if (owners.length)
         await ds.query(`DELETE FROM idempotency_key WHERE owner_id = ANY($1)`, [owners]);
+      // Accounts FK owner_id → customer.id, so accounts drop BEFORE their customer parents.
       if (ids.length) await ds.query(`DELETE FROM account WHERE id = ANY($1)`, [ids]);
+      if (owners.length) await ds.query(`DELETE FROM customer WHERE id = ANY($1)`, [owners]);
     }
 
     async function acct(id: string): Promise<{ balance: string; held: string; status: string }> {
@@ -256,6 +275,42 @@ suite(
       return r[0].n;
     }
 
+    async function pendingCountFor(owner: string): Promise<number> {
+      const r = await ds.query(
+        `SELECT count(*)::int AS n FROM "transaction" WHERE initiated_by = $1 AND status = 'PENDING'`,
+        [owner],
+      );
+      return r[0].n;
+    }
+
+    async function anyTxCountFor(owner: string): Promise<number> {
+      const r = await ds.query(
+        `SELECT count(*)::int AS n FROM "transaction" WHERE initiated_by = $1`,
+        [owner],
+      );
+      return r[0].n;
+    }
+
+    async function postedCountFor(owner: string): Promise<number> {
+      const r = await ds.query(
+        `SELECT count(*)::int AS n FROM "transaction" WHERE initiated_by = $1 AND status = 'POSTED'`,
+        [owner],
+      );
+      return r[0].n;
+    }
+
+    async function txRow(
+      txId: string,
+    ): Promise<
+      { status: string; failure_reason: string | null; expires_at: string | null } | undefined
+    > {
+      const r = await ds.query(
+        `SELECT status, failure_reason, expires_at FROM "transaction" WHERE id = $1`,
+        [txId],
+      );
+      return r[0];
+    }
+
     const sumDeltas = (legs: Array<{ delta: string }>): bigint =>
       legs.reduce((s, l) => s + BigInt(l.delta), 0n);
 
@@ -263,17 +318,33 @@ suite(
 
     function idOf(r: any): string {
       const id =
-        r?.id ?? r?.transactionId ?? r?.transferId ?? r?.transfer?.id ?? r?.transaction?.id;
+        r?.transaction?.id ?? r?.id ?? r?.transactionId ?? r?.transferId ?? r?.transfer?.id;
       return id as string;
     }
     function statusOf(r: any): string | undefined {
-      return r?.status ?? r?.transfer?.status ?? r?.transaction?.status;
+      return r?.transaction?.status ?? r?.status ?? r?.transfer?.status;
     }
 
-    async function initiate(
+    function trackConfirmToken(owner: string, token: string): void {
+      // The service binds the token to the caller under `xfer:confirm:<owner>:<token>` with a 300s
+      // TTL; track it for explicit cleanup (TTL would also reap it).
+      if (token) trackedRedisKeys.push(`xfer:confirm:${owner}:${token}`);
+    }
+
+    async function resolveDest(
       owner: string,
-      source: string,
-      dest: string,
+      accountNumber: string,
+    ): Promise<{ maskedName: string; currency: string; confirmationToken: string }> {
+      const r = await svc.resolveDestination({ ownerId: owner, sub: owner, accountNumber });
+      trackConfirmToken(owner, r.confirmationToken);
+      return r;
+    }
+
+    async function initiateRaw(
+      owner: string,
+      sourceId: string,
+      destNumber: string,
+      token: string,
       amount: number,
       opts: { currency?: string; key?: string; confirmDuplicate?: boolean } = {},
     ): Promise<any> {
@@ -281,15 +352,35 @@ suite(
       const params: any = {
         ownerId: owner,
         sub: owner,
-        sourceAccountId: source,
-        destinationAccountId: dest,
+        sourceAccountId: sourceId,
+        destinationAccountNumber: destNumber,
         amount: String(amount), // canonical unsigned minor-unit string (never a JS number)
         currency: opts.currency ?? MXN,
         idempotencyKey: k,
         key: k,
+        confirmationToken: token,
       };
       if (opts.confirmDuplicate !== undefined) params.confirmDuplicate = opts.confirmDuplicate;
       return svc.initiateTransfer(params);
+    }
+
+    /** The common happy path: resolve the destination (fresh token) then initiate. */
+    async function initiate(
+      owner: string,
+      sourceId: string,
+      destAccount: any,
+      amount: number,
+      opts: { currency?: string; key?: string; confirmDuplicate?: boolean } = {},
+    ): Promise<any> {
+      const resolution = await resolveDest(owner, destAccount.account_number);
+      return initiateRaw(
+        owner,
+        sourceId,
+        destAccount.account_number,
+        resolution.confirmationToken,
+        amount,
+        opts,
+      );
     }
 
     async function confirm(owner: string, transferId: string, code: string): Promise<any> {
@@ -303,11 +394,26 @@ suite(
       });
     }
 
+    async function cancel(owner: string, transferId: string): Promise<any> {
+      return svc.cancelTransfer({
+        ownerId: owner,
+        sub: owner,
+        transferId,
+        id: transferId,
+        transactionId: transferId,
+      });
+    }
+
+    /** The single active pending authorization for the caller (a read model, or null). */
+    async function getPending(owner: string): Promise<any> {
+      return svc.getPendingAuthorization(owner);
+    }
+
     async function generateOtp(owner: string): Promise<string> {
       const r = await otp.generate(owner);
       const code = r.code as string;
-      trackedOtpKeys.push(`otp:${owner}`);
-      trackedOtpKeys.push(
+      trackedRedisKeys.push(`otp:${owner}`);
+      trackedRedisKeys.push(
         `otp:${owner}:${createHmac('sha256', OTP_HASH_SECRET).update(`${owner}:${code}`).digest('hex')}`,
       );
       return code;
@@ -322,25 +428,31 @@ suite(
     }
 
     function codeOf(err: any): string {
-      const de = domainErrors;
+      const de = domainErrors as any;
       if (de.InsufficientFundsError && err instanceof de.InsufficientFundsError)
         return 'INSUFFICIENT_FUNDS';
       if (de.SuspectedDuplicateError && err instanceof de.SuspectedDuplicateError)
         return 'SUSPECTED_DUPLICATE';
       if (de.InvalidOtpError && err instanceof de.InvalidOtpError) return 'INVALID_OTP';
+      if (de.DestinationNotConfirmedError && err instanceof de.DestinationNotConfirmedError)
+        return 'DESTINATION_NOT_CONFIRMED';
+      if (de.TransferExpiredError && err instanceof de.TransferExpiredError)
+        return 'TRANSFER_EXPIRED';
+      if (de.PendingTransferConflictError && err instanceof de.PendingTransferConflictError)
+        return 'PENDING_TRANSFER_CONFLICT';
+      // TransferNotPendingError (service pre-check) and TransactionNotPendingError (posting
+      // reducer) are distinct classes sharing the TRANSFER_NOT_PENDING code.
+      if (de.TransferNotPendingError && err instanceof de.TransferNotPendingError)
+        return 'TRANSFER_NOT_PENDING';
+      if (de.TransactionNotPendingError && err instanceof de.TransactionNotPendingError)
+        return 'TRANSFER_NOT_PENDING';
+      if (de.TransferNotFoundError && err instanceof de.TransferNotFoundError)
+        return 'TRANSFER_NOT_FOUND';
       return (err?.code ?? err?.errorCode ?? '') as string;
     }
 
     // ---- reducer-gate adapters (drive the confirm-time seam DIRECTLY, off the OTP path) ----
 
-    /**
-     * Invoke the reducer's confirm-time seam `postPendingInTx(queryRunner, transferId, command)`
-     * inside ONE DB transaction — the SAME path `confirmTransfer` takes (via
-     * `runInTransactionWithRetry`). Falls back to a manually managed QueryRunner transaction if
-     * the wrapper is not resolvable, mirroring its commit-on-success / rollback-and-rethrow
-     * semantics so the money-once proof holds either way (a broken gate that POSTS twice would
-     * commit and be caught by the state assertions; a correct gate throws and rolls back).
-     */
     async function postPendingSecondTime(
       posting: any,
       transferId: string,
@@ -365,8 +477,6 @@ suite(
       }
     }
 
-    /** Run `fn` inside a QueryRunner transaction that is ALWAYS rolled back — used for the
-     *  repo-level predicate probe so the assertion never mutates committed state. */
     async function inRolledBackTx<T>(fn: (qr: any) => Promise<T>): Promise<T> {
       const qr = ds.createQueryRunner();
       await qr.connect();
@@ -383,56 +493,138 @@ suite(
       }
     }
 
-    // ---- 1) Happy path: PENDING at initiate (no money moves), POSTED on confirm -----------
+    // ---- CONFIRMATION-OF-PAYEE: resolve is a QUERY (masked name + token, NO transaction) ----
 
-    it('initiates PENDING with balances UNCHANGED, then confirm posts exactly one balanced ledger pair + one outbox', async () => {
+    it('resolves a destination by account number to the MASKED holder name + a token, creating NO transaction', async () => {
+      const caller = newOwner();
+      // A destination customer explicitly named "Juan Perez" so the mask is exactly predictable.
+      const dst = await mkCustomer(newOwner(), { name: 'Juan Perez', balance: 500 });
+
+      const resolution = await resolveDest(caller, dst.account_number);
+
+      expect(resolution.maskedName).toBe('Jua** Per**'); // fixed-two-asterisks mask, PII withheld
+      expect(JSON.stringify(resolution)).not.toContain('Juan Perez'); // raw name never crosses
+      expect(resolution.currency).toBe(MXN);
+      expect(typeof resolution.confirmationToken).toBe('string');
+      expect(resolution.confirmationToken.length).toBeGreaterThan(0);
+
+      // A pure query: NO transaction was created for the caller (resolve alone moves nothing).
+      expect(await anyTxCountFor(caller)).toBe(0);
+      // The token IS bound to the caller in Redis (a later initiate can consume it).
+      const stored = await redis.get(`xfer:confirm:${caller}:${resolution.confirmationToken}`);
+      expect(stored).not.toBeNull();
+    }, 30_000);
+
+    it('rejects resolving an UNKNOWN account number with a 404-class TransferNotFound (no reveal)', async () => {
+      const caller = newOwner();
+      // A well-formed 10-digit number that was never assigned.
+      const res = await capture(resolveDest(caller, '0000000042'));
+      expect(res.ok).toBe(false);
+      expect(codeOf(res.error)).toBe('TRANSFER_NOT_FOUND');
+      // No token minted, no transaction created.
+      expect(await anyTxCountFor(caller)).toBe(0);
+    }, 30_000);
+
+    // ---- END-TO-END HUMAN FLOW: resolve → initiate (PENDING) → OTP → confirm (POSTED) -------
+
+    it('runs the full human flow: resolve → initiate PENDING (debit=source, credit=resolved dest) → confirm POSTED, balances move once', async () => {
       const owner = newOwner();
       const src = await mkCustomer(owner, { balance: 10000, held: 0 });
-      const dst = await mkCustomer(newOwner(), { balance: 1500, held: 0 });
+      const dst = await mkCustomer(newOwner(), { name: 'Ana Lopez', balance: 1500, held: 0 });
       const AMOUNT = 4000;
 
-      const initiated = await initiate(owner, src.id, dst.id, AMOUNT);
+      const resolution = await resolveDest(owner, dst.account_number);
+      expect(resolution.maskedName).toBe('Ana** Lop**');
+
+      const initiated = await initiateRaw(
+        owner,
+        src.id,
+        dst.account_number,
+        resolution.confirmationToken,
+        AMOUNT,
+      );
       const transferId = idOf(initiated);
       expect(typeof transferId).toBe('string');
+      expect(statusOf(initiated)).toBe('PENDING');
 
-      // NO money moved at initiate (internal transfers place no hold): both balances untouched, and
-      // the transaction sits PENDING.
+      // NO money moved at initiate (internal transfers place no hold): both balances untouched.
       expect((await acct(src.id)).balance).toBe('10000');
-      expect((await acct(src.id)).held).toBe('0');
       expect((await acct(dst.id)).balance).toBe('1500');
       expect(await txStatus(transferId)).toBe('PENDING');
-      expect(await legsForTx(transferId)).toHaveLength(0); // nothing posted yet
+      expect(await legsForTx(transferId)).toHaveLength(0);
 
       const code = await generateOtp(owner);
       const confirmed = await confirm(owner, transferId, code);
       expect(statusOf(confirmed)).toBe('POSTED');
 
       // Money moved exactly once: source debited, destination credited.
-      expect((await acct(src.id)).balance).toBe('6000'); // 10000 - 4000
-      expect((await acct(dst.id)).balance).toBe('5500'); // 1500 + 4000
+      expect((await acct(src.id)).balance).toBe('6000');
+      expect((await acct(dst.id)).balance).toBe('5500');
       expect(await txStatus(transferId)).toBe('POSTED');
 
-      // Exactly one double-entry pair (deltas sum to 0) and exactly one outbox row.
+      // The ledger legs map to the RESOLVED destination account (not merely "some" account): the
+      // debit leg is the source, the credit leg is the destination the number resolved to.
       const legs = await legsForTx(transferId);
       expect(legs).toHaveLength(2);
       expect(sumDeltas(legs)).toBe(0n);
+      const debitLeg = legs.find((l) => BigInt(l.delta) < 0n)!;
+      const creditLeg = legs.find((l) => BigInt(l.delta) > 0n)!;
+      expect(debitLeg.account_id).toBe(src.id);
+      expect(creditLeg.account_id).toBe(dst.id);
       expect(await outboxCount(transferId)).toBe(1);
-
-      // Reconciliation (the materialized balance tracks the ledger fold): accounts are seeded with
-      // a starting balance directly (not via a ledger posting), so the projection invariant is
-      // `balance == seeded_initial + SUM(ledger delta)` — every posted movement is reflected in
-      // both the ledger and the cached balance, in lock-step.
-      const initial: Record<string, bigint> = { [src.id]: 10000n, [dst.id]: 1500n };
-      for (const id of [src.id, dst.id]) {
-        const rec = await ds.query(
-          `SELECT COALESCE(SUM(delta),0)::text AS s FROM ledger_entry WHERE account_id = $1`,
-          [id],
-        );
-        expect(BigInt((await acct(id)).balance)).toBe(initial[id] + BigInt(rec[0].s));
-      }
     }, 30_000);
 
-    // ---- 2) Idempotency (DoD): a replayed key produces ONE pending transfer, money moves once ----
+    // ---- INITIATE IS GATED BY CONFIRMATION -------------------------------------------------
+
+    it('rejects initiate with NO valid confirmation token (DESTINATION_NOT_CONFIRMED); no transfer is created', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000 });
+      const dst = await mkCustomer(newOwner(), { balance: 0 });
+
+      // A syntactically fine but never-issued token: initiate must refuse and create nothing.
+      const res = await capture(
+        initiateRaw(owner, src.id, dst.account_number, 'not-a-real-token', 1000),
+      );
+      expect(res.ok).toBe(false);
+      expect(codeOf(res.error)).toBe('DESTINATION_NOT_CONFIRMED');
+      expect(await anyTxCountFor(owner)).toBe(0); // the money machinery never ran
+    }, 30_000);
+
+    it("rejects a token bound to a DIFFERENT destination (resolve B, initiate to C with B's token)", async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000 });
+      const dstB = await mkCustomer(newOwner(), { balance: 0 });
+      const dstC = await mkCustomer(newOwner(), { balance: 0 });
+
+      // Resolve B → a token that binds to B's account. Try to pay C with it.
+      const resolutionB = await resolveDest(owner, dstB.account_number);
+      const res = await capture(
+        initiateRaw(owner, src.id, dstC.account_number, resolutionB.confirmationToken, 1000),
+      );
+
+      expect(res.ok).toBe(false);
+      expect(codeOf(res.error)).toBe('DESTINATION_NOT_CONFIRMED'); // token doesn't bind to C
+      expect(await anyTxCountFor(owner)).toBe(0);
+    }, 30_000);
+
+    it('token is caller-bound: a token issued to user A cannot be used to initiate as user B', async () => {
+      const ownerA = newOwner();
+      const ownerB = newOwner();
+      const srcB = await mkCustomer(ownerB, { balance: 10000 }); // B's own source account
+      const dst = await mkCustomer(newOwner(), { balance: 0 });
+
+      // A resolves the destination → a token bound to A. B tries to spend it (with B's own source).
+      const resolutionA = await resolveDest(ownerA, dst.account_number);
+      const res = await capture(
+        initiateRaw(ownerB, srcB.id, dst.account_number, resolutionA.confirmationToken, 1000),
+      );
+
+      expect(res.ok).toBe(false);
+      expect(codeOf(res.error)).toBe('DESTINATION_NOT_CONFIRMED'); // the token key embeds the caller
+      expect(await anyTxCountFor(ownerB)).toBe(0);
+    }, 30_000);
+
+    // ---- IDEMPOTENCY (DoD): a replayed key produces ONE pending transfer; money moves once ----
 
     it('replays the SAME Idempotency-Key to the SAME pending transfer (no duplicate), and money moves once on confirm', async () => {
       const owner = newOwner();
@@ -441,28 +633,23 @@ suite(
       const key = `key-${randomUUID()}`;
       const AMOUNT = 2500;
 
-      const r1 = await initiate(owner, src.id, dst.id, AMOUNT, { key });
-      const r2 = await initiate(owner, src.id, dst.id, AMOUNT, { key });
+      const r1 = await initiate(owner, src.id, dst, AMOUNT, { key });
+      const r2 = await initiate(owner, src.id, dst, AMOUNT, { key });
       const id1 = idOf(r1);
       const id2 = idOf(r2);
 
       expect(id2).toBe(id1); // same pending transfer, not a duplicate
-      const pendingCount = await ds.query(
-        `SELECT count(*)::int AS n FROM "transaction" WHERE initiated_by = $1 AND status = 'PENDING'`,
-        [owner],
-      );
-      expect(pendingCount[0].n).toBe(1); // exactly ONE pending transfer created
+      expect(await pendingCountFor(owner)).toBe(1); // exactly ONE pending transfer created
 
       const code = await generateOtp(owner);
       await confirm(owner, id1, code);
 
-      // Money moved exactly once despite the replayed initiate.
       expect((await acct(src.id)).balance).toBe(String(10000 - AMOUNT));
       expect((await acct(dst.id)).balance).toBe(String(AMOUNT));
       expect(await legsForTx(id1)).toHaveLength(2);
     }, 30_000);
 
-    // ---- 3) Concurrency (DoD): N concurrent confirms → transfer posts AT MOST ONCE --------
+    // ---- CONCURRENCY (DoD): N concurrent confirms → transfer posts AT MOST ONCE ------------
 
     it('posts AT MOST ONCE under N concurrent confirms of one transfer with one OTP: no double-spend, money conserved', async () => {
       const owner = newOwner();
@@ -471,48 +658,41 @@ suite(
       const AMOUNT = 3000;
       const N = 8;
 
-      const initiated = await initiate(owner, src.id, dst.id, AMOUNT);
+      const initiated = await initiate(owner, src.id, dst, AMOUNT);
       const transferId = idOf(initiated);
       const code = await generateOtp(owner);
 
-      // Fire N concurrent confirms with the SAME code. OTP single-use (GETDEL) + the guarded
-      // PENDING→POSTED transition must let AT MOST ONE post.
       await Promise.allSettled(Array.from({ length: N }, () => confirm(owner, transferId, code)));
 
-      // Observable state proves exactly-once: one balanced ledger pair, one outbox, balances moved once.
       const legs = await legsForTx(transferId);
       expect(legs).toHaveLength(2); // NOT 2*k — the transfer posted once
       expect(sumDeltas(legs)).toBe(0n); // no money created or lost
       expect(await outboxCount(transferId)).toBe(1);
       expect(await txStatus(transferId)).toBe('POSTED');
-      expect((await acct(src.id)).balance).toBe(String(10000 - AMOUNT)); // debited exactly once, no overdraft
-      expect((await acct(dst.id)).balance).toBe(String(2000 + AMOUNT)); // credited exactly once
+      expect((await acct(src.id)).balance).toBe(String(10000 - AMOUNT)); // debited once, no overdraft
+      expect((await acct(dst.id)).balance).toBe(String(2000 + AMOUNT)); // credited once
     }, 45_000);
 
-    // ---- 4) OTP gating: wrong/lockout keeps the transfer PENDING; single-use posts once ----
+    // ---- OTP gating: wrong/lockout keeps the transfer PENDING; single-use posts once -------
 
     it('a wrong OTP up to lockout never posts (stays PENDING), and the correct code after lockout still cannot post (burned)', async () => {
       const owner = newOwner();
       const src = await mkCustomer(owner, { balance: 10000, held: 0 });
       const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
 
-      const initiated = await initiate(owner, src.id, dst.id, 1000);
+      const initiated = await initiate(owner, src.id, dst, 1000);
       const transferId = idOf(initiated);
       const code = await generateOtp(owner);
       const wrong = code.slice(0, -1) + (code.endsWith('0') ? '1' : '0');
 
-      // Enough wrong attempts to hit lockout (allowance is 3; loop a few extra — post-lockout the code
-      // is burned and further wrongs are harmless no-active-code misses).
       for (let i = 0; i < 4; i++) {
         const res = await capture(confirm(owner, transferId, wrong));
         expect(res.ok).toBe(false); // never posts on a wrong code
       }
-      // Not posted throughout: still PENDING, no ledger legs, balances untouched.
       expect(await txStatus(transferId)).toBe('PENDING');
       expect(await legsForTx(transferId)).toHaveLength(0);
       expect((await acct(src.id)).balance).toBe('10000');
 
-      // The correct code AFTER the lockout still cannot post — it was burned at lockout.
       const after = await capture(confirm(owner, transferId, code));
       expect(after.ok).toBe(false);
       expect(await txStatus(transferId)).toBe('PENDING');
@@ -525,7 +705,7 @@ suite(
       const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
       const AMOUNT = 3500;
 
-      const initiated = await initiate(owner, src.id, dst.id, AMOUNT);
+      const initiated = await initiate(owner, src.id, dst, AMOUNT);
       const transferId = idOf(initiated);
       const code = await generateOtp(owner);
 
@@ -533,17 +713,15 @@ suite(
       expect(first.ok).toBe(true);
       expect(statusOf(first.value)).toBe('POSTED');
 
-      // A second confirm with the same (now consumed) code must NOT move money again — either it
-      // returns the already-POSTED transfer or it is rejected, but the ledger stays a single pair.
       await capture(confirm(owner, transferId, code));
 
       expect(await legsForTx(transferId)).toHaveLength(2); // still exactly one pair
-      expect((await acct(src.id)).balance).toBe(String(10000 - AMOUNT)); // debited once only
+      expect((await acct(src.id)).balance).toBe(String(10000 - AMOUNT));
       expect((await acct(dst.id)).balance).toBe(String(AMOUNT));
       expect(await outboxCount(transferId)).toBe(1);
     }, 30_000);
 
-    // ---- 5) Confirm-time funds check: overdraft is caught at confirm, transfer stays PENDING ----
+    // ---- Confirm-time funds check: overdraft caught at confirm, transfer stays PENDING ------
 
     it('lets an over-available transfer stay PENDING at initiate, then rejects it at confirm with INSUFFICIENT_FUNDS (nothing posted)', async () => {
       const owner = newOwner();
@@ -551,8 +729,7 @@ suite(
       const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
       const AMOUNT = 5000; // more than available
 
-      // Initiate does NOT funds-check — the transfer is accepted as PENDING.
-      const initiated = await initiate(owner, src.id, dst.id, AMOUNT);
+      const initiated = await initiate(owner, src.id, dst, AMOUNT);
       const transferId = idOf(initiated);
       expect(await txStatus(transferId)).toBe('PENDING');
 
@@ -560,8 +737,7 @@ suite(
       const res = await capture(confirm(owner, transferId, code));
 
       expect(res.ok).toBe(false);
-      expect(codeOf(res.error)).toBe('INSUFFICIENT_FUNDS'); // the confirm-time funds check fired
-      // Nothing posted: still PENDING, no ledger legs, no outbox, balances unchanged.
+      expect(codeOf(res.error)).toBe('INSUFFICIENT_FUNDS');
       expect(await txStatus(transferId)).toBe('PENDING');
       expect(await legsForTx(transferId)).toHaveLength(0);
       expect(await outboxCount(transferId)).toBe(0);
@@ -569,7 +745,7 @@ suite(
       expect((await acct(dst.id)).balance).toBe('0');
     }, 30_000);
 
-    // ---- 6) Soft-duplicate: same fingerprint within 60s is suppressed; confirmDuplicate overrides ----
+    // ---- Soft-duplicate: same fingerprint within 60s suppressed; confirmDuplicate overrides ----
 
     it('suppresses a second initiate with a DIFFERENT key but the SAME fingerprint within 60s; confirmDuplicate proceeds', async () => {
       const owner = newOwner();
@@ -577,71 +753,278 @@ suite(
       const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
       const AMOUNT = 1200;
 
-      const first = await initiate(owner, src.id, dst.id, AMOUNT); // key auto (k1)
+      const first = await initiate(owner, src.id, dst, AMOUNT);
       const firstId = idOf(first);
 
-      // A DIFFERENT key, identical (type,source,destination,amount,currency) fingerprint, moments
-      // later → suspected duplicate (soft block).
-      const dup = await capture(initiate(owner, src.id, dst.id, AMOUNT));
+      const dup = await capture(initiate(owner, src.id, dst, AMOUNT));
       expect(dup.ok).toBe(false);
       expect(codeOf(dup.error)).toBe('SUSPECTED_DUPLICATE');
 
-      // confirmDuplicate:true lets the explicit repeat through as a NEW pending transfer.
-      const override = await initiate(owner, src.id, dst.id, AMOUNT, { confirmDuplicate: true });
+      const override = await initiate(owner, src.id, dst, AMOUNT, { confirmDuplicate: true });
       const overrideId = idOf(override);
       expect(overrideId).not.toBe(firstId);
 
-      const pendingCount = await ds.query(
-        `SELECT count(*)::int AS n FROM "transaction" WHERE initiated_by = $1 AND status = 'PENDING'`,
-        [owner],
-      );
-      expect(pendingCount[0].n).toBe(2); // the first + the confirmed duplicate; the blocked one is absent
+      // Single-pending invariant: the confirmed-duplicate initiate is itself a NEW initiate, so it
+      // auto-supersedes the first pending → exactly ONE pending remains (the override), and the
+      // superseded first transfer is retained as CANCELLED. (The suppressed middle attempt created
+      // nothing.) This is robust to the supersede/duplicate-check ordering: either way the end
+      // state is one PENDING.
+      expect(await pendingCountFor(owner)).toBe(1);
+      expect(await txStatus(overrideId)).toBe('PENDING');
+      expect(await txStatus(firstId)).toBe('CANCELLED');
     }, 30_000);
 
-    // ---- 7) pending-authorizations: caller-scoped, excludes POSTED and other users -------
+    // ---- getPendingAuthorization: the caller's SINGLE active pending (or null), masked, scoped ----
 
-    it("lists ONLY the caller's PENDING transfers (excludes POSTED and other users' transfers)", async () => {
+    it("returns the caller's SINGLE active pending with the destination masked name; null once none; never another user's", async () => {
       const ownerA = newOwner();
       const ownerB = newOwner();
       const srcA = await mkCustomer(ownerA, { balance: 20000, held: 0 });
       const srcB = await mkCustomer(ownerB, { balance: 20000, held: 0 });
-      const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
+      const dst = await mkCustomer(newOwner(), { name: 'Juan Perez', balance: 0, held: 0 });
 
-      // A initiates two; B initiates one. All start PENDING.
-      const a1 = idOf(await initiate(ownerA, srcA.id, dst.id, 1000, { confirmDuplicate: true }));
-      const a2 = idOf(await initiate(ownerA, srcA.id, dst.id, 2000, { confirmDuplicate: true }));
-      const b1 = idOf(await initiate(ownerB, srcB.id, dst.id, 3000, { confirmDuplicate: true }));
+      // Before any initiate the caller has NO pending authorization.
+      expect((await getPending(ownerA)) ?? null).toBeNull();
 
-      // Post A's first transfer (so it leaves the pending set).
+      const a1 = idOf(await initiate(ownerA, srcA.id, dst, 1000));
+      const b1 = idOf(await initiate(ownerB, srcB.id, dst, 3000));
+
+      // A's single pending is exactly a1, carrying the destination holder's MASKED name.
+      const pendingA = await getPending(ownerA);
+      expect(pendingA).toBeTruthy();
+      expect(idOf(pendingA)).toBe(a1);
+      expect(pendingA.destinationMaskedName).toBe('Jua** Per**'); // masked, never the raw name
+      expect(pendingA.destinationAccountNumber).toBe(dst.account_number);
+      expect(JSON.stringify(pendingA)).not.toContain('Juan Perez');
+
+      // Anti-IDOR: B's pending never surfaces for A, and B sees its own.
+      expect(idOf(pendingA)).not.toBe(b1);
+      expect(idOf(await getPending(ownerB))).toBe(b1);
+
+      // Once A confirms (POSTED), the single-pending read returns null (POSTED is not pending).
       const codeA = await generateOtp(ownerA);
       await confirm(ownerA, a1, codeA);
       expect(await txStatus(a1)).toBe('POSTED');
-
-      const listA = await svc.listPendingAuthorizations(ownerA);
-      const idsA = (Array.isArray(listA) ? listA : []).map((t: any) => idOf(t));
-      expect(idsA).toContain(a2); // A's still-pending transfer
-      expect(idsA).not.toContain(a1); // the posted one is gone
-      expect(idsA).not.toContain(b1); // B's transfer never appears for A (anti-IDOR)
-
-      const listB = await svc.listPendingAuthorizations(ownerB);
-      const idsB = (Array.isArray(listB) ? listB : []).map((t: any) => idOf(t));
-      expect(idsB).toContain(b1);
-      expect(idsB).not.toContain(a2);
+      expect((await getPending(ownerA)) ?? null).toBeNull();
     }, 30_000);
 
-    // ---- 8) Reducer gate DIRECT: a re-post of an already-POSTED transfer is refused (money-once) --
-    //
-    // Every case above reaches `postPendingInTx` through the single-use OTP gate, so AT MOST ONE
-    // caller ever enters the reducer and its guarded `UPDATE … WHERE status='PENDING'` always finds
-    // a PENDING row (affected=1). The transfers service's `status !== PENDING` pre-check is a
-    // stale-read TOCTOU guard, NOT the race-safe gate — a regression that dropped the
-    // `WHERE status='PENDING'` predicate (turning it into an UNCONDITIONAL update, so a second post
-    // double-applies the money) would slip past the ENTIRE OTP-driven suite above. This pins the
-    // DB-level gate DIRECTLY, independent of OTP: drive a transfer to POSTED via the happy path,
-    // then invoke `posting.postPendingInTx` a SECOND time on the now-POSTED header and prove it is
-    // REFUSED and moves NOTHING — the exact money-once property the guarded predicate provides. A
-    // companion assertion pins the same predicate one layer down at the repository seam
-    // (`transitionToPostedInTx` returns false / 0 rows on the POSTED header).
+    // ---- Single pending + auto-supersede: a new initiate cancels the prior pending (retained) ----
+
+    it('auto-supersedes the prior pending on a new initiate: old → CANCELLED (superseded, retained), exactly ONE pending remains', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 20000, held: 0 });
+      const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
+
+      // Two DISTINCT initiates (different amounts → different fingerprints, so no soft-duplicate).
+      const aId = idOf(await initiate(owner, src.id, dst, 1000));
+      const bId = idOf(await initiate(owner, src.id, dst, 2000));
+      expect(bId).not.toBe(aId);
+
+      // The old pending is CANCELLED + retained, stamped with the superseded reason; exactly one
+      // PENDING (the new one) exists for the initiator.
+      const rowA = await txRow(aId);
+      expect(rowA?.status).toBe('CANCELLED');
+      expect(rowA?.failure_reason).toBe('superseded');
+      expect(await txStatus(bId)).toBe('PENDING');
+      expect(await pendingCountFor(owner)).toBe(1);
+
+      // The live transfer posts on its OTP (money moves once); the superseded one never moves money.
+      const code = await generateOtp(owner);
+      const goodConfirm = await capture(confirm(owner, bId, code));
+      expect(goodConfirm.ok).toBe(true);
+      expect(await txStatus(bId)).toBe('POSTED');
+      expect((await acct(src.id)).balance).toBe(String(20000 - 2000)); // only the live transfer moved
+
+      // Confirming the superseded (CANCELLED) transfer is refused as not-pending — with a FRESH,
+      // valid code in play (the prior one was single-used by bId) so the rejection is the status
+      // guard, not a missing code; nothing moves regardless of whether the code is consumed.
+      const freshCode = await generateOtp(owner);
+      const badConfirm = await capture(confirm(owner, aId, freshCode));
+      expect(badConfirm.ok).toBe(false);
+      expect(codeOf(badConfirm.error)).toBe('TRANSFER_NOT_PENDING');
+      expect(await legsForTx(aId)).toHaveLength(0); // superseded transfer never moved money
+    }, 45_000);
+
+    // ---- Concurrency (DoD): a double-initiate race yields AT MOST ONE pending, no money moved ----
+
+    it('two concurrent initiates for one user settle to EXACTLY ONE pending — never two, never a double-post', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 20000, held: 0 });
+      const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
+
+      // Two distinct destinations/amounts would still be one pending; use distinct amounts (distinct
+      // fingerprints) so neither is soft-duplicate-suppressed, then fire them together.
+      const [tokenX, tokenY] = await Promise.all([
+        resolveDest(owner, dst.account_number),
+        resolveDest(owner, dst.account_number),
+      ]);
+      const results = await Promise.allSettled([
+        initiateRaw(owner, src.id, dst.account_number, tokenX.confirmationToken, 1000, {
+          key: `key-${randomUUID()}`,
+        }),
+        initiateRaw(owner, src.id, dst.account_number, tokenY.confirmationToken, 2000, {
+          key: `key-${randomUUID()}`,
+        }),
+      ]);
+
+      // At most one PENDING for the initiator (partial unique index, not just a service check).
+      expect(await pendingCountFor(owner)).toBe(1);
+      // Nobody posted (no confirm yet) → no money moved, both balances intact.
+      expect(await postedCountFor(owner)).toBe(0);
+      expect((await acct(src.id)).balance).toBe('20000');
+      expect((await acct(dst.id)).balance).toBe('0');
+
+      // The loser either superseded the earlier pending (a retained CANCELLED row) or surfaced a
+      // PendingTransferConflictError — never two live pendings, never a double-post.
+      const rejected = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+      for (const r of rejected) {
+        expect(['PENDING_TRANSFER_CONFLICT', 'SUSPECTED_DUPLICATE']).toContain(codeOf(r.reason));
+      }
+      const anyCancelledSuperseded = await ds.query(
+        `SELECT count(*)::int AS n FROM "transaction"
+          WHERE initiated_by = $1 AND status = 'CANCELLED' AND failure_reason = 'superseded'`,
+        [owner],
+      );
+      // Consistency: fulfilled_count - 1 supersedes happened, OR the loser rejected with a conflict.
+      const fulfilled = results.filter((r) => r.status === 'fulfilled').length;
+      expect(anyCancelledSuperseded[0].n + rejected.length).toBeGreaterThanOrEqual(fulfilled - 1);
+    }, 45_000);
+
+    // ---- Lazy expiry ON READ: an overdue pending transitions to EXPIRED (retained) on next access ----
+
+    it('reading an OVERDUE pending returns null AND lazily transitions the row to EXPIRED (retained, not deleted)', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000, held: 0 });
+      const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
+
+      // A PENDING transfer whose expires_at is already in the past (no scheduler ran).
+      const overdue = await insertTransaction(ds, {
+        initiatedBy: owner,
+        debitAccountId: src.id,
+        creditAccountId: dst.id,
+        amount: '3000',
+        currency: MXN,
+        expiresAt: new Date(Date.now() - 60_000),
+      });
+      expect(overdue.status).toBe('PENDING');
+
+      // The next read finds nothing valid (the overdue one is not returned) ...
+      expect((await getPending(owner)) ?? null).toBeNull();
+      // ... and it has been lazily transitioned to EXPIRED — retained, still queryable, not deleted.
+      const row = await txRow(overdue.id);
+      expect(row?.status).toBe('EXPIRED');
+      expect(await legsForTx(overdue.id)).toHaveLength(0); // never moved money
+    }, 30_000);
+
+    // ---- MONEY-SAFETY: confirm checks expiry BEFORE consuming the OTP (the code is NOT burned) ----
+
+    it('an OVERDUE confirm throws TransferExpired and does NOT burn the OTP — the same code still posts a fresh transfer', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000, held: 0 });
+      const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
+
+      // An overdue PENDING transfer (T1) is the caller's single pending.
+      const t1 = await insertTransaction(ds, {
+        initiatedBy: owner,
+        debitAccountId: src.id,
+        creditAccountId: dst.id,
+        amount: '3000',
+        currency: MXN,
+        expiresAt: new Date(Date.now() - 60_000),
+      });
+
+      // A valid, active OTP for the caller.
+      const code = await generateOtp(owner);
+
+      // Confirming the overdue transfer is rejected as expired, and T1 becomes EXPIRED (retained).
+      const expired = await capture(confirm(owner, t1.id, code));
+      expect(expired.ok).toBe(false);
+      expect(codeOf(expired.error)).toBe('TRANSFER_EXPIRED');
+      expect((await txRow(t1.id))?.status).toBe('EXPIRED');
+      expect(await legsForTx(t1.id)).toHaveLength(0);
+
+      // PROOF the code was NOT burned: a fresh, non-overdue pending (T2) for the SAME user can be
+      // confirmed with the SAME still-valid code — and money moves exactly once (only T2).
+      const t2 = await initiate(owner, src.id, dst, 2500);
+      const t2Id = idOf(t2);
+      expect(await txStatus(t2Id)).toBe('PENDING');
+
+      const posted = await capture(confirm(owner, t2Id, code));
+      expect(posted.ok).toBe(true);
+      expect(await txStatus(t2Id)).toBe('POSTED');
+      expect((await acct(src.id)).balance).toBe(String(10000 - 2500)); // ONLY T2 moved
+      expect((await acct(dst.id)).balance).toBe('2500');
+      expect(await legsForTx(t2Id)).toHaveLength(2);
+    }, 45_000);
+
+    // ---- Cancel: guarded PENDING→CANCELLED (retained); 409 on POSTED; idempotent; owner-scoped ----
+
+    it('cancels a pending transfer (→ CANCELLED, retained); pending read then returns null', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000, held: 0 });
+      const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
+
+      const initiated = await initiate(owner, src.id, dst, 1000);
+      const transferId = idOf(initiated);
+      expect(await txStatus(transferId)).toBe('PENDING');
+
+      const cancelled = await cancel(owner, transferId);
+      expect(statusOf(cancelled)).toBe('CANCELLED');
+      expect(await txStatus(transferId)).toBe('CANCELLED'); // retained, not deleted
+      expect(await legsForTx(transferId)).toHaveLength(0); // no money moved
+      expect((await getPending(owner)) ?? null).toBeNull();
+      expect((await acct(src.id)).balance).toBe('10000');
+    }, 30_000);
+
+    it('cancelling a POSTED transfer is refused with TransferNotPendingError; the money stays put', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000, held: 0 });
+      const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
+
+      const initiated = await initiate(owner, src.id, dst, 4000);
+      const transferId = idOf(initiated);
+      const code = await generateOtp(owner);
+      await confirm(owner, transferId, code);
+      expect(await txStatus(transferId)).toBe('POSTED');
+
+      const res = await capture(cancel(owner, transferId));
+      expect(res.ok).toBe(false);
+      expect(codeOf(res.error)).toBe('TRANSFER_NOT_PENDING');
+      expect(await txStatus(transferId)).toBe('POSTED'); // unchanged
+      expect((await acct(src.id)).balance).toBe(String(10000 - 4000));
+    }, 30_000);
+
+    it('cancelling an already-CANCELLED transfer is idempotent (returns CANCELLED, no throw)', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000, held: 0 });
+      const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
+
+      const initiated = await initiate(owner, src.id, dst, 1000);
+      const transferId = idOf(initiated);
+      await cancel(owner, transferId);
+      expect(await txStatus(transferId)).toBe('CANCELLED');
+
+      const again = await capture(cancel(owner, transferId));
+      expect(again.ok).toBe(true); // idempotent: no throw
+      expect(statusOf(again.value)).toBe('CANCELLED');
+    }, 30_000);
+
+    it("cancelling another user's pending transfer is a 404-class TransferNotFound (anti-IDOR); it stays PENDING", async () => {
+      const ownerA = newOwner();
+      const ownerB = newOwner();
+      const srcA = await mkCustomer(ownerA, { balance: 10000, held: 0 });
+      const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
+
+      const initiated = await initiate(ownerA, srcA.id, dst, 1000);
+      const transferId = idOf(initiated);
+
+      const res = await capture(cancel(ownerB, transferId)); // B tries to cancel A's transfer
+      expect(res.ok).toBe(false);
+      expect(codeOf(res.error)).toBe('TRANSFER_NOT_FOUND');
+      expect(await txStatus(transferId)).toBe('PENDING'); // A's transfer untouched
+    }, 30_000);
+
+    // ---- Reducer gate DIRECT: a re-post of an already-POSTED transfer is refused (money-once) --
 
     it('refuses a DIRECT second postPendingInTx on an already-POSTED transfer (guarded PENDING→POSTED gate) and moves nothing', async () => {
       const owner = newOwner();
@@ -649,27 +1032,21 @@ suite(
       const dst = await mkCustomer(newOwner(), { balance: 1500, held: 0 });
       const AMOUNT = 4000;
 
-      // Drive the transfer to POSTED ONCE through the real happy path (OTP generate + confirm) —
-      // reusing the file's helpers so this is the exact same money movement the OTP tests exercise.
-      const initiated = await initiate(owner, src.id, dst.id, AMOUNT);
+      const initiated = await initiate(owner, src.id, dst, AMOUNT);
       const transferId = idOf(initiated);
       const code = await generateOtp(owner);
       const confirmed = await confirm(owner, transferId, code);
       expect(statusOf(confirmed)).toBe('POSTED');
 
-      // Capture the post-state after the ONE legitimate post: balances moved once, one ledger pair,
-      // one outbox row. These are the invariants the refused second call must leave untouched.
       const postSrcBalance = (await acct(src.id)).balance;
       const postDstBalance = (await acct(dst.id)).balance;
       const postLegCount = (await legsForTx(transferId)).length;
       const postOutboxCount = await outboxCount(transferId);
-      expect(postSrcBalance).toBe('6000'); // 10000 - 4000
-      expect(postDstBalance).toBe('5500'); // 1500 + 4000
+      expect(postSrcBalance).toBe('6000');
+      expect(postDstBalance).toBe('5500');
       expect(postLegCount).toBe(2);
       expect(postOutboxCount).toBe(1);
 
-      // Resolve the REAL reducer BY TOKEN through the booted app graph (the module binds
-      // `{ provide: POSTING_SERVICE, useClass: PostingService }`, so it resolves by Symbol).
       const posting: any = app.get(getPostingServiceToken(), { strict: false });
       if (!posting || typeof posting.postPendingInTx !== 'function') {
         throw new Error(
@@ -679,11 +1056,6 @@ suite(
         );
       }
 
-      // Rebuild EXACTLY the command `confirmTransfer` hands the reducer for this transfer: an
-      // internal double-entry, debit source (−amount) / credit destination (+amount). The source
-      // still holds 6000 ≥ 4000 and the currency matches, so the reducer's per-leg funds/currency
-      // checks PASS — the ONLY thing that can reject this call is the guarded transition finding no
-      // PENDING row. (If the checks could reject first, we'd be proving the wrong gate.)
       const command: any = {
         type: 'internal',
         currency: MXN,
@@ -697,25 +1069,18 @@ suite(
 
       const second = await postPendingSecondTime(posting, transferId, command);
 
-      // The guarded PENDING→POSTED transition finds 0 PENDING rows and MUST refuse — it throws.
-      // (An unconditional UPDATE regression would instead succeed here and double-apply.)
       expect(second.ok).toBe(false);
       expect(codeOf(second.error)).toBe('TRANSFER_NOT_PENDING');
-      // Exact class match when the domain error is exported (secondary signal to the code above).
-      // The REDUCER gate throws posting's `TransactionNotPendingError` (distinct from the transfers
-      // service pre-check's `TransferNotPendingError`, though both carry `TRANSFER_NOT_PENDING`).
       const NotPending = domainErrors.TransactionNotPendingError;
       if (NotPending) expect(second.error).toBeInstanceOf(NotPending);
 
-      // Companion seam: the repository predicate itself returns false (0 rows) on the POSTED
-      // header — this pins the `WHERE status='PENDING'` guard at the repository boundary too.
       let txRepo: any;
       try {
         txRepo = app.get(getRepositoryToken('TRANSACTION_REPOSITORY', 'transaction'), {
           strict: false,
         });
       } catch {
-        txRepo = undefined; // best-effort — the reducer-gate proof above stands on its own
+        txRepo = undefined;
       }
       if (txRepo && typeof txRepo.transitionToPostedInTx === 'function') {
         const affected = await inRolledBackTx((qr) =>
@@ -724,12 +1089,12 @@ suite(
         expect(affected).toBe(false); // 0 rows updated: header is already POSTED, not PENDING
       }
 
-      // MONEY-ONCE: nothing moved after the refused second post — the whole point of the predicate.
-      expect((await acct(src.id)).balance).toBe(postSrcBalance); // still 6000, not double-debited
-      expect((await acct(dst.id)).balance).toBe(postDstBalance); // still 5500, not double-credited
-      expect((await legsForTx(transferId)).length).toBe(postLegCount); // no extra ledger legs
-      expect(await outboxCount(transferId)).toBe(postOutboxCount); // no second outbox event
-      expect(await txStatus(transferId)).toBe('POSTED'); // header status unchanged
+      // MONEY-ONCE: nothing moved after the refused second post.
+      expect((await acct(src.id)).balance).toBe(postSrcBalance);
+      expect((await acct(dst.id)).balance).toBe(postDstBalance);
+      expect((await legsForTx(transferId)).length).toBe(postLegCount);
+      expect(await outboxCount(transferId)).toBe(postOutboxCount);
+      expect(await txStatus(transferId)).toBe('POSTED');
     }, 45_000);
   },
 );

@@ -59,4 +59,11 @@ export class Transaction {
 
   @Column({ name: 'failed_at', type: 'timestamptz', nullable: true })
   failedAt!: Date | null;
+
+  /** The 2-minute pending-authorization deadline (`created_at` + 2 min, set from the DB clock
+   * at initiate). Nullable — only a user-initiated PENDING transfer carries one; posted-directly
+   * movements leave it NULL. Once `now() >= expires_at` the transfer is no longer valid and
+   * lazily transitions to EXPIRED on the next access (confirm / read / next initiate). */
+  @Column({ name: 'expires_at', type: 'timestamptz', nullable: true })
+  expiresAt!: Date | null;
 }

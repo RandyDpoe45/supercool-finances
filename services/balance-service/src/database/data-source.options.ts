@@ -2,6 +2,7 @@ import { DataSourceOptions } from 'typeorm';
 import { AppConfig } from '../config/configuration';
 import { AppMetadata } from './entities/app-metadata.entity';
 import { Currency } from './entities/currency.entity';
+import { Customer } from './entities/customer.entity';
 import { Account } from './entities/account.entity';
 import { ExternalPayee } from './entities/external-payee.entity';
 import { Transaction } from './entities/transaction.entity';
@@ -16,6 +17,8 @@ import { CreateAppMetadata1725000000000 } from './migrations/1725000000000-Creat
 import { CreateBalanceCore1788825600000 } from './migrations/1788825600000-CreateBalanceCore';
 import { CreateBalanceSatellites1788912000000 } from './migrations/1788912000000-CreateBalanceSatellites';
 import { SeedSystemAccounts1788998400000 } from './migrations/1788998400000-SeedSystemAccounts';
+import { CreateCustomerAndAccountNumber1789084800000 } from './migrations/1789084800000-CreateCustomerAndAccountNumber';
+import { AddTransactionLifecycle1789171200000 } from './migrations/1789171200000-AddTransactionLifecycle';
 
 /**
  * Single source of truth for the TypeORM DataSource options, shared by the Nest
@@ -35,6 +38,7 @@ export function buildDataSourceOptions(config: AppConfig): DataSourceOptions {
     entities: [
       AppMetadata,
       Currency,
+      Customer,
       Account,
       ExternalPayee,
       Transaction,
@@ -51,6 +55,8 @@ export function buildDataSourceOptions(config: AppConfig): DataSourceOptions {
       CreateBalanceCore1788825600000,
       CreateBalanceSatellites1788912000000,
       SeedSystemAccounts1788998400000,
+      CreateCustomerAndAccountNumber1789084800000,
+      AddTransactionLifecycle1789171200000,
     ],
     migrationsRun: true,
     synchronize: false,

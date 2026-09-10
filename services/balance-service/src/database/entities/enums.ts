@@ -26,6 +26,8 @@ export enum TransactionStatus {
   Posted = 'POSTED',
   Failed = 'FAILED',
   Reversed = 'REVERSED',
+  Expired = 'EXPIRED',
+  Cancelled = 'CANCELLED',
 }
 
 export enum PayeeStatus {

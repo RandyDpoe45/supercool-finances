@@ -26,12 +26,51 @@ export class TransactionRepository implements ITransactionRepository {
     return queryRunner.manager.save(queryRunner.manager.create(Transaction, data));
   }
 
+  async insertPendingInTx(
+    queryRunner: QueryRunner,
+    data: DeepPartial<Transaction>,
+  ): Promise<Transaction> {
+    // `expires_at` is stamped FROM THE DB CLOCK (`now() + interval '2 minutes'`), NOT the app
+    // clock, so the 2-minute deadline is authoritative and consistent with the DB-defaulted
+    // `created_at` (both resolve to the transaction's `now()`). An explicit parameterized INSERT
+    // (as in the idempotency claim) keeps that raw expression precise without a client upsert;
+    // the row is re-read within this same tx so the returned entity carries the DB-generated
+    // `created_at` / `expires_at`. Presetting `id` means this can only ever INSERT.
+    const id = data.id as string;
+    await queryRunner.manager.query(
+      `INSERT INTO "transaction"
+         ("id", "type", "status", "amount", "currency", "debit_account_id",
+          "credit_account_id", "initiated_by", "posted_at", "expires_at")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + interval '2 minutes')`,
+      [
+        id,
+        data.type,
+        data.status,
+        data.amount,
+        data.currency,
+        data.debitAccountId ?? null,
+        data.creditAccountId ?? null,
+        data.initiatedBy,
+        data.postedAt ?? null,
+      ],
+    );
+
+    const inserted = await this.findByIdInTx(queryRunner, id);
+    if (!inserted) {
+      // Unreachable: the row was just inserted under this same transaction.
+      throw new Error(`Transaction ${id} vanished after its PENDING insert`);
+    }
+    return inserted;
+  }
+
   findByIdInTx(queryRunner: QueryRunner, id: string): Promise<Transaction | null> {
     return queryRunner.manager.findOne(Transaction, { where: { id } });
   }
 
-  findPendingByInitiator(initiatedBy: string): Promise<Transaction[]> {
-    return this.repo.find({
+  findPendingByInitiator(initiatedBy: string): Promise<Transaction | null> {
+    // The partial unique index guarantees ≤1 PENDING per initiator; `take: 1` + the ordering is
+    // defensive so a (theoretically impossible) duplicate still resolves deterministically.
+    return this.repo.findOne({
       where: { initiatedBy, status: TransactionStatus.Pending },
       order: { createdAt: 'DESC', id: 'DESC' },
     });
@@ -45,6 +84,77 @@ export class TransactionRepository implements ITransactionRepository {
       .createQueryBuilder()
       .update(Transaction)
       .set({ status: TransactionStatus.Posted, postedAt: () => 'now()' })
+      .where('id = :id AND status = :pending', { id, pending: TransactionStatus.Pending })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
+  async expireOverduePendingByInitiator(
+    queryRunner: QueryRunner,
+    initiatedBy: string,
+  ): Promise<void> {
+    // Flip every OVERDUE pending transfer for this initiator to EXPIRED, judged by the DB clock.
+    // Guarded on status = PENDING so it never re-touches a terminal row; failure_reason stays
+    // NULL (a lapse is not a failure), only the terminal timestamp is stamped.
+    await queryRunner.manager
+      .createQueryBuilder()
+      .update(Transaction)
+      .set({ status: TransactionStatus.Expired, failedAt: () => 'now()' })
+      .where(
+        'initiated_by = :initiatedBy AND status = :pending AND expires_at IS NOT NULL AND expires_at <= now()',
+        { initiatedBy, pending: TransactionStatus.Pending },
+      )
+      .execute();
+  }
+
+  async supersedeActivePendingByInitiator(
+    queryRunner: QueryRunner,
+    initiatedBy: string,
+  ): Promise<void> {
+    // Auto-supersede the initiator's remaining ACTIVE pending (non-overdue by construction — the
+    // expire sweep ran first) → CANCELLED, retained. Guarded on status = PENDING.
+    await queryRunner.manager
+      .createQueryBuilder()
+      .update(Transaction)
+      .set({
+        status: TransactionStatus.Cancelled,
+        failureReason: 'superseded',
+        failedAt: () => 'now()',
+      })
+      .where('initiated_by = :initiatedBy AND status = :pending', {
+        initiatedBy,
+        pending: TransactionStatus.Pending,
+      })
+      .execute();
+  }
+
+  async expireIfOverdue(id: string): Promise<boolean> {
+    // Single atomic guarded UPDATE: the row flips to EXPIRED iff it is STILL pending AND overdue
+    // by the DB clock. affected > 0 means it WAS overdue (now EXPIRED); 0 means not overdue, or
+    // already terminal (a concurrent transition).
+    const result = await this.repo
+      .createQueryBuilder()
+      .update(Transaction)
+      .set({ status: TransactionStatus.Expired, failedAt: () => 'now()' })
+      .where('id = :id AND status = :pending AND expires_at IS NOT NULL AND expires_at <= now()', {
+        id,
+        pending: TransactionStatus.Pending,
+      })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
+  async transitionToCancelled(id: string): Promise<boolean> {
+    // Guarded explicit cancel: PENDING → CANCELLED, retained. affected > 0 means THIS call
+    // cancelled it; 0 means it was already terminal (concurrently posted / expired / cancelled).
+    const result = await this.repo
+      .createQueryBuilder()
+      .update(Transaction)
+      .set({
+        status: TransactionStatus.Cancelled,
+        failureReason: 'cancelled_by_user',
+        failedAt: () => 'now()',
+      })
       .where('id = :id AND status = :pending', { id, pending: TransactionStatus.Pending })
       .execute();
     return (result.affected ?? 0) > 0;
