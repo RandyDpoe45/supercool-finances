@@ -69,4 +69,12 @@ export interface ITransactionRepository {
    * `queryRunner.manager`), so an EXTERNAL pending's cancel can flip the row AND release its hold
    * (+ `held -= amount`) atomically under the source lock. Returns `true` iff it flipped the row. */
   transitionToCancelledInTx(queryRunner: QueryRunner, id: string): Promise<boolean>;
+  /** Guarded `POSTED → REVERSED` transition inside the caller's transaction:
+   * `UPDATE ... SET status = REVERSED WHERE id = :id AND status = 'POSTED'`. Returns `true` iff
+   * exactly one row was updated; `false` (0 rows) means the transfer was already reversed (or is
+   * not posted), so a concurrent/retried rail FAILURE callback is a no-op — the single guarded
+   * write is the idempotency gate that stops a double reversal. The compensating movement + its
+   * `reverses_transaction_id` are posted only when this returns `true`. MUST run inside the given
+   * queryRunner's active transaction. */
+  transitionToReversedInTx(queryRunner: QueryRunner, id: string): Promise<boolean>;
 }

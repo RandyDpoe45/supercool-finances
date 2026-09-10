@@ -37,4 +37,17 @@ export interface IHoldRepository {
     id: string,
     status: HoldStatus.Released | HoldStatus.Expired,
   ): Promise<boolean>;
+  /** Record the rail `external_ref` on a settled hold inside the caller's transaction — the
+   * reconciliation of a rail SUCCESS callback: `UPDATE ... SET external_ref = :externalRef
+   * WHERE id = :id AND external_ref IS NULL`. The `external_ref IS NULL` predicate is the atomic
+   * idempotency gate: a retried/duplicate SUCCESS callback finds it already set → 0 rows → a
+   * no-op (never overwritten). Returns `true` iff exactly one row was updated. This writes NO
+   * ledger and touches no balance/`held` — the money already moved (customer → clearing) at
+   * OTP-confirm; this only stamps the rail reference for reconciliation. MUST run inside the
+   * given queryRunner's active transaction. */
+  recordExternalRefInTx(
+    queryRunner: QueryRunner,
+    id: string,
+    externalRef: string,
+  ): Promise<boolean>;
 }

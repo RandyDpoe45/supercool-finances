@@ -30,6 +30,13 @@ export const EnvSchema = z.object({
   // must wait before it is a usable destination (`now() >= cooling_off_until`). The
   // anti-fraud delay; default 24h. Tests / compose override it.
   PAYEE_COOLING_OFF_SECONDS: z.coerce.number().int().positive().default(86400),
+
+  // Shared HMAC signing secret for the external rail webhooks on the `/external` surface
+  // (settlement callback + inbound credit). The rail signs each request `X-Rail-Signature:
+  // t=<unix-seconds>,v1=HMAC-SHA256(secret, "<t>.<rawBody>")` and the guard recomputes it. A
+  // DISTINCT trust domain from the `/internal` service token and the `/api` gateway identity;
+  // min 16 chars.
+  RAILS_WEBHOOK_SIGNING_SECRET: z.string().min(16),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

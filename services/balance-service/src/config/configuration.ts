@@ -31,6 +31,15 @@ export interface PayeesConfig {
   coolingOffSeconds: number;
 }
 
+export interface RailsConfig {
+  /** Shared HMAC signing secret the external rail webhooks (`/external` surface) sign each
+   *  request with — the guard recomputes `HMAC-SHA256(secret, "<t>.<rawBody>")` and compares it
+   *  constant-time. A raw secret — never composed into a URL/DSN (discrete-credentials rule). A
+   *  DISTINCT trust domain from the `/internal` service token (`X-Service-Token`) and the `/api`
+   *  gateway identity (`X-User-Id`). */
+  webhookSigningSecret: string;
+}
+
 export interface AppConfig {
   nodeEnv: Env['NODE_ENV'];
   port: number;
@@ -39,6 +48,7 @@ export interface AppConfig {
   internalServiceToken: string;
   otp: OtpConfig;
   payees: PayeesConfig;
+  rails: RailsConfig;
 }
 
 /**
@@ -69,6 +79,8 @@ export function buildConfig(env: Env): AppConfig {
 
   const payees: PayeesConfig = { coolingOffSeconds: env.PAYEE_COOLING_OFF_SECONDS };
 
+  const rails: RailsConfig = { webhookSigningSecret: env.RAILS_WEBHOOK_SIGNING_SECRET };
+
   return {
     nodeEnv: env.NODE_ENV,
     port: env.PORT,
@@ -77,6 +89,7 @@ export function buildConfig(env: Env): AppConfig {
     internalServiceToken: env.INTERNAL_SERVICE_TOKEN,
     otp,
     payees,
+    rails,
   };
 }
 

@@ -10,7 +10,9 @@
  * ./env.fixture; a TCP reachability probe for the honest-SKIP integration gate).
  */
 
+import { createHmac } from 'crypto';
 import * as net from 'net';
+import { completeRawEnv } from './env.fixture';
 
 const SRC = '../../src';
 
@@ -560,6 +562,16 @@ export interface ResolvedDomainErrors {
   /** External outbound (spec 04 step 5b): the payee is still inside its cooling-off window
    *  (`now() < cooling_off_until`, DB clock) (code `PAYEE_IN_COOLING_OFF` → 409). */
   PayeeInCoolingOffError?: any;
+  /** External rail webhooks (spec 04 step 5c): the settlement callback referenced a transaction id
+   *  that does not exist (code `SETTLEMENT_TARGET_NOT_FOUND` → 404). */
+  SettlementTargetNotFoundError?: any;
+  /** External rail webhooks (step 5c): the callback conflicts with the transfer's current money
+   *  state — wrong type, or a contradictory outcome (success for a reversed transfer / failure for
+   *  a reconciled success) (code `INVALID_SETTLEMENT_STATE` → 409). */
+  InvalidSettlementStateError?: any;
+  /** External rail webhooks (step 5c): the inbound credit could not resolve its destination to a
+   *  customer account by account number (code `INBOUND_DESTINATION_NOT_FOUND` → 404). */
+  InboundDestinationNotFoundError?: any;
 }
 
 /**
@@ -590,6 +602,8 @@ export function getDomainErrors(): ResolvedDomainErrors {
     `${SRC}/modules/transfers/service/errors`,
     // Step-5: the payees feature owns its domain errors under `service/errors`.
     `${SRC}/modules/payees/service/errors`,
+    // Step-5c: the rails feature owns its domain errors under `service/errors`.
+    `${SRC}/modules/rails/service/errors`,
     `${SRC}/modules/otp/service/errors`,
     `${SRC}/modules/otp/otp.errors`,
     `${SRC}/modules/otp/errors`,
@@ -688,6 +702,20 @@ export function getDomainErrors(): ResolvedDomainErrors {
       'PayeeInCoolingOffError',
       'PayeeInCoolingOff',
       'PayeeCoolingOffError',
+    ]),
+    // Step-5c external rail webhooks (best-effort). Owned by the rails feature
+    // (rails/service/errors), already in `candidates`.
+    SettlementTargetNotFoundError: findExportAcross(candidates, [
+      'SettlementTargetNotFoundError',
+      'SettlementTargetNotFound',
+    ]),
+    InvalidSettlementStateError: findExportAcross(candidates, [
+      'InvalidSettlementStateError',
+      'InvalidSettlementState',
+    ]),
+    InboundDestinationNotFoundError: findExportAcross(candidates, [
+      'InboundDestinationNotFoundError',
+      'InboundDestinationNotFound',
     ]),
   };
 }
@@ -1148,4 +1176,78 @@ function buildConfigFromEnv(): any {
     ['loadConfig'],
   ) as () => any;
   return loadConfig();
+}
+
+// ---- Rails module (spec 04 "Mocked external rails", step 5c: `/external` webhooks) --------
+// The outbound settlement callback + inbound credit behind the `/external` surface (a distinct
+// HMAC-signature trust domain). Resolved through the same single-seam convention: the running
+// instance BY TOKEN through the app graph. The domain error classes are resolved via
+// `getDomainErrors()` above. The booted `AppModule` already wires the `/external` surface
+// (ExternalModule) and its global `RailSignatureGuard` — nothing extra to import here;
+// `getAppModule()` yields them. NOTE: to exercise the guard over HTTP, the e2e must boot the app
+// with `{ rawBody: true }` (`moduleRef.createNestApplication({ rawBody: true })`) so `req.rawBody`
+// is captured — the same option production sets in `main.ts` — and sign with `railSignatureHeader`.
+
+/** `RAILS_SERVICE` — the DI token the RailsModule binds the RailsService to (resolved by token,
+ *  never by class, per the interface/impl split). Reuses the shared service-token probe. */
+export function getRailsServiceToken(): symbol {
+  return resolveServiceToken('RAILS_SERVICE', 'rails');
+}
+
+/**
+ * The `RailsService` CLASS, for the pure unit spec (driven through a Nest TestingModule so the
+ * injection is order-independent, like the transfers/payees unit specs). Scanned with
+ * `findExportAcross`; if the implementor moves/renames it, add the path/export HERE — the single
+ * coordination point.
+ */
+export function getRailsService(): any {
+  const cls = findExportAcross(
+    [
+      `${SRC}/modules/rails/service/impl/rails.service`,
+      `${SRC}/modules/rails/impl/rails.service`,
+      `${SRC}/modules/rails/rails.service`,
+      `${SRC}/modules/rails/service/rails.service`,
+    ],
+    ['RailsService'],
+  );
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the RailsService class. If the implementor named/placed ` +
+        `it differently, add the path/export to tests/support/harness.ts:getRailsService — the ` +
+        `single coordination point.`,
+    );
+  }
+  return cls;
+}
+
+/**
+ * The `/external` rail-webhook HMAC signing secret the booted app verifies `X-Rail-Signature`
+ * against — the `RAILS_WEBHOOK_SIGNING_SECRET` fixture value (the SAME value the integration/e2e
+ * boot injects into the environment via `completeRawEnv()`). Returned so an e2e can sign a valid
+ * request (200) and prove 401 on a wrong secret. If a suite boots with a different secret it must
+ * pass that value instead.
+ */
+export function getRailsWebhookSigningSecret(): string {
+  return completeRawEnv().RAILS_WEBHOOK_SIGNING_SECRET as string;
+}
+
+/**
+ * The canonical SENDER-SIDE signer for the `/external` rail webhooks — mirrors the
+ * `RailSignatureGuard` verification exactly. Given the RAW request-body string (the exact bytes
+ * the e2e will POST), it returns the `X-Rail-Signature` header value
+ * `` `t=${t},v1=${hmacHex}` `` where `hmacHex = HMAC-SHA256(secret ?? fixture secret,
+ * `${t ?? nowSeconds}.${rawBody}`)` (hex). Defaults: `t` = current unix seconds (inside the ±300s
+ * replay window), `secret` = the fixture signing secret. Override `t` to prove the replay guard
+ * (e.g. `t: nowSeconds - 400` → 401) and `secret` to prove a wrong-secret rejection (401). The
+ * signed payload is `"<t>.<rawBody>"` — the SAME string the guard rebuilds from `req.rawBody`, so
+ * the e2e MUST send `rawBody` verbatim as the request body (no re-stringify) for the bytes to match.
+ */
+export function railSignatureHeader(
+  rawBody: string,
+  opts: { secret?: string; t?: number } = {},
+): string {
+  const t = opts.t ?? Math.floor(Date.now() / 1000);
+  const secret = opts.secret ?? getRailsWebhookSigningSecret();
+  const hmacHex = createHmac('sha256', secret).update(`${t}.${rawBody}`).digest('hex');
+  return `t=${t},v1=${hmacHex}`;
 }

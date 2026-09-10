@@ -58,4 +58,22 @@ export class HoldRepository implements IHoldRepository {
       .execute();
     return (result.affected ?? 0) > 0;
   }
+
+  async recordExternalRefInTx(
+    queryRunner: QueryRunner,
+    id: string,
+    externalRef: string,
+  ): Promise<boolean> {
+    // Guarded UPDATE: the `external_ref IS NULL` predicate is the atomic idempotency gate for the
+    // rail SUCCESS callback. affected === 1 means THIS call recorded the rail reference; 0 means
+    // it was already set (a retried/duplicate success), so nothing is overwritten. No balance,
+    // `held`, or ledger change — reconciliation only.
+    const result = await queryRunner.manager
+      .createQueryBuilder()
+      .update(Hold)
+      .set({ externalRef })
+      .where('id = :id AND external_ref IS NULL', { id })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
 }

@@ -172,11 +172,35 @@ whole prompt is about — correctness here is the deliverable.
   **maker-checker**), view any transaction + audit, trigger a simulated external
   inbound. All admin actions write the **audit log**.
 - **Mocked external rails** — outbound settlement callback + inbound webhook behind
-  an interface; callbacks arrive on `/internal`. Each rail has its own internal
-  **clearing account** (a system account, not a customer account); the prototype
-  seeds two — `clearing:rail-outbound` and `clearing:rail-inbound`. A clearing
-  balance is the net in transit for that rail and reconciles against that rail's
-  settlement feed via the hold `externalRef`.
+  an interface. The settlement callback is a **third-party webhook** the external
+  rail calls to notify completion, so it lives on a dedicated **`/external` surface**
+  authenticated by an **HMAC request signature** (Stripe-style) — header
+  **`X-Rail-Signature: t=<unix-seconds>,v1=<hex>`**, where `v1` must equal
+  **`HMAC-SHA256(RAILS_WEBHOOK_SIGNING_SECRET, "<t>.<rawBody>")`** computed over the
+  **raw request-body bytes** (not reparsed JSON) and compared constant-time; a missing/
+  malformed header, a signature mismatch, or a **timestamp outside ±300s** (replay guard)
+  is **401**. This is a **distinct trust domain** from `/internal` (our own network peers,
+  `X-Service-Token`) and `/api` (customers, gateway `X-User-Id`). The `/external` surface is
+  a per-surface controller registry like the others (`ExternalModule` + a global
+  signature guard scoped to the `external` prefix; the app captures the raw body on
+  `/external` routes so the verified bytes are exactly what the sender signed). The
+  per-`externalRef` idempotency remains as defense-in-depth inside the replay window. Each rail has its own
+  internal **clearing account** (a system account, not a customer account); the
+  prototype seeds two — `clearing:rail-outbound` and `clearing:rail-inbound`. A
+  clearing balance is the net in transit for that rail and reconciles against that
+  rail's settlement feed via the hold `externalRef`. **Outbound completion**
+  (`/external/rails/settlement-callback`) correlates by **our transaction id** and is
+  **idempotent** (a retried webhook is a no-op): **SUCCESS reconciles** — records the
+  rail `externalRef` on the settled hold, **no new ledger movement** (the money already
+  moved customer→`clearing:rail-outbound` at OTP-confirm); **FAILURE reverses** — a
+  **compensating** movement `clearing:rail-outbound → customer` refunds the payer (a new
+  transaction with `reverses_transaction_id`, original → `REVERSED`), acquiring the
+  **customer lock before the clearing lock**. **Inbound** (`/external/rails/inbound`) is a
+  fresh POSTED `external_inbound` movement — debit `clearing:rail-inbound`, credit the
+  customer resolved by **account number** — **not OTP-gated** (approved by the originating
+  institution), **idempotent by the rail `externalRef`** (no double-credit), and a frozen
+  customer may still be credited. (An admin-triggered simulated inbound is a separate,
+  deferred admin-surface concern.)
 
 ## Endpoints (representative)
 
@@ -198,7 +222,12 @@ whole prompt is about — correctness here is the deliverable.
   payee with its `coolingOffUntil`); `GET /payees` lists the caller's enrolled payees.
 - `/admin`: `POST /accounts/:id/freeze`, `PUT /limits`, `POST /transfers/:id/reverse`,
   `POST /approvals/:id/approve`, `GET /transactions`, `POST /external/inbound`.
-- `/internal`: `POST /rails/settlement-callback`, `GET /health`.
+- `/external` (third-party rail webhooks — HMAC-signed: `X-Rail-Signature: t=…,v1=…`, `v1 == HMAC-SHA256(RAILS_WEBHOOK_SIGNING_SECRET, "<t>.<rawBody>")`, ±300s replay window, 401 otherwise):
+  `POST /rails/settlement-callback` (outbound completion: SUCCESS reconciles — records
+  the rail `externalRef`, no new ledger post; FAILURE reverses `clearing → customer`),
+  `POST /rails/inbound` (external inbound credit — debit `clearing:rail-inbound`, credit
+  the customer by account number; **not** OTP-gated; idempotent by the rail `externalRef`).
+- `/internal`: `GET /health` (health/readiness; our-own-peers surface, `X-Service-Token`).
 
 ## Data model (entities → migrations)
 

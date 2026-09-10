@@ -313,8 +313,8 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
 | `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findByIdAndOwner(id, ownerId)`, `findBySystemKey`, `findByAccountNumber(accountNumber)`, `lockByIdForUpdate(queryRunner, id)`, `updateBalanceInTx(queryRunner, id, newBalance)`, `updateHeldInTx(queryRunner, id, newHeld)` |
 | `CUSTOMER_REPOSITORY` | `ICustomerRepository` | `findById`, `create` |
 | `LEDGER_ENTRY_REPOSITORY` | `ILedgerEntryRepository` | `findById`, `create`, `findByAccount(accountId, limit)` |
-| `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create`, `insertInTx`, `insertPendingInTx` (DB-clock `expires_at`), `findByIdInTx`, `findPendingByInitiator` (→ single row or null), `findPendingByInitiatorInTx`, `transitionToPostedInTx`, `expireOverduePendingByInitiator`, `supersedeActivePendingByInitiator`, `expireIfOverdue`, `expireIfOverdueInTx`, `transitionToCancelled`, `transitionToCancelledInTx` |
-| `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create`, `insertInTx` (PLACED), `findByTransactionInTx`, `settleInTx` (guarded PLACED→SETTLED), `releaseInTx(qr, id, RELEASED\|EXPIRED)` (guarded PLACED→terminal) |
+| `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create`, `insertInTx`, `insertPendingInTx` (DB-clock `expires_at`), `findByIdInTx`, `findPendingByInitiator` (→ single row or null), `findPendingByInitiatorInTx`, `transitionToPostedInTx`, `expireOverduePendingByInitiator`, `supersedeActivePendingByInitiator`, `expireIfOverdue`, `expireIfOverdueInTx`, `transitionToCancelled`, `transitionToCancelledInTx`, `transitionToReversedInTx` (guarded POSTED→REVERSED — step 5c) |
+| `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create`, `insertInTx` (PLACED), `findByTransactionInTx`, `settleInTx` (guarded PLACED→SETTLED), `releaseInTx(qr, id, RELEASED\|EXPIRED)` (guarded PLACED→terminal), `recordExternalRefInTx(qr, id, externalRef)` (guarded `external_ref IS NULL` — step 5c) |
 | `EXTERNAL_PAYEE_REPOSITORY` | `IExternalPayeeRepository` | `findById`, `create`, `findByOwner`, `createEnrollment(ownerId, displayName, rail, destinationRef, coolingOffSeconds)` (DB-clock `cooling_off_until`) |
 | `USER_LIMITS_REPOSITORY` | `IUserLimitsRepository` | `findById`, `create`, `findByOwner` |
 | `OUTBOX_EVENT_REPOSITORY` | `IOutboxEventRepository` | `findById`, `create` |
@@ -357,9 +357,20 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
   these alongside `IAccountRepository.updateHeldInTx` under the source's `FOR UPDATE` lock, so
   `SUM(PLACED holds per account) == account.held` holds at every commit; the reconciliation SUM
   query itself lives in tests, not as a repo method.
+- **Rail-webhook idempotency gates (spec 04 step 5c).** Two more guarded, tx-aware transitions
+  back the mocked-rail callbacks, each a single UPDATE whose predicate IS the idempotency gate:
+  `ITransactionRepository.transitionToReversedInTx(qr, id)` flips `POSTED → REVERSED` (`WHERE id AND
+  status = 'POSTED'`, stamping `failure_reason = 'rail_settlement_failed'`) — the FAILURE callback's
+  gate, so a retried/concurrent failure gets 0 rows and posts no second compensating movement (there
+  is no `reversed_at` column; the compensating transaction's `posted_at` + `reverses_transaction_id`
+  is the audit record). `IHoldRepository.recordExternalRefInTx(qr, id, externalRef)` sets
+  `external_ref` only `WHERE external_ref IS NULL` — the SUCCESS callback's reconcile, so a retried
+  success never overwrites and writes NO balance/held/ledger. See
+  [domain.md](./domain.md#step-5c--external-rail-webhooks).
 - **Deferred to the domain step (driven by real callers):** outbox `pollUnpublished`
   (FOR UPDATE SKIP LOCKED) + `markPublished`; ledger reconstruction / delta-sum;
   transaction-by-debit-account history; and the remaining status-transition helpers. These are
   intentionally absent now to avoid speculative, caller-less query surface. (The idempotency
   soft-duplicate-window lookup — `findRecentByFingerprintInTx` — landed with spec 04 step 3; the
-  `Hold` lifecycle methods above landed with step 5b.)
+  `Hold` lifecycle methods with step 5b; and the rail-webhook gates —
+  `transitionToReversedInTx` / `recordExternalRefInTx` — with step 5c.)
