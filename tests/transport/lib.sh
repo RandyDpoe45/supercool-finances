@@ -43,11 +43,13 @@ ALIAS="keycloak.localtest.me"
 AUD="supercool-api"
 CUSTOMER_ROLE="customer"
 ADMIN_ROLE="admin"
-PREFERRED_CLIENT="client-app"     # the public customer SPA (Authorization Code + PKCE)
-BALANCE_UPSTREAM="balance-service" # compose service name the /api route targets
+PREFERRED_CLIENT="client-app"      # the public customer SPA (Authorization Code + PKCE)
+BALANCE_UPSTREAM="balance-service"   # compose service name the /balance/* routes target
+ANALYTICS_UPSTREAM="analytics-server" # compose service name the /analytics/admin route targets
 
 # Values loaded from .env.example at runtime.
 PUBLIC_HTTP_PORT=""
+INTERNAL_HTTP_PORT=""
 KEYCLOAK_PORT=""
 ISSUER=""
 
@@ -56,11 +58,14 @@ CONFIG_JSON_FILE=""     # cached resolved-config JSON (temp path)
 LAST_CONFIG_ERR=""      # stderr of the last failed `docker compose config`
 PKCE_SCRIPT=""          # temp path of the PKCE flow script
 KONG_PUBLIC_CFG=""      # resolved path to the public-kong declarative config
+KONG_INTERNAL_CFG=""    # resolved path to the internal-kong declarative config
 REALM_EXPORT=""         # resolved path to the realm export JSON
 
 # Runtime state.
 CUSTOMER_TOKEN=""       # minted demo-customer access token (empty if minting skipped/failed)
 CUSTOMER_SUB=""         # its `sub` claim
+ADMIN_TOKEN=""          # minted demo-admin access token (empty if minting skipped/failed)
+ADMIN_SUB=""            # its `sub` claim
 UPSTREAM_MARKER=""      # header name proven to mark a genuinely-proxied response ("" if none)
 
 # curl_probe outputs.
@@ -116,8 +121,9 @@ env_val() {
 }
 
 load_env_values() {
-  PUBLIC_HTTP_PORT="$(env_val PUBLIC_HTTP_PORT)"; [ -n "$PUBLIC_HTTP_PORT" ] || PUBLIC_HTTP_PORT="8080"
-  KEYCLOAK_PORT="$(env_val KEYCLOAK_PORT)";       [ -n "$KEYCLOAK_PORT" ]     || KEYCLOAK_PORT="8082"
+  PUBLIC_HTTP_PORT="$(env_val PUBLIC_HTTP_PORT)";     [ -n "$PUBLIC_HTTP_PORT" ]   || PUBLIC_HTTP_PORT="8080"
+  INTERNAL_HTTP_PORT="$(env_val INTERNAL_HTTP_PORT)"; [ -n "$INTERNAL_HTTP_PORT" ] || INTERNAL_HTTP_PORT="8081"
+  KEYCLOAK_PORT="$(env_val KEYCLOAK_PORT)";           [ -n "$KEYCLOAK_PORT" ]      || KEYCLOAK_PORT="8082"
   ISSUER="http://${ALIAS}:${KEYCLOAK_PORT}/realms/${REALM}"
 }
 
@@ -163,6 +169,29 @@ find_kong_public_config() {
   printf ''; return 1
 }
 
+# Locate the INTERNAL-kong declarative config. Prefer infra/kong-internal/*, then any
+# Kong declarative file under infra/ that routes `/admin` (the internal surface) but not
+# `/api` (the public one). Prints the path or nothing.
+find_kong_internal_config() {
+  [ -n "$KONG_INTERNAL_CFG" ] && { printf '%s' "$KONG_INTERNAL_CFG"; return 0; }
+  local d f
+  for d in "$INFRA_DIR/kong-internal" "$INFRA_DIR/kong_internal" "$INFRA_DIR/internal-kong"; do
+    [ -d "$d" ] || continue
+    f="$(find "$d" -maxdepth 2 -type f \( -iname '*.yml' -o -iname '*.yaml' -o -iname '*.json' \) 2>/dev/null \
+          | while IFS= read -r c; do grep -qi '_format_version\|services:\|routes:' "$c" 2>/dev/null && { printf '%s\n' "$c"; break; }; done | head -1)"
+    if [ -n "$f" ]; then KONG_INTERNAL_CFG="$f"; printf '%s' "$f"; return 0; fi
+  done
+  [ -d "$INFRA_DIR" ] || { printf ''; return 1; }
+  f="$(find "$INFRA_DIR" -type f \( -iname '*.yml' -o -iname '*.yaml' \) 2>/dev/null \
+        | while IFS= read -r c; do
+            if grep -qi '_format_version' "$c" 2>/dev/null && grep -q '/admin' "$c" 2>/dev/null && ! grep -q '/api' "$c" 2>/dev/null; then
+              printf '%s\n' "$c"; break
+            fi
+          done | head -1)"
+  if [ -n "$f" ]; then KONG_INTERNAL_CFG="$f"; printf '%s' "$f"; return 0; fi
+  printf ''; return 1
+}
+
 # ----------------------------------------------------------------------------------
 # Resolved-config helper — `docker compose config` (docker CLI, NOT the daemon).
 #   Returns: 0 ok (CONFIG_JSON_FILE populated), 1 parse failed, 3 docker CLI absent.
@@ -202,6 +231,13 @@ edge_base()  { printf 'http://localhost:%s' "$PUBLIC_HTTP_PORT"; }
 whoami_url() { printf '%s/balance/api/whoami' "$(edge_base)"; }
 alias_base() { printf 'http://%s:%s' "$ALIAS" "$KEYCLOAK_PORT"; }
 
+# Internal edge (admin plane): host :INTERNAL_HTTP_PORT -> internal-nginx -> internal-kong
+# -> two upstreams. Service-namespaced (ADR-17): Kong strips the service segment so each
+# upstream sees /admin/... . Probes are GET /balance/admin/whoami and /analytics/admin/whoami.
+internal_base()      { printf 'http://localhost:%s' "$INTERNAL_HTTP_PORT"; }
+balance_admin_url()  { printf '%s/balance/admin/whoami' "$(internal_base)"; }
+analytics_admin_url(){ printf '%s/analytics/admin/whoami' "$(internal_base)"; }
+
 # Did a response come FROM the balance service (i.e. reach the upstream)? Balance
 # responses are unambiguous: success carries userId/roles; every error carries the
 # {error:{code,message,requestId}} envelope (the AllExceptionsFilter shape). Kong's
@@ -214,6 +250,16 @@ reached_balance() {   # $1 = body ; $2 = headers
   if [ -n "$UPSTREAM_MARKER" ] && printf '%s' "$2" | grep -qi "^${UPSTREAM_MARKER}:"; then
     return 0
   fi
+  return 1
+}
+
+# Did a response reach ANY upstream (balance OR analytics)? The internal edge fronts two
+# upstreams; analytics scaffolding may use the NestJS-default error envelope
+# ({"statusCode":...,"message":...,"error":...}) rather than balance's {error:{...,requestId}}.
+# So this is reached_balance OR a NestJS-default envelope OR the Kong upstream marker.
+reached_upstream() {  # $1 = body ; $2 = headers
+  reached_balance "$1" "$2" && return 0
+  case "$1" in *'"statusCode"'*) return 0 ;; esac
   return 1
 }
 
@@ -334,6 +380,58 @@ mint_customer_token() {
   CUSTOMER_SUB="$(decode_jwt_claims "$token" | awk -F'\t' '$1=="sub"{print $2}')"
   info "minted a real demo-customer token via Authorization-Code + PKCE (sub=$CUSTOMER_SUB)"
   return 0
+}
+
+# Mint + cache the demo-admin token (sets ADMIN_TOKEN + ADMIN_SUB) — for the internal edge.
+mint_admin_token() {
+  [ -n "$ADMIN_TOKEN" ] && return 0
+  local token; token="$(pkce_token_for_role "$ADMIN_ROLE")"
+  [ -n "$token" ] || return 1
+  ADMIN_TOKEN="$token"
+  ADMIN_SUB="$(decode_jwt_claims "$token" | awk -F'\t' '$1=="sub"{print $2}')"
+  info "minted a real demo-admin token via Authorization-Code + PKCE (sub=$ADMIN_SUB)"
+  return 0
+}
+
+# Print a copy of a JWT with a MIDDLE character of the signature segment mutated, so the
+# decoded signature bytes deterministically differ (flipping only the LAST base64url char
+# can be a no-op: an RS256 signature's final char encodes just the top 2 bits of the last
+# byte). Used to prove the gateway genuinely verifies the JWKS signature.
+tamper_signature() {  # $1 = token
+  local jh jp js mid ch newch
+  IFS='.' read -r jh jp js <<EOF
+$1
+EOF
+  mid=$(( ${#js} / 2 ))
+  ch="${js:mid:1}"
+  if [ "$ch" = "A" ]; then newch="B"; else newch="A"; fi
+  printf '%s.%s.%s%s%s' "$jh" "$jp" "${js:0:mid}" "$newch" "${js:mid+1}"
+}
+
+# Assert a whoami body: userId == expected sub AND roles contains the required role.
+# Prints OK/-> lines; returns 0 ok / 1 bad. Shared by the public + internal vertical slices.
+assert_whoami_body() {  # $1 = expected sub ; $2 = required role ; $3 = body
+  "$PYTHON" - "$1" "$2" "$3" <<'PY'
+import sys, json
+sub, role, body = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.loads(body)
+except Exception as e:
+    print(f"  -> whoami body is not JSON: {e} | {body[:160]}"); sys.exit(1)
+bad = False
+uid = d.get("userId")
+if uid == sub and sub:
+    print(f"  userId == token sub ('{sub}')")
+else:
+    print(f"  -> userId '{uid}' != token sub '{sub}' — injected identity is wrong"); bad = True
+roles = d.get("roles") or []
+if isinstance(roles, str): roles = [roles]
+if role in roles:
+    print(f"  roles contains '{role}' (roles: {roles})")
+else:
+    print(f"  -> roles does NOT contain '{role}' (got {roles})"); bad = True
+sys.exit(1 if bad else 0)
+PY
 }
 
 # The scripted Authorization-Code + PKCE (S256) flow (python urllib), identical in
@@ -853,21 +951,11 @@ check_bad_tokens_401() {
   else
     fail "malformed bearer -> HTTP $PROBE_CODE (want 401 from the edge); reached_balance=$(reached_balance "$PROBE_BODY" "$PROBE_HEADERS" && echo yes || echo no)"; bad=1
   fi
-  # Tampered signature (needs a real token to tamper). Mutate a char in the MIDDLE of the
-  # signature segment: flipping only the LAST base64url char can be a no-op (an RS256
-  # signature's final char encodes just the top 2 bits of the last byte, so e.g. 'A'->'B'
-  # decodes to the same final byte -> the signature is unchanged and a CORRECT gateway
-  # returns 200, flakily reding this check). A middle char maps to full signature bytes, so
-  # the decoded signature deterministically differs -> RS256 verify must fail with 401.
+  # Tampered signature (needs a real token to tamper). tamper_signature mutates a MIDDLE
+  # char of the signature segment so the decoded bytes deterministically differ (a last-char
+  # flip can be a no-op) -> RS256 verify must fail with 401.
   if [ -n "$CUSTOMER_TOKEN" ]; then
-    local jh jp js tampered mid ch newch
-    IFS='.' read -r jh jp js <<EOF
-$CUSTOMER_TOKEN
-EOF
-    mid=$(( ${#js} / 2 ))
-    ch="${js:mid:1}"
-    if [ "$ch" = "A" ]; then newch="B"; else newch="A"; fi
-    tampered="${jh}.${jp}.${js:0:mid}${newch}${js:mid+1}"
+    local tampered; tampered="$(tamper_signature "$CUSTOMER_TOKEN")"
     curl_probe "$(whoami_url)" -H "Authorization: Bearer $tampered"
     if [ "$PROBE_CODE" = "401" ] && ! reached_balance "$PROBE_BODY" "$PROBE_HEADERS"; then
       info "tampered-signature token -> 401 at the edge (JWKS signature genuinely verified)"
@@ -1055,9 +1143,11 @@ check_rate_limiting() {
   fi
 }
 
-# Read a numeric rate-limit (minute/second/hour) from the public-kong config to size the burst.
+# Read a numeric rate-limit (minute/second/hour) from a Kong config to size the burst.
+# $1 = optional config path (defaults to the public-kong config).
 detect_rate_limit() {
-  local cfg; cfg="$(find_kong_public_config)"
+  local cfg="${1:-}"
+  [ -n "$cfg" ] || cfg="$(find_kong_public_config)"
   [ -n "$cfg" ] || { printf ''; return 1; }
   [ -n "$PYTHON" ] || { printf ''; return 1; }
   "$PYTHON" - "$cfg" <<'PY' 2>/dev/null
@@ -1094,6 +1184,486 @@ edge_reachable() {
   code="$(curl -s --max-time 6 -o /dev/null -w '%{http_code}' "$(edge_base)/" 2>/dev/null)"
   [ -n "$code" ] && [ "$code" != "000" ]
 }
+internal_edge_reachable() {
+  local code
+  code="$(curl -s --max-time 6 -o /dev/null -w '%{http_code}' "$(internal_base)/" 2>/dev/null)"
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+# ==================================================================================
+# INTERNAL EDGE — STATIC CHECKS (admin plane: internal-nginx :8081 -> internal-kong ->
+# balance-service + analytics-server; role gate = admin; /internal never routable)
+# ==================================================================================
+
+# Check I1 (static) — compose defines the internal-edge services (internal-nginx,
+# internal-kong, analytics-server) alongside balance-service.
+check_internal_compose() {
+  section "Check I1 (static) — compose defines internal-nginx, internal-kong, analytics-server (+ balance-service)"
+  build_config; local rc=$?
+  [ $rc -eq 3 ] && { skip "docker CLI absent — cannot resolve config"; return; }
+  [ $rc -ne 0 ] && { fail "config did not parse — cannot check internal services (see Check 1)"; return; }
+  [ -z "$PYTHON" ] && { skip "python not available to parse resolved config"; return; }
+  if "$PYTHON" - "$CONFIG_JSON_FILE" "$BALANCE_UPSTREAM" "$ANALYTICS_UPSTREAM" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding='utf-8'))
+balance, analytics = sys.argv[2], sys.argv[3]
+services = cfg.get("services") or {}
+bad = False
+for name in ("internal-nginx", "internal-kong", analytics, balance):
+    if name in services:
+        print(f"  service '{name}' defined")
+    else:
+        print(f"  -> service '{name}' NOT defined in the spine (internal edge not wired yet)"); bad = True
+sys.exit(1 if bad else 0)
+PY
+  then pass "compose defines internal-nginx, internal-kong, $ANALYTICS_UPSTREAM and $BALANCE_UPSTREAM"
+  else fail "compose is missing an internal-edge service (internal edge not fully wired into the spine)"
+  fi
+}
+
+# Check I2 (static) — internal-edge isolation: internal-nginx host-publishes ONLY
+# ${INTERNAL_HTTP_PORT} on edge-internal; internal-kong + analytics-server + balance-service
+# host-publish NOTHING (reachable only through the nginx edge). (spec 00 §3.)
+check_internal_edge_topology() {
+  section "Check I2 (static) — only internal-nginx host-publishes :$INTERNAL_HTTP_PORT; internal-kong+analytics+balance unpublished (spec 00 §3)"
+  build_config; local rc=$?
+  [ $rc -eq 3 ] && { skip "docker CLI absent — cannot resolve service shape"; return; }
+  [ $rc -ne 0 ] && { fail "config did not parse — cannot check topology (see Check 1)"; return; }
+  [ -z "$PYTHON" ] && { skip "python not available to parse resolved config"; return; }
+  if "$PYTHON" - "$CONFIG_JSON_FILE" "$INTERNAL_HTTP_PORT" "$BALANCE_UPSTREAM" "$ANALYTICS_UPSTREAM" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1], encoding='utf-8'))
+port, balance, analytics = sys.argv[2], sys.argv[3], sys.argv[4]
+services = cfg.get("services") or {}
+bad = False
+def published(svc):
+    out = []
+    for p in (svc.get("ports") or []):
+        pub = p.get("published") if isinstance(p, dict) else None
+        out.append("" if pub is None else str(pub))
+    return out
+ng = services.get("internal-nginx")
+if ng is None:
+    print("  -> 'internal-nginx' not defined"); bad = True
+else:
+    pubs = published(ng)
+    if port in pubs:
+        print(f"  internal-nginx host-publishes :{port} (the internal entrypoint)")
+    else:
+        print(f"  -> internal-nginx does NOT host-publish :{port} (got {pubs or '(none)'})"); bad = True
+    nets = set((ng.get("networks") or {}).keys())
+    if "edge-internal" in nets:
+        print("  internal-nginx on 'edge-internal'")
+    else:
+        print(f"  -> internal-nginx not on 'edge-internal' (nets: {sorted(nets)})"); bad = True
+for name in ("internal-kong", analytics, balance):
+    svc = services.get(name)
+    if svc is None:
+        print(f"  -> '{name}' not defined"); bad = True; continue
+    pubs = [p for p in published(svc) if p != ""]
+    if pubs:
+        print(f"  -> '{name}' host-publishes {pubs} — must be UNPUBLISHED (reachable only via the nginx edge)"); bad = True
+    else:
+        print(f"  '{name}' host-publishes nothing (internal-only)")
+sys.exit(1 if bad else 0)
+PY
+  then pass "internal-nginx publishes only :$INTERNAL_HTTP_PORT on edge-internal; internal-kong + $ANALYTICS_UPSTREAM + $BALANCE_UPSTREAM unpublished"
+  else fail "internal-edge topology violates the macro: an internal service is host-published, or internal-nginx is mis-wired"
+  fi
+}
+
+# Check I3 (static) — the INTERNAL-kong declarative config parses and declares the two
+# namespaced admin routes with stripping, the ADMIN role gate, and the same identity-gate
+# intents as the public edge. Mechanism-accurate (models each probe through Kong's
+# strip_path + service-path), tolerant of formatting; FAILs on a bare /admin route, a dropped
+# strip, a dropped admin gate, or invalid YAML. Runtime checks I4-I9 prove the behavior.
+check_kong_internal_declarative() {
+  section "Check I3 (static) — internal-kong config: /balance/admin + /analytics/admin (strip->/admin) + admin gate + strip/RS256/iss/aud/exp/inject + rate-limit"
+  local cfg; cfg="$(find_kong_internal_config)"
+  if [ -z "$cfg" ]; then
+    fail "no internal-kong declarative config found under infra/kong-internal/ — the admin allowlist is not defined"; return
+  fi
+  info "internal-kong config: ${cfg#$REPO_ROOT/}"
+  [ -z "$PYTHON" ] && { skip "python not available to parse the Kong declarative config"; return; }
+  "$PYTHON" - "$cfg" "$BALANCE_UPSTREAM" "$ANALYTICS_UPSTREAM" "$ADMIN_ROLE" "$ISSUER" "$AUD" <<'PY'
+import sys, json, re
+path, balance, analytics, admin, issuer, aud = sys.argv[1:7]
+raw = open(path, encoding='utf-8').read()
+doc = None; parsed_via = None
+try:
+    import yaml
+    doc = yaml.safe_load(raw); parsed_via = "yaml"
+except ImportError:
+    try:
+        doc = json.loads(raw); parsed_via = "json"
+    except Exception as e:
+        print(f"  -> PyYAML unavailable and file is not JSON ({e}); doing a textual sanity pass"); parsed_via = None
+except Exception as e:
+    print(f"  -> declarative config does NOT parse as YAML: {e}"); sys.exit(2)
+
+low = raw.lower()
+
+def textual_ok():
+    problems = []
+    if "/balance/admin" not in raw: problems.append("no '/balance/admin' route path")
+    if "/analytics/admin" not in raw: problems.append("no '/analytics/admin' route path")
+    if re.search(r'(^|\n)\s*-\s*/admin\s*(\n|$)', raw):
+        problems.append("a bare '/admin' route path is present (must be namespaced)")
+    if "strip_path: false" in low: problems.append("strip_path:false present — namespace would not strip to /admin")
+    if balance not in raw: problems.append(f"no '{balance}' upstream")
+    if analytics not in raw: problems.append(f"no '{analytics}' upstream")
+    if admin not in raw: problems.append(f"no '{admin}' role gate")
+    if "rate-limiting" not in low: problems.append("no rate-limiting plugin")
+    if "rs256" not in low: problems.append("no RS256 alg pin")
+    if issuer not in raw: problems.append(f"no exact issuer '{issuer}'")
+    if aud not in raw: problems.append(f"no audience '{aud}'")
+    if low.count("x-user-id") < 2 or low.count("x-roles") < 2:
+        problems.append("X-User-Id/X-Roles not both stripped AND injected")
+    return problems
+
+if doc is None:
+    problems = textual_ok()
+    for p in problems: print(f"  -> {p}")
+    if problems: sys.exit(1)
+    print("  textual sanity: /balance/admin + /analytics/admin (namespaced, stripped), admin gate, RS256/iss/aud, strip+inject, rate-limiting present")
+    sys.exit(0)
+
+print(f"  declarative config parses ({parsed_via})")
+
+services = doc.get("services") or []
+routes_top = doc.get("routes") or []
+plugins_top = doc.get("plugins") or []
+def routes_of(svc): return svc.get("routes") or []
+
+plugins = list(plugins_top)
+all_route_paths = []
+for s in services:
+    plugins += (s.get("plugins") or [])
+    for r in routes_of(s):
+        all_route_paths += [str(p) for p in (r.get("paths") or [])]
+        plugins += (r.get("plugins") or [])
+for r in routes_top:
+    all_route_paths += [str(p) for p in (r.get("paths") or [])]
+    plugins += (r.get("plugins") or [])
+names = [(p.get("name") or "").lower() for p in plugins]
+has_ratelimit = any("rate-limiting" in n for n in names)
+
+def service_upstream(s):
+    blob = json.dumps(s)
+    if balance in blob: return "balance"
+    if analytics in blob: return "analytics"
+    return "?"
+def service_path(s):
+    p = s.get("path")
+    if isinstance(p, str) and p:
+        return p if p.startswith("/") else "/" + p
+    url = s.get("url") or ""
+    m = re.match(r'^[a-zA-Z][\w+.\-]*://[^/]+(/.*)?$', url)
+    return (m.group(1) if m and m.group(1) else "")
+def upstream_path_for(rp, strip_on, sp, probe):
+    if not probe.startswith(rp): return None
+    remainder = probe[len(rp):] if strip_on else probe
+    if strip_on and not remainder.startswith("/"): remainder = "/" + remainder
+    up = (sp.rstrip("/") + remainder) if sp else remainder
+    return re.sub(r'/{2,}', '/', up)
+
+# Each namespaced admin route must strip its /<ns>/admin prefix so the upstream sees /admin.
+balance_route_ok = analytics_route_ok = False
+for s in services:
+    up = service_upstream(s); sp = service_path(s)
+    for r in routes_of(s):
+        strip_on = (r.get("strip_path") is not False)   # Kong default strip_path = true
+        for rp in (str(p) for p in (r.get("paths") or [])):
+            if up == "balance" and rp.startswith("/balance/admin") \
+               and upstream_path_for(rp, strip_on, sp, "/balance/admin/whoami") == "/admin/whoami":
+                balance_route_ok = True
+            if up == "analytics" and rp.startswith("/analytics/admin") \
+               and upstream_path_for(rp, strip_on, sp, "/analytics/admin/whoami") == "/admin/whoami":
+                analytics_route_ok = True
+route_bare_admin = any(rp == "/admin" or rp.startswith("/admin/") for rp in all_route_paths)
+# /internal must NEVER be a route on the internal edge.
+route_internal = any("/internal" in rp for rp in all_route_paths)
+
+# --- Identity-gate Lua (same detection as the public edge) ---
+lua_parts = []
+for p in plugins:
+    if (p.get("name") or "").lower() in ("pre-function", "post-function", "serverless-functions"):
+        for val in (p.get("config") or {}).values():
+            if isinstance(val, list): lua_parts += [x for x in val if isinstance(x, str)]
+            elif isinstance(val, str): lua_parts.append(val)
+lua = re.sub(r'--[^\n]*', '', "\n".join(lua_parts))
+llow = lua.lower()
+def hasrx(pat): return re.search(pat, lua, re.I) is not None
+
+def rt_removes_both():
+    for p in plugins:
+        if "request-transformer" in (p.get("name") or "").lower():
+            removes = ((p.get("config") or {}).get("remove") or {}).get("headers") or []
+            rl = " ".join(str(x).lower() for x in removes)
+            if "x-user-id" in rl and "x-roles" in rl: return True
+    return False
+strip_both = (hasrx(r'(clear|remove)_header\s*\(\s*["\']x-user-id')
+              and hasrx(r'(clear|remove)_header\s*\(\s*["\']x-roles')) or rt_removes_both()
+alg_pin    = "rs256" in llow
+sig_verify = hasrx(r'verify\s*\(') and ("signature" in llow)
+iss_check  = (issuer in lua) or (issuer in raw)
+aud_check  = (aud in lua) or (aud in raw)
+def claims_to_verify_has_exp():
+    for p in plugins:
+        ctv = (p.get("config") or {}).get("claims_to_verify") or []
+        if isinstance(ctv, list) and "exp" in [str(x) for x in ctv]: return True
+    return False
+exp_check  = hasrx(r'claims\s*[.\[]\s*["\']?exp\b') or claims_to_verify_has_exp()
+inject_both = hasrx(r'set_header\s*\(\s*["\']x-user-id') and hasrx(r'set_header\s*\(\s*["\']x-roles')
+
+# Admin role gate: Lua REQUIRED_ROLE "admin" + a 403 path, OR an acl/realm_roles plugin.
+role_gate_lua = (admin in lua) and ("403" in lua) and ("realm_access" in llow or "roles" in llow)
+role_gate_plugin = False
+for p in plugins:
+    n = (p.get("name") or "").lower(); c = p.get("config") or {}
+    if n == "acl":
+        allow = c.get("allow") or []
+        if admin in [str(a) for a in allow]: role_gate_plugin = True
+    for key in ("realm_roles", "roles", "required_roles"):
+        vals = c.get(key) or []
+        if isinstance(vals, list) and admin in [str(a) for a in vals]: role_gate_plugin = True
+role_gate = role_gate_lua or role_gate_plugin
+
+checks = [
+    ("/balance/admin route (strip -> /admin)", balance_route_ok),
+    ("/analytics/admin route (strip -> /admin)", analytics_route_ok),
+    ("no bare /admin route (namespaced only)", not route_bare_admin),
+    ("no /internal route on the internal edge", not route_internal),
+    ("strip X-User-Id + X-Roles (anti-spoof)", strip_both),
+    ("RS256 alg pin", alg_pin),
+    ("JWKS signature verify", sig_verify),
+    (f"exact issuer '{issuer}'", iss_check),
+    (f"aud contains '{aud}'", aud_check),
+    ("exp/nbf expiry check", exp_check),
+    (f"'{admin}' role gate (403)", role_gate),
+    ("inject X-User-Id + X-Roles", inject_both),
+    ("rate-limiting plugin", has_ratelimit),
+]
+problems = [label for label, ok in checks if not ok]
+for label, ok in checks:
+    print(f"    {'OK ' if ok else '-> MISSING'} {label}")
+sys.exit(1 if problems else 0)
+PY
+  local prc=$?
+  case $prc in
+    0) pass "internal-kong config parses; /balance/admin + /analytics/admin (strip->/admin) + '$ADMIN_ROLE'-gate(403) + strip-both/RS256 verify/iss/aud/exp/inject-both + rate-limiting" ;;
+    2) fail "internal-kong declarative config does NOT parse (see error above)" ;;
+    *) fail "internal-kong declarative config is missing a security-critical intent (see -> lines above)" ;;
+  esac
+}
+
+# ==================================================================================
+# INTERNAL EDGE — RUNTIME CHECKS (need the FULL stack up; reached via :INTERNAL_HTTP_PORT)
+# ==================================================================================
+
+# Check I4 (runtime, INTERNAL VERTICAL SLICE) — admin token -> GET /balance/admin/whoami AND
+# /analytics/admin/whoami -> 200 with { userId==sub, roles contains 'admin' }. Proves BOTH
+# upstreams behind the internal edge, the admin gate letting an admin through, and that Kong
+# strips the /<ns>/admin namespace so each upstream serves its built /admin/whoami.
+check_internal_vertical_slice() {
+  section "Check I4 (runtime) — internal vertical slice: admin token -> /balance/admin/whoami + /analytics/admin/whoami -> 200, userId==sub, roles has '$ADMIN_ROLE'"
+  if [ -z "$ADMIN_TOKEN" ]; then
+    skip "no demo-admin token available — the internal vertical slice needs one; manual checkpoint in README"
+    return
+  fi
+  [ -z "$PYTHON" ] && { skip "python not available to assert the JSON body"; return; }
+  local bad=0 pair name url
+  for pair in "balance|$(balance_admin_url)" "analytics|$(analytics_admin_url)"; do
+    name="${pair%%|*}"; url="${pair#*|}"
+    curl_probe "$url" -H "Authorization: Bearer $ADMIN_TOKEN"
+    if [ "$PROBE_CODE" != "200" ]; then
+      fail "[$name] $url -> HTTP $PROBE_CODE (expected 200) — admin token did not reach the $name upstream. Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1; continue
+    fi
+    if printf '%s' "$PROBE_HEADERS" | grep -qi '^x-kong-upstream-latency:'; then UPSTREAM_MARKER="x-kong-upstream-latency"; fi
+    if assert_whoami_body "$ADMIN_SUB" "$ADMIN_ROLE" "$PROBE_BODY"; then
+      info "[$name] 200 with userId==sub and roles including '$ADMIN_ROLE' (Kong stripped -> upstream /admin/whoami)"
+    else
+      fail "[$name] whoami 200 but the echoed identity is wrong (Kong injected the wrong X-User-Id/X-Roles)"; bad=1
+    fi
+  done
+  [ "$bad" -eq 0 ] && pass "internal vertical slice GREEN: admin token -> /balance/admin/whoami AND /analytics/admin/whoami both 200 with userId==sub and 'admin' role"
+}
+
+# Check I5 (runtime, ADMIN-ROLE GATE — DoD "customer -> /admin -> 403") — a valid CUSTOMER
+# token (authenticated, but role `customer`, NOT `admin`) must be REJECTED at the admin plane
+# with 403, never reaching an upstream — on BOTH admin routes (balance AND analytics), since
+# the gate is anchored in the pre-function on each route. A 200 here = any authenticated user
+# reaching /admin.
+check_internal_role_gate() {
+  section "Check I5 (runtime) — customer token -> /balance/admin + /analytics/admin -> 403 (admin-role gate; DoD 'customer -> /admin -> 403')"
+  if [ -z "$CUSTOMER_TOKEN" ]; then
+    skip "no demo-customer token available — cannot test the admin-role rejection"
+    return
+  fi
+  local bad=0 pair name url
+  for pair in "balance|$(balance_admin_url)" "analytics|$(analytics_admin_url)"; do
+    name="${pair%%|*}"; url="${pair#*|}"
+    curl_probe "$url" -H "Authorization: Bearer $CUSTOMER_TOKEN"
+    if [ "$PROBE_CODE" = "200" ] || reached_upstream "$PROBE_BODY" "$PROBE_HEADERS"; then
+      fail "[$name] a customer token reached the ADMIN plane (HTTP $PROBE_CODE) — the admin-role gate is not enforced (any authenticated user could reach /$name/admin!). Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
+    elif [ "$PROBE_CODE" = "403" ]; then
+      info "[$name] customer token -> 403 (admin-role gate enforced)"
+    elif [ "$PROBE_CODE" = "401" ]; then
+      info "[$name] customer token -> 401 (rejected at the edge; 403 is the ideal code for authenticated-but-wrong-role)"
+    else
+      fail "[$name] customer token -> HTTP $PROBE_CODE (expected 403/401 rejection). Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
+    fi
+  done
+  [ "$bad" -eq 0 ] && pass "customer token is rejected at BOTH admin routes (/balance/admin + /analytics/admin) and never reaches an upstream (403/401; DoD 'customer -> /admin -> 403')"
+}
+
+# Check I6 (runtime) — internal edge: no token / malformed / tampered-signature -> 401,
+# rejected AT KONG (never reaches an upstream). Mirrors the public Check 6.
+check_internal_bad_tokens() {
+  section "Check I6 (runtime) — internal edge: no token / malformed / tampered-signature -> 401 (never reaches an upstream)"
+  local bad=0
+  curl_probe "$(balance_admin_url)"
+  if [ "$PROBE_CODE" = "401" ] && ! reached_upstream "$PROBE_BODY" "$PROBE_HEADERS"; then
+    info "no token -> 401 at the edge"
+  else
+    fail "no token -> HTTP $PROBE_CODE (want 401 from the edge); reached_upstream=$(reached_upstream "$PROBE_BODY" "$PROBE_HEADERS" && echo yes || echo no). Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
+  fi
+  curl_probe "$(balance_admin_url)" -H "Authorization: Bearer not-a-real.jwt.value"
+  if [ "$PROBE_CODE" = "401" ] && ! reached_upstream "$PROBE_BODY" "$PROBE_HEADERS"; then
+    info "malformed bearer -> 401 at the edge"
+  else
+    fail "malformed bearer -> HTTP $PROBE_CODE (want 401 from the edge)"; bad=1
+  fi
+  if [ -n "$ADMIN_TOKEN" ]; then
+    local tampered; tampered="$(tamper_signature "$ADMIN_TOKEN")"
+    curl_probe "$(balance_admin_url)" -H "Authorization: Bearer $tampered"
+    if [ "$PROBE_CODE" = "401" ] && ! reached_upstream "$PROBE_BODY" "$PROBE_HEADERS"; then
+      info "tampered-signature token -> 401 at the edge (JWKS signature genuinely verified)"
+    else
+      fail "tampered-signature token -> HTTP $PROBE_CODE (want 401) — internal-kong may not verify the JWT signature. Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
+    fi
+  else
+    skip "tampered-signature sub-check needs a real admin token (none minted) — malformed-token rejection still asserted"
+  fi
+  [ "$bad" -eq 0 ] && pass "internal edge rejects no-token/malformed/tampered tokens with 401 at the edge; none reach an upstream"
+}
+
+# Check I7 (runtime, ANTI-SPOOF — MONEY-SAFETY) — the internal trust boundary:
+#  (a) admin token + spoofed X-User-Id/X-Roles -> whoami reflects the TOKEN (userId==sub,
+#      roles has 'admin', the spoofed 'superuser' is NOT present) — Kong stripped + re-injected.
+#  (b) spoofed headers with NO token -> 401, never reaches an upstream.
+check_internal_anti_spoof() {
+  section "Check I7 (runtime, MONEY-SAFETY) — internal edge: client-supplied X-User-Id/X-Roles are stripped (anti-spoof); header-only spoof rejected on both admin routes"
+  local bad=0
+  if [ -n "$ADMIN_TOKEN" ] && [ -n "$PYTHON" ]; then
+    curl_probe "$(balance_admin_url)" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "X-User-Id: spoofed-attacker-id" \
+      -H "X-Roles: superuser,customer"
+    if [ "$PROBE_CODE" != "200" ]; then
+      fail "(a) admin token+spoof -> HTTP $PROBE_CODE (expected 200). Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
+    elif "$PYTHON" - "$ADMIN_SUB" "$ADMIN_ROLE" "$PROBE_BODY" <<'PY'
+import sys, json
+sub, admin, body = sys.argv[1], sys.argv[2], sys.argv[3]
+d = json.loads(body)
+bad = False
+uid = d.get("userId")
+if uid == "spoofed-attacker-id":
+    print("  -> userId is the SPOOFED value — Kong did NOT strip the client X-User-Id (identity spoofing!)"); bad = True
+elif uid == sub:
+    print(f"  (a) userId == token sub ('{sub}'), NOT the spoofed header")
+else:
+    print(f"  -> userId '{uid}' is neither the sub nor the spoof — unexpected injected identity"); bad = True
+roles = d.get("roles") or []
+if isinstance(roles, str): roles = [roles]
+if "superuser" in roles:
+    print(f"  -> roles contains the SPOOFED 'superuser' {roles} — X-Roles leaked to the upstream (privilege injection!)"); bad = True
+elif admin in roles:
+    print(f"  (a) roles reflects the token ('{admin}'), spoofed 'superuser' stripped")
+else:
+    print(f"  -> roles '{roles}' does not reflect the token role '{admin}'"); bad = True
+sys.exit(1 if bad else 0)
+PY
+    then
+      info "(a) with a valid admin token, spoofed X-User-Id/X-Roles are stripped and the token identity wins"
+    else
+      fail "(a) spoofed client headers leaked to the upstream on the internal edge — the trust boundary is broken"; bad=1
+    fi
+  else
+    skip "(a) token+spoof sub-check needs a real admin token (none minted) — the header-only spoof (b) still runs"
+  fi
+  # (b) spoofed admin headers with NO token -> 401 on BOTH admin routes (the gate is anchored
+  # per-route in the pre-function; an ungated analytics route would let a forged X-User-Id/
+  # X-Roles: admin reach analytics, whose own guard trusts injected headers — a real bypass).
+  local pair name url
+  for pair in "balance|$(balance_admin_url)" "analytics|$(analytics_admin_url)"; do
+    name="${pair%%|*}"; url="${pair#*|}"
+    curl_probe "$url" \
+      -H "X-User-Id: spoofed-attacker-id" \
+      -H "X-Roles: admin,superuser"
+    if [ "$PROBE_CODE" = "401" ] && ! reached_upstream "$PROBE_BODY" "$PROBE_HEADERS"; then
+      info "[$name] (b) spoofed X-User-Id/X-Roles with NO token -> 401 at the edge (header alone is never trusted)"
+    else
+      fail "[$name] (b) spoofed headers with no token -> HTTP $PROBE_CODE (want 401) / reached_upstream=$(reached_upstream "$PROBE_BODY" "$PROBE_HEADERS" && echo yes || echo no) — a forged X-User-Id/X-Roles was trusted as an admin identity (auth bypass!). Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
+    fi
+  done
+  [ "$bad" -eq 0 ] && pass "internal edge strips client X-User-Id/X-Roles on both admin routes: token identity wins, and a spoofed admin header alone never authenticates"
+}
+
+# Check I8 (runtime, DEFAULT-DENY + /internal) — via :INTERNAL_HTTP_PORT, none of these reach
+# an upstream: the bare (un-namespaced) /admin, /balance/internal, /analytics/internal,
+# /internal, and /balance/api (the api namespace is public-only). (spec 06: default-deny;
+# "/internal/* is not routable from either edge".)
+check_internal_default_deny() {
+  section "Check I8 (runtime) — internal default-deny: bare /admin, /balance/internal, /analytics/internal, /internal, /balance/api do not reach an upstream"
+  local bad=0 auth=()
+  [ -n "$ADMIN_TOKEN" ] && auth=(-H "Authorization: Bearer $ADMIN_TOKEN")
+  local pair probe label
+  for pair in \
+    "/admin/whoami|the un-namespaced bare /admin" \
+    "/balance/internal/whoami|/balance/internal (internal surface must never be routable)" \
+    "/analytics/internal/whoami|/analytics/internal (internal surface must never be routable)" \
+    "/internal/whoami|/internal (never routable from any edge)" \
+    "/balance/api/whoami|/balance/api (the api namespace is public-only)"; do
+    probe="${pair%%|*}"; label="${pair#*|}"
+    curl_probe "$(internal_base)${probe}" "${auth[@]}"
+    if reached_upstream "$PROBE_BODY" "$PROBE_HEADERS"; then
+      fail "$label reached an upstream via the INTERNAL edge (path '$probe', HTTP $PROBE_CODE) — default-deny is broken. Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
+    else
+      info "$label -> HTTP $PROBE_CODE, did not reach an upstream"
+    fi
+  done
+  [ "$bad" -eq 0 ] && pass "internal default-deny holds: only /balance/admin + /analytics/admin route; bare /admin, *//internal, /internal and /balance/api do not"
+}
+
+# Check I9 (runtime, RATE-LIMITING) — an authenticated admin burst on /balance/admin/whoami
+# eventually returns 429. (DoD: rate limiting on the admin/money routes.) Run LAST.
+check_internal_rate_limiting() {
+  section "Check I9 (runtime) — a burst of authenticated /balance/admin requests eventually returns 429 (rate limiting)"
+  if [ -z "$ADMIN_TOKEN" ]; then
+    skip "internal rate-limit check needs a valid admin token so requests pass the gate before hitting the limiter (none minted)"
+    return
+  fi
+  local limit burst
+  limit="$(detect_rate_limit "$(find_kong_internal_config)")"
+  if [ -n "$limit" ] && [ "$limit" -gt 0 ] 2>/dev/null; then
+    burst=$((limit + 5)); [ "$burst" -gt 400 ] && burst=400
+    info "configured limit ~${limit}/window (from internal-kong config); bursting up to $burst requests"
+  else
+    burst=150
+    info "rate limit not discoverable from config; bursting up to $burst requests"
+  fi
+  local i code got429=0
+  for ((i=1; i<=burst; i++)); do
+    code="$(curl -s --max-time 15 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADMIN_TOKEN" "$(balance_admin_url)" 2>/dev/null)"
+    if [ "$code" = "429" ]; then got429=1; info "request #$i -> 429 (rate limit tripped)"; break; fi
+  done
+  if [ "$got429" -eq 1 ]; then
+    pass "rate limiting triggers on the internal edge: a burst on /balance/admin returned HTTP 429 (DoD)"
+  else
+    fail "no 429 within $burst authenticated /balance/admin requests — rate limiting does not trigger on the internal admin route (or the limit is set impractically high)"
+  fi
+}
 
 # ----------------------------------------------------------------------------------
 # Phase runners
@@ -1101,27 +1671,22 @@ edge_reachable() {
 run_static() {
   section "STATIC CHECKS (no live stack; docker CLI + python)"
   load_env_values
+  # Public edge.
   check_compose_config
   check_public_edge_topology
   check_kong_declarative
+  # Internal edge.
+  check_internal_compose
+  check_internal_edge_topology
+  check_kong_internal_declarative
 }
 
-run_runtime() {
-  section "RUNTIME CHECKS (need the FULL stack up: docker compose up)"
-  load_env_values
-  if ! command -v curl >/dev/null 2>&1; then
-    skip "curl not installed — runtime checks 4-9 need it to drive the edge"; return
-  fi
-  if ! edge_reachable; then
-    skip "the public edge is not reachable at $(edge_base) — bring the full stack up first ('docker compose up -d'); runtime checks 4-9 skipped (never a false pass)"
-    return
-  fi
+# Public-plane runtime checks (reached via :PUBLIC_HTTP_PORT).
+run_public_runtime() {
   info "public edge reachable at $(edge_base)"
-
   # Mint a real demo-customer token (Authorization-Code + PKCE). Token-dependent checks
   # SKIP cleanly if this cannot be done headlessly (see NOTE + README manual checkpoint).
-  mint_customer_token || info "proceeding without a token; token-dependent checks will SKIP"
-
+  mint_customer_token || info "proceeding without a customer token; token-dependent public checks will SKIP"
   check_vertical_slice
   check_no_token_401
   check_bad_tokens_401
@@ -1130,6 +1695,41 @@ run_runtime() {
   check_default_deny
   # Rate-limiting consumes budget for the current window — run it LAST.
   check_rate_limiting
+}
+
+# Internal-plane runtime checks (reached via :INTERNAL_HTTP_PORT). Needs a demo-admin token
+# (and a demo-customer token for the 403 gate case).
+run_internal_runtime() {
+  info "internal edge reachable at $(internal_base)"
+  mint_admin_token    || info "proceeding without an admin token; admin-token internal checks will SKIP"
+  mint_customer_token || info "proceeding without a customer token; the admin-gate 403 check will SKIP"
+  check_internal_vertical_slice
+  check_internal_role_gate
+  check_internal_bad_tokens
+  check_internal_anti_spoof
+  check_internal_default_deny
+  # Rate-limiting consumes budget for the current window — run it LAST.
+  check_internal_rate_limiting
+}
+
+run_runtime() {
+  section "RUNTIME CHECKS (need the FULL stack up: docker compose up)"
+  load_env_values
+  if ! command -v curl >/dev/null 2>&1; then
+    skip "curl not installed — runtime checks need it to drive the edges"; return
+  fi
+  local ran=0
+  if edge_reachable; then
+    run_public_runtime; ran=1
+  else
+    skip "the PUBLIC edge is not reachable at $(edge_base) — bring the full stack up ('docker compose up -d'); public runtime checks skipped (never a false pass)"
+  fi
+  if internal_edge_reachable; then
+    run_internal_runtime; ran=1
+  else
+    skip "the INTERNAL edge is not reachable at $(internal_base) — bring the full stack up ('docker compose up -d'); internal runtime checks skipped (never a false pass)"
+  fi
+  [ "$ran" -eq 1 ] || info "neither edge is up; run 'docker compose up -d' then re-run the runtime suite"
 }
 
 # Idempotent cleanup of anything this suite creates; safe on any exit.
