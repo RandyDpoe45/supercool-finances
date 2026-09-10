@@ -18,9 +18,13 @@ working on a clean machine.
 - Multi-stage build per SPA (`node build → static output`), output served by nginx.
 - **Serving layout** (resolve the open question from spec 07): the two public SPAs
   share `public-nginx`. Baseline = **path-based**: `/` → client-app, `/otp/` →
-  otp-app, `/api/` → proxy to `public-kong`, each SPA location with its own
-  `try_files … /index.html` fallback. `internal-nginx`: `/` → admin-app, `/admin/`
-  → proxy to `internal-kong`.
+  otp-app, and the **service-namespaced** API path `/balance/api/` → proxy to
+  `public-kong`, each SPA location with its own `try_files … /index.html` fallback.
+  `internal-nginx`: `/` → admin-app, with `/balance/admin/` and `/analytics/admin/`
+  → proxy to `internal-kong`. The `/<service>/<surface>` namespacing (Kong strips
+  `/<service>`) is established in spec 06
+  ([ADR-17](../docs/DECISIONS.md#adr-17--service-namespaced-edge-routing)); the
+  public `/balance/api/` proxy already exists in `infra/nginx-public/nginx.conf`.
 - Baseline packaging = bake the built bundles into per-plane nginx images
   (public-nginx image carries client + otp; internal-nginx carries admin).
 

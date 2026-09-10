@@ -429,3 +429,46 @@ single source of truth that keeps the duplicated contracts aligned.
 **Rejected.** A shared backend workspace with `libs/*` (couples the two services; a
 shared-lib change forces coordinated releases). A shared frontend component library
 across the three SPAs (same coupling; contradicts atomic folders).
+
+---
+
+## ADR-17 — Service-namespaced edge routing
+
+**Decision.** External edge paths are **service-namespaced** — `/<service>/<surface>`
+— on **both** planes, and Kong **strips the `/<service>` segment** so each upstream
+still receives its *built* surface ([ADR-12](#adr-12--endpoint-prefix-convention-as-the-exposure-contract)):
+`/api`, `/admin`.
+
+- **Public plane:** `/balance/api/*` → `balance-service` `/api/*`.
+- **Internal plane (built later):** `/balance/admin/*` → `balance` `/admin/*`,
+  `/analytics/admin/*` → `analytics` `/admin/*`.
+
+Mechanically (public Kong): the route matches `/balance/api` with `strip_path: true`
+(removing the matched prefix), and the Kong **service `path` is `/api`** (Kong then
+prepends it), so `/balance/api/whoami` reaches the upstream as `/api/whoami`. Only the
+explicitly-namespaced routes exist — **default-deny** everything else.
+
+**Why.** Lets **multiple services share one plane/gateway** while each keeps the
+prefix surface ADR-12 gives it — no per-service host or port, and the gateway
+allowlist stays the single, auditable exposure contract. The namespace names *which*
+service; the surface (`/api` vs `/admin`) still names *which trust tier*.
+
+**The strip is security-load-bearing.** The balance service's gateway guard enforces
+the admin-role check **only when the first path segment is `admin`**
+(`common/identity/gateway-identity.guard.ts`). If the `/<service>` segment were **not**
+stripped, an `/balance/admin/...` request would present first-segment **`balance`** to
+the guard, which would then **skip the admin check** — a privilege-escalation bypass.
+So the edge MUST deliver the canonical surface segment first (here via
+`strip_path` + the `/api` service path), and the public plane must **never** route
+any `/*/admin` at all (admin lives only behind the internal gateway — ADR-12).
+
+**Relation to ADR-12.** ADR-12 defines the surface prefixes (`/api` / `/admin` /
+`/internal`) as the exposure + auth contract; ADR-17 puts a **service namespace in
+front of them at the edge and strips it back off**, so every ADR-12 guarantee holds
+at the upstream unchanged.
+
+**Rejected.** Per-service hostname or port at the edge (more moving parts; no shared
+plane; not a single auditable allowlist). **Not** stripping the namespace (breaks the
+guard's first-segment check — a security bug, per above). Carrying the service name in
+a header/query param instead of the path (not path-routable or default-deny-able at
+the gateway).

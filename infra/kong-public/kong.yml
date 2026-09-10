@@ -2,9 +2,11 @@
 # public-kong — DB-less declarative config (spec 06, public edge).
 #
 # THE ALLOWLIST *IS* THE EXPOSED SURFACE (ADR-12): the only route declared here
-# is `/api` -> balance-service. There is NO catch-all, so anything else is a
-# 404 at the gateway (default-deny). Adding a public endpoint means adding a
-# route here — exposure is explicit and auditable.
+# is `/balance/api` -> balance-service (SERVICE-NAMESPACED, ADR-17: Kong strips the
+# `/balance` service segment so the upstream still gets its built `/api` surface).
+# There is NO catch-all, so anything else — bare `/api`, `/balance/admin`, `/admin`
+# — is a 404 at the gateway (default-deny; admin stays unreachable on this plane).
+# Adding a public endpoint means adding a route here — explicit and auditable.
 #
 # Auth model: modern OSS Kong 3.x with JWKS verification implemented in a
 # `pre-function` (serverless-functions) using vetted crypto — Kong's core
@@ -12,7 +14,7 @@
 # verify. We deliberately OWN this security-critical Lua at the money boundary
 # (developer ruling), rather than depend on the abandoned `jwt-keycloak` rock.
 #
-# Plugin chain on the /api route (by Kong access-phase priority, high -> low):
+# Plugin chain on the /balance/api route (by Kong access-phase priority, high -> low):
 #   pre-function (1000000) — strip inbound identity, JWKS-verify, inject identity
 #   cors (2000)            — CORS + preflight for the SPA origin
 #   rate-limiting (901)    — per-IP fixed-window cap (429 on burst)
@@ -27,14 +29,22 @@ _transform: true
 services:
   - name: balance-service-api
     # In-network upstream on app-public (spec 00 §2). Plain HTTP on localhost.
-    url: http://balance-service:3000
+    # The service PATH is `/api`: Kong prepends it to the stripped request path,
+    # so a route match on `/balance/api` still delivers the built `/api/...`
+    # surface to balance-service (its controllers + the guard's first-segment
+    # check are unchanged). See docs/DECISIONS.md (ADR-17) + kong-public/README.md.
+    url: http://balance-service:3000/api
     routes:
-      - name: api
+      - name: balance-api
+        # Service-namespaced external path (ADR-17). `strip_path: true` removes
+        # the matched `/balance/api` prefix; the service path `/api` is then
+        # prepended, so `/balance/api/whoami` -> upstream `/api/whoami`. The strip
+        # is SECURITY-LOAD-BEARING: the balance guard only enforces the admin-role
+        # check when the first path segment is `admin`, so `/balance/admin` must
+        # NEVER reach it un-namespaced — and here only `/balance/api` is routed.
         paths:
-          - /api
-        # Preserve the /api prefix: the balance service routes on it and its
-        # probe is GET /api/whoami. Do NOT strip.
-        strip_path: false
+          - /balance/api
+        strip_path: true
         plugins:
           # --- Identity gate: strip -> JWKS-verify -> inject (see README). ----
           - name: pre-function

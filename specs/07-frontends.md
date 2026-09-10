@@ -21,8 +21,13 @@ transport (06) exist.
   wiring — **no shared component library**. Triplication across the three apps is the
   accepted price of keeping each folder atomic (it could be its own repo); see
   `CLAUDE.md` ([ADR-16](../docs/DECISIONS.md#adr-16--self-contained-components-no-shared-code)).
-- **Same-origin APIs:** each app calls its own nginx origin (`/api` or `/admin`),
-  so no CORS gymnastics in the browser.
+- **Same-origin APIs:** each app calls its own nginx origin, so no CORS gymnastics
+  in the browser. **Edge paths are service-namespaced** (spec 06,
+  [ADR-17](../docs/DECISIONS.md#adr-17--service-namespaced-edge-routing)): same-origin
+  calls target **`/balance/api`** (public plane) and **`/balance/admin`** /
+  **`/analytics/admin`** (internal plane) — Kong strips `/<service>` so each service
+  still receives its built `/api` or `/admin` surface. (These SPA base paths are wired
+  in the frontends' own workstream, not in spec 06.)
 - **Timezone / dates:** the server is **UTC-only**; each app converts UTC↔**Mexico
   City time (IANA `America/Mexico_City`)** at the edges — parse the ISO-8601 `Z`
   timestamps for display and convert any user-entered date back to UTC before

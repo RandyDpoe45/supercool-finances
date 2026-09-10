@@ -376,8 +376,10 @@ services:
   # Public API gateway (spec 06, public edge) — the PEP for the customer plane.
   # Stock modern Kong 3.x (pinned), DB-LESS from the committed declarative kong.yml
   # (config as code, spec 00 §4). The allowlist in that file IS the exposed surface
-  # (ADR-12): only /api -> balance-service, default-deny everything else. On the
-  # /api route a `pre-function` (serverless-functions) OWNS the security-critical
+  # (ADR-12): only the SERVICE-NAMESPACED /balance/api -> balance-service (ADR-17:
+  # Kong strips /balance so the upstream still gets /api), default-deny everything
+  # else (bare /api, /balance/admin, /admin all 404 — admin off this plane). On that
+  # route a `pre-function` (serverless-functions) OWNS the security-critical
   # auth (developer ruling): it STRIPS any client-supplied identity headers,
   # verifies the token against Keycloak's JWKS (RS256 signature + iss + aud + exp +
   # realm role `customer`) using vetted crypto (Kong's core jwt_parser +
@@ -429,9 +431,10 @@ services:
       - app-public
 
   # Public front door (spec 06, public edge) — the ONLY host-published surface of
-  # the public plane. Reverse-proxies /api/* -> public-kong (preserving the /api
-  # prefix; the balance service routes on it) and will serve the customer + OTP
-  # SPA bundles at / in spec 08 (placeholder root until then). Stock nginx image
+  # the public plane. Reverse-proxies the service-namespaced /balance/api/* ->
+  # public-kong (ADR-17: Kong strips /balance so balance-service gets /api/*) and
+  # will serve the customer + OTP SPA bundles at / in spec 08 (placeholder root
+  # until then). Stock nginx image
   # with a read-only mounted conf (config as code); no custom image needed. Plain
   # HTTP on localhost — TLS is NOT terminated here for this demo (spec 06, open
   # question resolved). Joins edge-public ONLY (it never reaches services
@@ -451,7 +454,7 @@ services:
       retries: 5
       start_period: 5s
     depends_on:
-      # The gateway it fronts must be healthy first (otherwise /api -> 502).
+      # The gateway it fronts must be healthy first (otherwise /balance/api -> 502).
       public-kong:
         condition: service_healthy
     networks:

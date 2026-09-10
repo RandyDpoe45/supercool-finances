@@ -2,9 +2,13 @@
 
 Acceptance harness for the **public plane** of transport: `public-nginx` (:8080) →
 `public-kong` → `balance-service`, plus the **vertical-slice checkpoint**
-(`GET /api/whoami` echoes the Kong-injected identity). It is the acceptance gate for the
-public-plane lines of the Definition of Done in
+(`GET /balance/api/whoami` echoes the Kong-injected identity). It is the acceptance gate
+for the public-plane lines of the Definition of Done in
 [`specs/06-transport.md`](../../specs/06-transport.md).
+
+> **Routing (developer ruling):** the external public path is namespaced **`/balance/api/*`**;
+> Kong **strips `/balance`** so the balance service still serves its built `/api/*` surface
+> (e.g. `/api/whoami`). The bare, un-namespaced `/api` is **not** routed.
 
 The checks are written **from the spec**, not from the implementor's nginx/Kong config:
 each asserts an intended invariant and is built to **fail on a real defect**. Host ports
@@ -51,7 +55,7 @@ docker compose up -d --build  # postgres, keycloak, public-kong, public-nginx, b
 bash tests/transport/run.sh runtime
 ```
 
-It only ever issues `GET /api/whoami` (a read-only identity echo) and a burst against it,
+It only ever issues `GET /balance/api/whoami` (a read-only identity echo) and a burst against it,
 so it is **non-destructive** — it moves no money and mutates no ledger state, and it never
 tears down a stack it did not create.
 
@@ -94,7 +98,7 @@ slice by hand, obtain a token via the browser and re-run one probe:
 2. Probe the edge with it:
    ```bash
    TOKEN=<paste-access-token>
-   curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/whoami
+   curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8080/balance/api/whoami
    # expect: HTTP 200 and body {"userId":"<token sub>","roles":["customer", ...]}
    ```
 
@@ -115,19 +119,19 @@ check_vertical_slice; check_anti_spoof
 |---|---|---|
 | 1 | `docker compose config` resolves **and** `public-nginx` + `public-kong` + `balance-service` are defined | Task item 7 ("compose config valid"); the public edge is wired into the spine. FAILs until the implementor adds the services. |
 | 2 | Only `public-nginx` host-publishes `:${PUBLIC_HTTP_PORT}` (on `edge-public`); `public-kong` + `balance-service` publish **nothing** | spec 00 §3 "nothing host-published except the edges" — the gateway and app are reachable only through nginx. |
-| 3 | The public-kong declarative config **parses** and declares `/api → balance-service` + the identity-gate intents: **strip** both `X-User-Id`/`X-Roles`, **RS256** pin + JWKS **signature verify**, exact **issuer**, **aud** `supercool-api`, **exp/nbf**, **customer** 403 gate, **inject** both headers, + rate-limiting | Task item 7 ("Kong declarative config parses"); the security-critical intents of spec 06, asserted against the **pre-function** shape (see mechanism note below). Tolerant of formatting; FAILs on a dropped strip/role-gate or invalid YAML. |
+| 3 | The public-kong declarative config **parses** and declares a **namespaced `/balance/api` route** (not bare `/api`) with **`/balance` stripped → upstream `/api`**, targeting `balance-service`, plus the identity-gate intents: **strip** both `X-User-Id`/`X-Roles`, **RS256** pin + JWKS **signature verify**, exact **issuer**, **aud** `supercool-api`, **exp/nbf**, **customer** 403 gate, **inject** both headers, + rate-limiting | Task item 7 ("Kong declarative config parses"); the routing ruling + the security-critical intents of spec 06, asserted against the **pre-function** shape (see mechanism note below). Tolerant of formatting; **FAILs** on a bare-`/api` route, a dropped strip, a dropped role-gate, or invalid YAML. |
 
 ### Runtime (need the FULL stack up; reached via `:${PUBLIC_HTTP_PORT}`)
 
 | # | Check | Proves (DoD line) |
 |---|---|---|
-| 4 | **Vertical slice** — real demo-customer token → `GET /api/whoami` → **200**, body `userId == token sub`, `roles` contains `customer` | "Valid customer token → /api reaches the balance service with injected `X-User-Id`"; **"Vertical slice is green."** |
+| 4 | **Vertical slice** — real demo-customer token → `GET /balance/api/whoami` → **200**, body `userId == token sub`, `roles` contains `customer` (proves `/balance` is stripped to the upstream `/api/whoami`) | "Valid customer token → /api reaches the balance service with injected `X-User-Id`"; **"Vertical slice is green."** |
 | 5 | **No token → 401** at Kong, and the response is **not** from the balance service (no `{error:{…,requestId}}` envelope / no upstream marker) | "missing/invalid token → 401 at Kong" — proven to be rejected **at the edge**, not by the app. |
 | 6 | **Invalid token → 401** — a **malformed** bearer and a **tampered-signature** token (real header/payload, flipped signature) both 401 at the edge | "invalid token → 401"; the tampered case proves Kong genuinely **verifies the JWKS signature**. (Expiry is an **opt-in** slow test — see below.) |
 | 7 | **Anti-spoof (money-safety)** — (a) valid token **+** spoofed `X-User-Id`/`X-Roles: admin` → whoami still reflects the **token** (`userId==sub`, roles has `customer`, **no** `admin`); (b) spoofed headers **without** a token → still **401**, never reaches the app | "A client-supplied `X-User-Id` header is stripped before the upstream." The sharpest test: catches identity spoofing **and** header-only privilege escalation / auth bypass. |
 | 7b | **Customer-role gate** — a **valid** token lacking `customer` (demo-admin, role `admin` only) is **rejected** at `/api` (403 ideal), never reaching the app as an authorized customer | The spec's "acl (require customer)" **intent**, proven behaviorally: the public edge requires the `customer` realm role. |
 | 8 | **Rate limiting** — a burst of authenticated `/api` requests eventually returns **429** | "Rate limiting triggers on the auth/money routes." Uses a valid token so requests pass auth and hit the limiter; run **last** so the consumed budget can't affect other checks. |
-| 9 | **Default-deny** — a non-`/api` path, `/admin`, **and** `/internal` do **not** reach the balance service via the public edge | spec 06 "Routes **only** `/api/*` → balance-service. Default-deny everything else"; and "`/internal/*` is not routable from either edge" (public-plane half); the public edge must not expose the admin/internal surfaces. |
+| 9 | **Default-deny** — a random non-`/api` path, the **un-namespaced bare `/api`**, **`/balance/admin`**, the bare `/admin`, **and** `/internal` do **not** reach the balance service via the public edge | spec 06 "Routes **only** `/balance/api/*` → balance-service. Default-deny everything else"; and "`/internal/*` is not routable from either edge" (public-plane half); the public edge must not expose the bare `/api`, admin, or internal surfaces. |
 
 ### How "reached the balance service" is decided
 
@@ -149,7 +153,7 @@ on the abandoned `jwt-keycloak` rock or Kong's `acl` plugin (which needs consume
 under DB-less JWKS validation). So the intents — strip inbound identity, RS256 pin + JWKS
 `pub:verify`, exact `iss`, `aud`, `exp`/`nbf`, the `customer` 403 gate, and identity injection
 — live as **Lua inside the pre-function block** of `kong.yml`. The only other plugins on the
-`/api` route are `cors` and `rate-limiting`.
+`/balance/api` route are `cors` and `rate-limiting`.
 
 Because the DoD is behavioral, the tests assert the **intent**, not a specific plugin:
 
@@ -159,7 +163,7 @@ Because the DoD is behavioral, the tests assert the **intent**, not a specific p
   re-swap won't false-fail. It still FAILs on a dropped strip/role-gate or invalid YAML.
 - **Checks 4–9** prove the behavior black-box, unchanged by the mechanism: the vertical
   slice (Check 4), the anti-spoof strip (Check 7), and the **customer-role gate** (Check 7b —
-  a valid non-customer token is rejected at `/api`) are the real acceptance evidence.
+  a valid non-customer token is rejected at `/balance/api`) are the real acceptance evidence.
 
 ## Skips you may see (never false passes)
 

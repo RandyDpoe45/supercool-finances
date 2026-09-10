@@ -10,8 +10,9 @@
 #
 # The wire contract under test (Step-1 coordination):
 #   public entrypoint  http://localhost:${PUBLIC_HTTP_PORT}   (public-nginx, =8080)
-#     -> proxies /api/* -> public-kong -> balance-service:3000
-#   vertical slice     GET /api/whoami -> 200 JSON { userId, roles } echoing the
+#     -> proxies /balance/* -> public-kong (route /balance/api, STRIPS /balance)
+#     -> balance-service:3000 (serves its built /api/*)
+#   vertical slice     GET /balance/api/whoami -> 200 JSON { userId, roles } echoing the
 #                      Kong-injected identity (X-User-Id = token sub; X-Roles = roles).
 #   Kong enforces      valid signature (JWKS) + exp + iss + aud=supercool-api + realm
 #                      role `customer`; and STRIPS any client-supplied X-User-Id/X-Roles
@@ -196,7 +197,9 @@ curl_probe() {
 }
 
 edge_base()  { printf 'http://localhost:%s' "$PUBLIC_HTTP_PORT"; }
-whoami_url() { printf '%s/api/whoami' "$(edge_base)"; }
+# External public path is namespaced: /balance/api/* ; Kong strips /balance so the
+# balance service still serves its built /api/whoami (developer routing ruling).
+whoami_url() { printf '%s/balance/api/whoami' "$(edge_base)"; }
 alias_base() { printf 'http://%s:%s' "$ALIAS" "$KEYCLOAK_PORT"; }
 
 # Did a response come FROM the balance service (i.e. reach the upstream)? Balance
@@ -521,7 +524,8 @@ PY
 # file does not parse. Runtime checks 4-9 prove the behavior black-box.
 #
 # Intents asserted (all must be present):
-#   * `/api` route -> the balance upstream (the allowlist == the exposed surface);
+#   * a NAMESPACED `/balance/api` route -> the balance upstream (developer routing ruling),
+#     with `/balance` STRIPPED so the upstream still receives `/api` — NOT a bare `/api`;
 #   * ANTI-SPOOF strip of BOTH X-User-Id AND X-Roles (before injection);
 #   * RS256 algorithm pin + a JWKS signature VERIFY (not just claim reads);
 #   * exact issuer match + `aud` contains supercool-api + exp/nbf expiry check;
@@ -529,7 +533,7 @@ PY
 #   * injection of BOTH X-User-Id AND X-Roles from the token;
 #   * a rate-limiting plugin.
 check_kong_declarative() {
-  section "Check 3 (static) — public-kong config: parses + /api route + strip/RS256/iss/aud/exp/customer-gate/inject + rate-limit"
+  section "Check 3 (static) — public-kong config: parses + /balance/api route(strip->/api) + strip/RS256/iss/aud/exp/customer-gate/inject + rate-limit"
   local cfg; cfg="$(find_kong_public_config)"
   if [ -z "$cfg" ]; then
     fail "no public-kong declarative config found under infra/kong-public/ — the allowlist (exposed surface) is not defined"; return
@@ -557,7 +561,12 @@ low = raw.lower()
 # Textual fallback (only if no YAML/JSON parser). Weaker, but still catches gross gaps.
 def textual_ok():
     problems = []
-    if "/api" not in raw: problems.append("no '/api' route path")
+    if "/balance/api" not in raw:
+        problems.append("no '/balance/api' namespaced route path (external surface must be namespaced)")
+    if re.search(r'(^|\n)\s*-\s*/api\s*(\n|$)', raw):
+        problems.append("a bare '/api' route path is present (must be namespaced /balance/api)")
+    if "strip_path: false" in low:
+        problems.append("strip_path:false present — /balance would not be stripped to /api upstream")
     if balance not in raw: problems.append(f"no reference to the '{balance}' upstream")
     if "rate-limiting" not in low: problems.append("no rate-limiting plugin")
     if "rs256" not in low: problems.append("no RS256 alg pin")
@@ -577,7 +586,7 @@ if doc is None:
     if problems:
         for p in problems: print(f"  -> {p}")
         sys.exit(1)
-    print("  textual sanity: /api, balance upstream, RS256, issuer, aud, customer-403, strip+inject, rate-limiting all present")
+    print("  textual sanity: /balance/api (namespaced, stripped), balance upstream, RS256, issuer, aud, customer-403, strip+inject, rate-limiting all present")
     sys.exit(0)
 
 print(f"  declarative config parses ({parsed_via})")
@@ -598,8 +607,49 @@ for r in routes_top:
     plugins += (r.get("plugins") or [])
 names = [(p.get("name") or "").lower() for p in plugins]
 
-api_route = any(str(p).startswith("/api") for p in paths)
-balance_service = any(balance in json.dumps(s) for s in services) or (balance in json.dumps(doc))
+# --- Route/strip shape (developer routing ruling): the EXTERNAL surface is namespaced
+# `/balance/api` and Kong STRIPS `/balance` so the upstream still receives `/api`. We model
+# the concrete probe `/balance/api/whoami` through each balance-service route and require the
+# resulting UPSTREAM path to be `/api/whoami`. This FAILs if the route is left as bare `/api`,
+# or if stripping is dropped (the un-stripped external path would then be forwarded). Accepts
+# either the described shape (route `/balance/api` + strip + service path `/api`) or the
+# equivalent (route `/balance` + strip + no service path) — mechanism-accurate, not brittle.
+def targets_balance(s): return balance in json.dumps(s)
+bal_services = [s for s in services if targets_balance(s)]
+
+def service_path(s):
+    p = s.get("path")
+    if isinstance(p, str) and p:
+        return p if p.startswith("/") else "/" + p
+    url = s.get("url") or ""
+    m = re.match(r'^[a-zA-Z][\w+.\-]*://[^/]+(/.*)?$', url)
+    return (m.group(1) if m and m.group(1) else "")
+
+route_info = []   # (route_path, strip_on, service_path)
+for s in bal_services:
+    sp = service_path(s)
+    for r in routes_of(s):
+        strip_on = (r.get("strip_path") is not False)   # Kong default strip_path = true
+        for rp in (r.get("paths") or []):
+            route_info.append((str(rp), strip_on, sp))
+
+def upstream_path_for(rp, strip_on, sp, probe="/balance/api/whoami"):
+    if not probe.startswith(rp):
+        return None                       # this route would not match the probe
+    remainder = probe[len(rp):] if strip_on else probe
+    if strip_on and not remainder.startswith("/"):
+        remainder = "/" + remainder
+    up = (sp.rstrip("/") + remainder) if sp else remainder
+    return re.sub(r'/{2,}', '/', up)
+
+route_namespaced = any(rp.startswith("/balance") for rp, _, _ in route_info)
+route_bare_api   = any(rp == "/api" or rp.startswith("/api/") for rp, _, _ in route_info)
+route_ok = route_namespaced and not route_bare_api
+# Stripping configured so the upstream receives /api (models the concrete probe).
+strip_ok = any(rp.startswith("/balance") and upstream_path_for(rp, so, sp) == "/api/whoami"
+               for rp, so, sp in route_info)
+
+balance_service = bool(bal_services) or (balance in json.dumps(doc))
 has_ratelimit = any("rate-limiting" in n for n in names)
 
 # --- Extract the RAW Lua from serverless (pre/post-function) plugins. yaml.safe_load
@@ -682,7 +732,8 @@ inject_both  = inject_uid and inject_roles
 bearer_only = ("authorization" in llow) and ("bearer" in llow)
 
 checks = [
-    ("/api route", api_route),
+    ("/balance/api route (namespaced, not bare /api)", route_ok),
+    ("strip /balance -> upstream /api", strip_ok),
     (f"{balance} upstream", balance_service),
     ("strip X-User-Id + X-Roles (anti-spoof)", strip_both),
     ("RS256 alg pin", alg_pin),
@@ -702,7 +753,7 @@ sys.exit(1 if problems else 0)
 PY
   local prc=$?
   case $prc in
-    0) pass "public-kong config parses; /api->$BALANCE_UPSTREAM with strip-both + RS256 verify + iss/aud/exp + '$CUSTOMER_ROLE'-gate(403) + inject-both + rate-limiting" ;;
+    0) pass "public-kong config parses; /balance/api(strip->/api)->$BALANCE_UPSTREAM with strip-both + RS256 verify + iss/aud/exp + '$CUSTOMER_ROLE'-gate(403) + inject-both + rate-limiting" ;;
     2) fail "public-kong declarative config does NOT parse (see error above)" ;;
     *) fail "public-kong declarative config is missing a security-critical intent (see -> lines above)" ;;
   esac
@@ -712,13 +763,15 @@ PY
 # RUNTIME CHECKS (need the FULL stack already up; reached via the published :PUBLIC_HTTP_PORT)
 # ==================================================================================
 
-# Check 4 (runtime, VERTICAL SLICE) — a real demo-customer token -> GET /api/whoami on the
-# public edge -> 200 with body { userId == token sub, roles contains 'customer' }. This is
+# Check 4 (runtime, VERTICAL SLICE) — a real demo-customer token -> GET /balance/api/whoami
+# on the public edge -> 200 with body { userId == token sub, roles contains 'customer' }. A
+# 200 with the correct body also proves Kong STRIPPED /balance to the upstream /api/whoami.
+# This is
 # the spec-06 vertical slice: token validated by Kong, identity INJECTED as X-User-Id, the
 # request reached the balance service, response returned. (DoD: "Valid customer token ->
 # /api reaches the balance service with injected X-User-Id"; "Vertical slice is green".)
 check_vertical_slice() {
-  section "Check 4 (runtime) — vertical slice: demo-customer token -> GET /api/whoami -> 200, userId==sub, roles has '$CUSTOMER_ROLE'"
+  section "Check 4 (runtime) — vertical slice: demo-customer token -> GET /balance/api/whoami -> 200, userId==sub, roles has '$CUSTOMER_ROLE'"
   if [ -z "$CUSTOMER_TOKEN" ]; then
     skip "no demo-customer token available (see NOTE above) — vertical slice needs a real token; manual checkpoint in README"
     return
@@ -757,7 +810,7 @@ else:
 sys.exit(1 if bad else 0)
 PY
   then
-    pass "vertical slice GREEN: valid customer token -> /api/whoami 200 with userId==sub and roles including '$CUSTOMER_ROLE'"
+    pass "vertical slice GREEN: valid customer token -> /balance/api/whoami 200 with userId==sub and roles including '$CUSTOMER_ROLE'"
   else
     fail "vertical slice: whoami 200 but the echoed identity is wrong (Kong injected the wrong X-User-Id/X-Roles)"
   fi
@@ -939,37 +992,34 @@ check_role_gate() {
   [ "$bad" -eq 0 ] && pass "the customer-role gate holds: a valid token without '$CUSTOMER_ROLE' is rejected at /api (HTTP $PROBE_CODE)"
 }
 
-# Check 9 (runtime, DEFAULT-DENY) — the public edge exposes ONLY /api on the app: a
-# non-/api path and the /admin surface must NOT reach the balance service through the
-# public edge. (spec 06: "Routes only /api/* -> balance-service. Default-deny everything
-# else"; the /admin surface belongs to the internal edge, Step 2.)
+# Check 9 (runtime, DEFAULT-DENY) — the public edge exposes ONLY the namespaced
+# /balance/api surface on the app. Everything else must NOT reach the balance service via
+# the public edge: a random non-/api path, the un-namespaced bare /api (no longer routed),
+# /balance/admin (admin must be unreachable on the public plane), the bare /admin, and
+# /internal. (spec 06: "Routes only <the allowlisted surface> -> balance-service.
+# Default-deny everything else"; /admin belongs to the internal edge, Step 2; /internal is
+# never routable from either edge.)
 check_default_deny() {
-  section "Check 9 (runtime) — default-deny: non-/api, /admin and /internal do not reach the balance service via the public edge"
+  section "Check 9 (runtime) — default-deny: non-/api, bare /api, /balance/admin, /admin and /internal do not reach the balance service via the public edge"
   local bad=0 auth=()
   [ -n "$CUSTOMER_TOKEN" ] && auth=(-H "Authorization: Bearer $CUSTOMER_TOKEN")
-  # A clearly non-/api path.
-  curl_probe "$(edge_base)/__scfin_default_deny_probe__" "${auth[@]}"
-  if reached_balance "$PROBE_BODY" "$PROBE_HEADERS"; then
-    fail "a non-/api path reached the balance service (HTTP $PROBE_CODE, app envelope/marker present) — nginx is proxying more than /api. Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
-  else
-    info "non-/api path -> HTTP $PROBE_CODE, handled by nginx (not the balance service)"
-  fi
-  # The /admin surface must not be exposed on the PUBLIC edge.
-  curl_probe "$(edge_base)/admin/whoami" "${auth[@]}"
-  if reached_balance "$PROBE_BODY" "$PROBE_HEADERS"; then
-    fail "/admin reached the balance service via the PUBLIC edge (HTTP $PROBE_CODE) — the admin surface must not be exposed on :$PUBLIC_HTTP_PORT (internal edge only). Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
-  else
-    info "/admin via the public edge -> HTTP $PROBE_CODE, not the balance service"
-  fi
-  # /internal/* must not be routable from the public edge (DoD: "/internal not routable
-  # from either edge" — the public-plane half).
-  curl_probe "$(edge_base)/internal/whoami" "${auth[@]}"
-  if reached_balance "$PROBE_BODY" "$PROBE_HEADERS"; then
-    fail "/internal reached the balance service via the PUBLIC edge (HTTP $PROBE_CODE) — /internal must never be routable from an edge. Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
-  else
-    info "/internal via the public edge -> HTTP $PROBE_CODE, not the balance service"
-  fi
-  [ "$bad" -eq 0 ] && pass "default-deny holds on the public edge: only /api reaches the balance service; non-/api, /admin and /internal do not"
+  # probe: path ; human label
+  local probe label
+  for pair in \
+    "/__scfin_default_deny_probe__|a random non-/api path" \
+    "/api/whoami|the un-namespaced bare /api (must no longer route to the app)" \
+    "/balance/admin/whoami|/balance/admin (admin must be unreachable on the public plane)" \
+    "/admin/whoami|the bare /admin surface" \
+    "/internal/whoami|/internal (never routable from any edge)"; do
+    probe="${pair%%|*}"; label="${pair#*|}"
+    curl_probe "$(edge_base)${probe}" "${auth[@]}"
+    if reached_balance "$PROBE_BODY" "$PROBE_HEADERS"; then
+      fail "$label reached the balance service via the PUBLIC edge (path '$probe', HTTP $PROBE_CODE, app envelope/marker present) — default-deny is broken. Body: $(printf '%s' "$PROBE_BODY" | head -c 160)"; bad=1
+    else
+      info "$label -> HTTP $PROBE_CODE, did not reach the balance service"
+    fi
+  done
+  [ "$bad" -eq 0 ] && pass "default-deny holds on the public edge: only /balance/api reaches the balance service; non-/api, bare /api, /balance/admin, /admin and /internal do not"
 }
 
 # Check 8 (runtime, RATE-LIMITING) — a burst of AUTHENTICATED /api requests eventually

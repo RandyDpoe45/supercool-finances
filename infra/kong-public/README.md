@@ -14,13 +14,22 @@ from zero with no admin clicks.
   `public-nginx` is (spec 00 §2/§3).
 - **Config:** [`kong.yml`](./kong.yml), mounted read-only; `KONG_DATABASE=off`.
 
-## The allowlist *is* the exposed surface (ADR-12)
+## The allowlist *is* the exposed surface (ADR-12), service-namespaced (ADR-17)
 
-`kong.yml` declares exactly **one** route — `/api` → `balance-service:3000`, with
-the `/api` prefix **preserved** (`strip_path: false`; the service routes on it, and
-its probe is `GET /api/whoami`). There is **no catch-all**, so any other path is a
-**404 at the gateway** (default-deny). Exposing a new endpoint means adding a route
-here — exposure stays explicit and auditable.
+`kong.yml` declares exactly **one** route — external **`/balance/api`** → the Kong
+service `http://balance-service:3000/api`. The path is **service-namespaced**
+(ADR-17): the route uses **`strip_path: true`** to drop the matched `/balance/api`,
+and Kong prepends the service `path` (`/api`), so the upstream still receives its
+built surface: `GET /balance/api/whoami` → `balance-service` `GET /api/whoami` (its
+controllers + the guard's first-segment check are unchanged).
+
+There is **no catch-all**, so any other path is a **404 at the gateway**
+(default-deny) — including bare **`/api`**, **`/balance/admin`**, and **`/admin`**:
+admin is never reachable on the public plane. The **strip is security-load-bearing**
+(ADR-17): the balance guard only enforces the admin-role check when the first path
+segment is `admin`, so an *un-stripped* `/balance/admin` would bypass it — hence the
+namespace is stripped and admin is simply not routed here. Exposing a new endpoint
+means adding a route here — exposure stays explicit and auditable.
 
 ## Auth model — JWKS verification in a `pre-function` (we own the Lua)
 
@@ -37,8 +46,9 @@ crypto primitives** — no hand-rolled base64url/bignum:
   builds the public key straight from the JWK params, and `pub:verify(sig, signing_input, "sha256")`
   verifies with a **fixed** RSA+SHA-256 method (never derived from the token header,
   so it cannot be tricked into HMAC).
-- **JWKS fetch:** `lua-resty-http`; **cache:** `kong.cache`; **refetch throttle:**
-  the `kong` shared dict.
+- **JWKS fetch:** `lua-resty-http`; **cache + refetch throttle:** the `kong` shared
+  dict directly (get/set/add) — `kong.cache`'s plugin-facing object exposes no write
+  that composes with its `get`, so owning the dict makes a rotation refetch persist.
 
 `KONG_UNTRUSTED_LUA=on` is required because the pre-function `require`s those Kong
 core + crypto modules; the Lua is **ours** (committed + reviewed), not user-supplied.
@@ -117,10 +127,12 @@ docker run --rm -e KONG_DATABASE=off -e KONG_PLUGINS=bundled -e KONG_UNTRUSTED_L
 docker compose up -d
 
 # Default-deny / fail-closed (no Keycloak token needed):
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/nope           # 404
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/whoami      # 401 (no token)
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/nope                    # 404
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/whoami              # 404 (bare /api not routed)
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/balance/admin           # 404 (admin off the public plane)
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/balance/api/whoami      # 401 (no token)
 curl -s -o /dev/null -w '%{http_code}\n' \
-  -H 'X-User-Id: attacker' http://localhost:8080/api/whoami                    # 401 (never injected)
+  -H 'X-User-Id: attacker' http://localhost:8080/balance/api/whoami                     # 401 (never injected)
 ```
 
 The full **valid-token** path (real customer token → `X-User-Id` reaches the
@@ -130,4 +142,6 @@ real Keycloak token. During implementation these were also proven against a **mo
 JWKS + echo upstream**: valid customer token → `200` with `X-User-Id=<sub>`; a
 request carrying a spoofed `X-User-Id`/`X-Roles` alongside a valid token still
 delivered only the token-derived identity; wrong-role → `403`; expired / wrong-aud /
-forged-signature / `alg:none` → `401`.
+forged-signature / `alg:none` → `401`. The **service-namespaced strip** was also
+confirmed live: external `/balance/api/whoami` reached the (mock) upstream as
+`/api/whoami`, while bare `/api`, `/balance/admin`, and `/admin` → `404`.

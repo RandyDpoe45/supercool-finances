@@ -13,20 +13,28 @@ the trusted identity. The Kong allowlists **are** the exposed API surface.
 > built (plain HTTP; a `pre-function`/JWKS gate rather than stock `jwt`+`acl`), see
 > **Resolved (implementation, public edge)** under *Open questions*.
 
+Edge paths are **service-namespaced** — `/<service>/<surface>` — on both planes;
+each Kong **strips the `/<service>` segment** so the upstream still receives its built
+surface (`/api`, `/admin`). The strip is security-load-bearing
+([ADR-17](../docs/DECISIONS.md#adr-17--service-namespaced-edge-routing)).
+
 - **public-nginx** (`edge-public`, host `:8080`) — serves the client + OTP SPA
-  bundles and reverse-proxies `/api/*` → `public-kong`. **Plain HTTP on localhost**
-  (no TLS for this demo — see *Resolved*). (SPA path layout resolved in spec 08.)
+  bundles and reverse-proxies `/balance/api/*` → `public-kong`. **Plain HTTP on
+  localhost** (no TLS for this demo — see *Resolved*). (SPA layout resolved in spec 08.)
 - **internal-nginx** (`edge-internal`, host `:8081`) — serves the admin SPA,
-  proxies `/admin/*` → `internal-kong`.
+  proxies `/balance/admin/*` and `/analytics/admin/*` → `internal-kong`.
 - **public-kong** (`edge-public` + `app-public`, DB-less `kong.yml`):
-  - Routes **only** `/api/*` → `balance-service`. Default-deny everything else.
+  - Routes **only** `/balance/api/*` → `balance-service` (strips `/balance`, so the
+    upstream gets `/api/*`). Default-deny everything else — bare `/api`,
+    `/balance/admin`, `/admin` all 404; admin is unreachable on this plane.
   - Enforces **JWKS-only** validation (signature **and** `exp`/`iss`/`aud`) and the
     `customer` realm role, plus `rate-limiting`, CORS, and identity injection (map
     token `sub` → `X-User-Id`, roles → `X-Roles`), **stripping any client-supplied
     `X-User-Id` / `X-Roles`** (anti-spoof). Realized in a `pre-function` — see
     *Resolved (implementation, public edge)*.
 - **internal-kong** (`edge-internal` + `app-internal`, DB-less):
-  - Routes **only** `/admin/*` → `balance-service` and `analytics-server`. Requires
+  - Routes **only** `/balance/admin/*` → `balance-service` and `/analytics/admin/*` →
+    `analytics-server` (each strips `/<service>`, upstream gets `/admin/*`). Requires
     `admin` role. Same identity injection + strip. Default-deny.
   - **Never** routes `/internal/*`.
 
@@ -37,20 +45,24 @@ the trusted identity. The Kong allowlists **are** the exposed API surface.
 - **Allowlist = exposed surface** — adding an endpoint requires a route here, so
   exposure is explicit and auditable
   ([ADR-12](../docs/DECISIONS.md#adr-12--endpoint-prefix-convention-as-the-exposure-contract)).
+- **Edge path = `/<service>/<surface>`**, with Kong stripping `/<service>` so the
+  upstream keeps its built surface — the strip is security-load-bearing
+  ([ADR-17](../docs/DECISIONS.md#adr-17--service-namespaced-edge-routing)).
 
 ## The vertical-slice checkpoint (do this before spec 07)
 
-Prove one path end to end: browser gets a real Keycloak token → `GET /api/...` on
-`public-nginx` → `public-kong` validates + injects identity → `balance-service`
-reads Postgres → response. This validates auth, the trust boundary, prefixes, and
-the network split at once. **If it resists, return to the macro (spec 00), not a
-workaround.**
+Prove one path end to end: browser gets a real Keycloak token → `GET /balance/api/...`
+on `public-nginx` → `public-kong` validates + injects identity + strips `/balance`
+→ `balance-service` receives `/api/...`, reads Postgres → response. This validates
+auth, the trust boundary, prefixes, and the network split at once. **If it resists,
+return to the macro (spec 00), not a workaround.**
 
 ## Definition of Done
 
-- [ ] Valid customer token → `/api` reaches the balance service with injected
-      `X-User-Id`; missing/invalid token → 401 at Kong.
-- [ ] Customer token → `/admin` → 403; admin token → `/admin` works.
+- [ ] Valid customer token → `/balance/api` reaches the balance service (as `/api`)
+      with injected `X-User-Id`; missing/invalid token → 401 at Kong. Bare `/api` and
+      `/balance/admin` → 404 on the public edge.
+- [ ] Customer token → `/balance/admin` → 403; admin token → `/balance/admin` works.
 - [ ] `/internal/*` is not routable from either edge.
 - [ ] A client-supplied `X-User-Id` header is stripped before the upstream.
 - [ ] Rate limiting triggers on the auth/money routes.
@@ -82,5 +94,6 @@ Keycloak's JWKS (`kid`-selected, cached, refetch-on-rotation with a bounded nega
 path), pins `alg=RS256` (rejecting `none`/`HS*`), checks `iss`/`aud`/`exp` (±60s
 skew), gates the `customer` realm role (**403** vs **401** per
 `gateway-identity.guard.ts`), and only then injects the trusted `X-User-Id`/`X-Roles`.
-`cors` + `rate-limiting` are kept; default-deny (only the `/api` route). See
-`infra/kong-public/README.md`.
+`cors` + `rate-limiting` are kept; default-deny (only the `/balance/api` route —
+service-namespaced per ADR-17, Kong strips `/balance` so balance-service still gets
+`/api`). See `infra/kong-public/README.md`.
