@@ -2,8 +2,9 @@ import type { ReactNode } from 'react';
 import { useAuth } from 'react-oidc-context';
 
 /**
- * The authenticated app frame: a minimal header (identity + sign-out) wrapping the
- * routed content. Real navigation and styling arrive with the feature steps.
+ * The authenticated app frame: a minimal header (identity + sign-out) wrapping the routed
+ * content. Kept router-free (navigation entry points live on the pages, which always render inside
+ * the router) so the frame stays trivially testable in isolation.
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const auth = useAuth();
