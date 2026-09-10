@@ -17,6 +17,7 @@ import {
   ITransfersService,
   TRANSFERS_SERVICE,
 } from '../service/interfaces/transfers.service.interface';
+import { InitiateExternalTransferBody } from './dto/initiate-external-transfer.dto';
 import { PendingAuthorizationDto } from './dto/pending-authorization.dto';
 import { ResolveDestinationDto } from './dto/resolve-destination.dto';
 import { TransferDto } from './dto/transfer.dto';
@@ -24,6 +25,7 @@ import {
   ConfirmTransferBody,
   confirmTransferSchema,
   idempotencyKeySchema,
+  initiateExternalTransferSchema,
   InitiateTransferBody,
   initiateTransferSchema,
   ResolveDestinationBody,
@@ -93,7 +95,30 @@ export class TransfersApiController {
     return serializeTransfer(tx);
   }
 
-  /** Confirm a PENDING transfer with the caller's one-time code — posts it (money moves). 200. */
+  /** Initiate an external outbound transfer to an ENROLLED payee (addressed by `payeeId`) — places
+   * a hold + creates a PENDING transaction (no balance moves). Requires an `Idempotency-Key`
+   * header. Shares confirm / cancel / the pending feed with internal transfers. 201. */
+  @Post('transfers/external')
+  async initiateExternal(
+    @Body(new ZodValidationPipe(initiateExternalTransferSchema)) body: InitiateExternalTransferBody,
+    @Headers('idempotency-key') idempotencyKeyHeader: string | undefined,
+    @Identity() identity: RequestIdentity,
+  ): Promise<TransferDto> {
+    const idempotencyKey = idempotencyKeyPipe.transform(idempotencyKeyHeader) as string;
+    const tx = await this.transfers.initiateExternalTransfer({
+      ownerId: identity.userId,
+      sourceAccountId: body.sourceAccountId,
+      payeeId: body.payeeId,
+      amount: body.amount,
+      currency: body.currency,
+      idempotencyKey,
+      confirmDuplicate: body.confirmDuplicate,
+    });
+    return serializeTransfer(tx);
+  }
+
+  /** Confirm a PENDING transfer with the caller's one-time code — posts internal / settles external
+   * (money moves). Shared across both transfer types (branches on the transaction type). 200. */
   @Post('transfers/:id/confirm')
   @HttpCode(HttpStatus.OK)
   async confirm(

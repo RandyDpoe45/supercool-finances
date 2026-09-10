@@ -303,3 +303,82 @@ export async function insertExternalPayee(q: any, opts: InsertExternalPayeeOpts)
   if (opts.createdAt !== undefined) row.created_at = opts.createdAt;
   return insertRow(q, 'external_payee', row);
 }
+
+/**
+ * Options for {@link insertHold} — the reservation-ledger row a holds/outbound suite needs to
+ * construct explicit hold states. Named (camelCase) fields map to the `"hold"` columns. `accountId`
+ * / `transactionId` are REQUIRED (both FK to seeded parents — seed the account + transaction
+ * first). `status` defaults `'PLACED'` (the only status that counts toward `account.held`) and
+ * `rail` to the constant outbound rail; `amount` defaults to `1000`. `expires_at` is NOT NULL with
+ * no DB default, so it defaults to a moment in the FUTURE (the hold's TTL mirrors its transfer's).
+ * `externalRef` / `settledAt` / `releasedAt` stay NULL unless set. Returns the inserted row
+ * (RETURNING *).
+ */
+export interface InsertHoldOpts {
+  id?: string;
+  accountId: string;
+  transactionId: string;
+  amount?: number | string;
+  status?: string;
+  rail?: string;
+  externalRef?: string | null;
+  expiresAt?: Date;
+  createdAt?: Date;
+  settledAt?: Date | null;
+  releasedAt?: Date | null;
+}
+
+/**
+ * A `hold` row (all NOT-NULL-without-default columns defaulted). Only the keys set beyond the
+ * defaults are written, so an unset `external_ref` / `created_at` / `settled_at` / `released_at`
+ * keeps its DB default / NULL. Use it to seed a `PLACED` reservation for reconciliation assertions
+ * (`SUM(PLACED) == account.held`) or a terminal (SETTLED / RELEASED / EXPIRED) hold. Returns the
+ * inserted row (RETURNING *).
+ */
+export async function insertHold(q: any, opts: InsertHoldOpts): Promise<any> {
+  const row: Record<string, unknown> = {
+    account_id: opts.accountId,
+    transaction_id: opts.transactionId,
+    amount: opts.amount ?? 1000,
+    status: opts.status ?? 'PLACED',
+    rail: opts.rail ?? PAYEE_OUTBOUND_RAIL,
+    expires_at: opts.expiresAt ?? new Date(Date.now() + 2 * 60 * 1000),
+  };
+  if (opts.id !== undefined) row.id = opts.id;
+  if (opts.externalRef !== undefined) row.external_ref = opts.externalRef;
+  if (opts.createdAt !== undefined) row.created_at = opts.createdAt;
+  if (opts.settledAt !== undefined) row.settled_at = opts.settledAt;
+  if (opts.releasedAt !== undefined) row.released_at = opts.releasedAt;
+  return insertRow(q, 'hold', row);
+}
+
+/**
+ * The sum of an account's PLACED holds, as node-postgres surfaces it (a decimal string for the
+ * `bigint` SUM, `'0'` when there are none — `COALESCE`d). This is the left-hand side of the holds
+ * reconciliation invariant `SUM(PLACED holds per account) == account.held`, which every commit of
+ * a place / settle / release / expiry must preserve.
+ */
+export async function sumPlacedHolds(q: any, accountId: string): Promise<string> {
+  const rows = await q.query(
+    `SELECT COALESCE(SUM("amount"), 0)::text AS sum FROM "hold"
+       WHERE "account_id" = $1 AND "status" = 'PLACED'`,
+    [accountId],
+  );
+  return rows[0].sum as string;
+}
+
+/**
+ * Read one account's materialized money caches (`balance` / `held`, both `bigint`-as-string) plus
+ * its `status`, for reconciliation assertions around a hold place / settle / release. Returns
+ * `null` when the id does not exist.
+ */
+export async function getAccount(
+  q: any,
+  id: string,
+): Promise<{ id: string; balance: string; held: string; status: string } | null> {
+  const rows = await q.query(
+    `SELECT "id", "balance", "held", "status" FROM "account" WHERE "id" = $1`,
+    [id],
+  );
+  return rows.length > 0 ? rows[0] : null;
+}

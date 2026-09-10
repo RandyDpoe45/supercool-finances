@@ -19,6 +19,7 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   // Resource does not exist (or is not owned — indistinguishable, anti-IDOR).
   ACCOUNT_NOT_FOUND: HttpStatus.NOT_FOUND,
   TRANSFER_NOT_FOUND: HttpStatus.NOT_FOUND,
+  PAYEE_NOT_FOUND: HttpStatus.NOT_FOUND,
 
   // Semantically valid but unprocessable given the money state.
   CURRENCY_MISMATCH: HttpStatus.UNPROCESSABLE_ENTITY,
@@ -34,6 +35,7 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   OTP_ALREADY_ACTIVE: HttpStatus.CONFLICT,
   DESTINATION_NOT_CONFIRMED: HttpStatus.CONFLICT,
   PAYEE_ALREADY_ENROLLED: HttpStatus.CONFLICT,
+  PAYEE_IN_COOLING_OFF: HttpStatus.CONFLICT,
 
   // The resource was valid but is no longer available (a lapsed pending transfer).
   TRANSFER_EXPIRED: HttpStatus.GONE,

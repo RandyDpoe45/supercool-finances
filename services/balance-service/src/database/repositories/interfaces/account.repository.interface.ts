@@ -31,4 +31,11 @@ export interface IAccountRepository {
    * account's `FOR UPDATE` lock, BEFORE inserting the ledger entry (balance-then-ledger,
    * ADR-13). `newBalance` is a canonical minor-unit string. */
   updateBalanceInTx(queryRunner: QueryRunner, id: string, newBalance: string): Promise<void>;
+  /** Targeted UPDATE of the materialized `held` (and `updated_at`) for one account, joined to
+   * the given queryRunner's transaction — the reservation-side sibling of
+   * {@link updateBalanceInTx}. The transfers service calls this under the account's `FOR UPDATE`
+   * lock when a hold is placed (`held += amount`), released/expired, or settled (`held -= amount`),
+   * so the `SUM(PLACED holds) == account.held` invariant holds at every commit. `newHeld` is a
+   * canonical minor-unit string; the `held >= 0` DB check must never be violated. */
+  updateHeldInTx(queryRunner: QueryRunner, id: string, newHeld: string): Promise<void>;
 }

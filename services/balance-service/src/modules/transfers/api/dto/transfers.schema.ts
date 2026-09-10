@@ -35,6 +35,23 @@ export const initiateTransferSchema = z.object({
 });
 export type InitiateTransferBody = z.infer<typeof initiateTransferSchema>;
 
+/** `POST /api/transfers/external` body — an external outbound to an ENROLLED payee, addressed by
+ * `payeeId` (a uuid). No `confirmationToken` / `destinationAccountNumber` (there is no
+ * resolve/confirm step for external). `amount` is an unsigned minor-unit integer string, > 0.
+ * `.strict()` rejects unknown keys (defense-in-depth against param smuggling). */
+export const initiateExternalTransferSchema = z
+  .object({
+    sourceAccountId: z.string().uuid(),
+    payeeId: z.string().uuid(),
+    amount: z
+      .string()
+      .regex(/^\d+$/, 'amount must be an unsigned minor-unit integer')
+      .refine((value) => BigInt(value) > 0n, 'amount must be greater than zero'),
+    currency: z.string().length(3),
+    confirmDuplicate: z.boolean().optional(),
+  })
+  .strict();
+
 /** `POST /api/transfers/:id/confirm` body. `code` is a non-empty numeric string. */
 export const confirmTransferSchema = z.object({
   code: z.string().regex(/^\d+$/, 'code must be a numeric string'),

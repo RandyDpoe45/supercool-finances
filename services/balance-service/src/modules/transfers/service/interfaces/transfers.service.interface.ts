@@ -42,6 +42,25 @@ export interface InitiateTransferParams {
   confirmDuplicate?: boolean;
 }
 
+/** Inputs to {@link ITransfersService.initiateExternalTransfer} — the external-outbound initiate.
+ * The destination is an ENROLLED payee addressed by `payeeId` (no resolve/confirm step; the
+ * cooling-off gate + display name come from enrollment). `ownerId` is the trusted gateway
+ * identity, never the body. */
+export interface InitiateExternalTransferParams {
+  ownerId: string;
+  sourceAccountId: string;
+  /** The caller's enrolled payee (an `external_payee.id`). Must be owned by `ownerId` and past
+   * its cooling-off window. */
+  payeeId: string;
+  /** Positive magnitude in minor units (canonical `bigint` string — never float). */
+  amount: string;
+  currency: string;
+  /** The client `Idempotency-Key`, claimed at INITIATE to dedup duplicate creation. */
+  idempotencyKey: string;
+  /** Override a suspected soft-duplicate (an identical payment within 60s) and proceed. */
+  confirmDuplicate?: boolean;
+}
+
 /** Inputs to {@link ITransfersService.confirmTransfer}. */
 export interface ConfirmTransferParams {
   ownerId: string;
@@ -59,15 +78,23 @@ export interface CancelTransferParams {
 
 /**
  * A pending transfer projected for the OTP app's feed. It is a DOMAIN read model, NOT raw
- * entities: the destination's HUMAN account number and the destination holder's MASKED name are
- * resolved HERE — masking is a PII/security rule that MUST stay in the service, so the raw name
- * never crosses the service boundary. The source account id is left on the `transaction`
- * (`debitAccountId`, the caller's own) for the controller to whitelist at serialize time.
+ * entities: for an INTERNAL transfer the destination's HUMAN account number and the destination
+ * holder's MASKED name are resolved HERE — masking is a PII/security rule that MUST stay in the
+ * service, so the raw name never crosses the service boundary. For an EXTERNAL_OUTBOUND transfer
+ * the destination is an enrolled payee, so `destinationAccountNumber` / `destinationMaskedName`
+ * are null and `payeeDisplayName` carries the caller's own enrollment label (not PII — the caller
+ * supplied it, so it is surfaced unmasked). The `transaction.type` distinguishes the two, and the
+ * source account id is left on the `transaction` (`debitAccountId`, the caller's own) for the
+ * controller to whitelist at serialize time.
  */
 export interface PendingAuthorization {
   transaction: Transaction;
+  /** Internal: the destination customer's human account number. External: null. */
   destinationAccountNumber: string | null;
-  destinationMaskedName: string;
+  /** Internal: the destination holder's MASKED name. External: null. */
+  destinationMaskedName: string | null;
+  /** External: the enrolled payee's display name (unmasked — the caller's own label). Internal: null. */
+  payeeDisplayName: string | null;
 }
 
 /**
@@ -104,10 +131,27 @@ export interface ITransfersService {
   initiateTransfer(params: InitiateTransferParams): Promise<Transaction>;
 
   /**
-   * Confirm a PENDING transfer: CHECK EXPIRY FIRST (an expired/overdue transfer transitions to
-   * EXPIRED and is rejected WITHOUT consuming the OTP), then verify+consume the caller's one-time
-   * code and post the transfer (money moves) via a guarded transition. An already-POSTED transfer
-   * is returned as an idempotent replay. Returns the POSTED transfer entity.
+   * Initiate an external-outbound transfer to an enrolled payee (addressed by `payeeId` — no
+   * resolve/confirm step). Validates + owner-scopes the source, resolves + owner-checks the payee
+   * (missing/non-owned → 404) and its cooling-off gate (still cooling → 409, judged on the DB
+   * clock), then — inside the idempotency-wrapped transaction — obeys the SAME single-pending rule
+   * as an internal transfer (expire/supersede the prior pending, releasing an external prior's
+   * hold first) and PLACES A HOLD: under the source's `FOR UPDATE` lock it checks
+   * `available = balance − held ≥ amount` (frozen/insufficient → error), inserts the PENDING
+   * `external_outbound` transaction crediting the `clearing:rail-outbound` account, sets
+   * `held += amount`, and inserts a `PLACED` hold — NO balance moves. A replay returns the
+   * original id; a truly-concurrent same-initiator initiate collides on the single-pending index
+   * → conflict. Returns the PENDING transfer entity.
+   */
+  initiateExternalTransfer(params: InitiateExternalTransferParams): Promise<Transaction>;
+
+  /**
+   * Confirm a PENDING transfer (shared across internal + external outbound): CHECK EXPIRY FIRST
+   * (an expired/overdue transfer transitions to EXPIRED — releasing an external transfer's hold —
+   * and is rejected WITHOUT consuming the OTP), then verify+consume the caller's one-time code and,
+   * branching on the transaction TYPE, either POST the internal transfer or SETTLE the external
+   * outbound (customer → clearing posted, `held -= amount`, hold `PLACED → SETTLED`). An
+   * already-POSTED transfer is returned as an idempotent replay. Returns the POSTED transfer entity.
    */
   confirmTransfer(params: ConfirmTransferParams): Promise<Transaction>;
 

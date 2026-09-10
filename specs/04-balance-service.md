@@ -45,6 +45,26 @@ whole prompt is about — correctness here is the deliverable.
     characters + exactly `**`** (uniform, non-length-revealing), joined by single spaces
     (`"Juan Perez"` → `"Jua** Per**"`); masking is applied **in the service** so the raw
     name (PII) never crosses the service boundary.
+  - **External outbound (initiate + confirm):** a customer sends to an **enrolled payee**
+    addressed by `payeeId` (the cooling-off gate + display name come from enrollment; there is
+    **no** resolve/confirm-of-payee step and the external account number is not re-typed).
+    `POST /api/transfers/external` `{ sourceAccountId, payeeId, amount, currency }` +
+    `Idempotency-Key` **places a hold**: lock the source, check `available ≥ amount`,
+    `held += amount`, insert a `Hold` (`PLACED`, on the `rail-outbound` rail), and create the
+    `PENDING` `external_outbound` transaction crediting the **`clearing:rail-outbound`** account —
+    **no balance moves yet**. The payee must be past its cooling-off (`now() ≥ cooling_off_until`,
+    else rejected). It obeys the **single active pending** rule and the **2-minute auth TTL**
+    exactly like an internal transfer: an unconfirmed outbound lazily **expires** (`→ EXPIRED`) and
+    its hold is **released** (`held −=`, no ledger entry); a new initiate **auto-supersedes** the
+    prior pending and releases its hold; an explicit **cancel** releases the hold too. **Confirm is
+    shared** (`POST /api/transfers/:id/confirm`) and branches on the transaction type — internal →
+    post; external → **settle at confirm**: one locked, deadlock-retried tx posts the
+    **customer → `clearing:rail-outbound`** double-entry, sets `held −= amount`, marks the hold
+    **`SETTLED`**, transitions `PENDING → POSTED`, and writes one outbox row. Money leaves the
+    customer into the outbound clearing account (the net **in transit**) at confirm; the step-5c
+    rail settlement callback finalizes the clearing side (success → draw down / reconcile; failure →
+    compensating reversal). `cancel` and the single `GET /api/pending-authorization` feed are shared
+    across both transfer types.
   - **Idempotency:** `Idempotency-Key` per request; a retry returns the original
     result (persisted `IdempotencyKey`).
   - **Duplicate suppression (soft, defense-in-depth):** distinct from idempotency —
@@ -96,9 +116,12 @@ whole prompt is about — correctness here is the deliverable.
   later settlement/reconciliation against the external rail. Placing a hold
   increments `account.held` (available drops); **settling** converts it to a
   posted movement (hold→`SETTLED`, `held−`, `balance−`, append the double-entry
-  `LedgerEntry`); **releasing/expiry** returns the funds (hold→`RELEASED`,
-  `held−`) with no main-ledger entry. Kept separate from the main ledger, which
-  records only money that actually moved.
+  `LedgerEntry`); **releasing/expiry** returns the funds (`held−`) with **no**
+  main-ledger entry — a hold whose **auth TTL elapsed** goes to **`EXPIRED`**
+  (alongside the transaction's `EXPIRED`), one **explicitly released** (the transfer
+  was **cancelled** or **auto-superseded**, or later a rail failure) goes to
+  **`RELEASED`**. Kept separate from the main ledger, which records only money that
+  actually moved.
 - **Limits** — a per-transaction cap plus **fixed calendar-window** daily and monthly
   **amount** caps — **no rolling windows** and no count-based velocity; checked against
   the account's fixed-window spend counters (`spent_today` / `spent_month`) under the
@@ -158,8 +181,9 @@ whole prompt is about — correctness here is the deliverable.
 ## Endpoints (representative)
 
 - `/api`: `GET /accounts`, `GET /accounts/:id/transactions`,
-  `POST /transfers/resolve-destination`, `POST /transfers`, `POST /transfers/:id/confirm`,
-  `POST /transfers/:id/cancel`, `POST /otp`, `POST /payees`, `GET /payees`, `GET /pending-authorization`.
+  `POST /transfers/resolve-destination`, `POST /transfers`, `POST /transfers/external`,
+  `POST /transfers/:id/confirm`, `POST /transfers/:id/cancel`, `POST /otp`, `POST /payees`,
+  `GET /payees`, `GET /pending-authorization`.
   `POST /transfers/resolve-destination` is the **confirmation-of-payee query**: body
   `{ accountNumber }` (10-digit numeric) → `{ maskedName, currency, confirmationToken }`
   (no money moves). `POST /transfers` addresses the payee by

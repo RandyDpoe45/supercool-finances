@@ -310,11 +310,11 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
 
 | Token | Interface | Methods |
 |---|---|---|
-| `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findByIdAndOwner(id, ownerId)`, `findBySystemKey`, `findByAccountNumber(accountNumber)`, `lockByIdForUpdate(queryRunner, id)`, `updateBalanceInTx(queryRunner, id, newBalance)` |
+| `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findByIdAndOwner(id, ownerId)`, `findBySystemKey`, `findByAccountNumber(accountNumber)`, `lockByIdForUpdate(queryRunner, id)`, `updateBalanceInTx(queryRunner, id, newBalance)`, `updateHeldInTx(queryRunner, id, newHeld)` |
 | `CUSTOMER_REPOSITORY` | `ICustomerRepository` | `findById`, `create` |
 | `LEDGER_ENTRY_REPOSITORY` | `ILedgerEntryRepository` | `findById`, `create`, `findByAccount(accountId, limit)` |
-| `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create`, `insertInTx`, `insertPendingInTx` (DB-clock `expires_at`), `findByIdInTx`, `findPendingByInitiator` (→ single row or null), `transitionToPostedInTx`, `expireOverduePendingByInitiator`, `supersedeActivePendingByInitiator`, `expireIfOverdue`, `transitionToCancelled` |
-| `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create` |
+| `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create`, `insertInTx`, `insertPendingInTx` (DB-clock `expires_at`), `findByIdInTx`, `findPendingByInitiator` (→ single row or null), `findPendingByInitiatorInTx`, `transitionToPostedInTx`, `expireOverduePendingByInitiator`, `supersedeActivePendingByInitiator`, `expireIfOverdue`, `expireIfOverdueInTx`, `transitionToCancelled`, `transitionToCancelledInTx` |
+| `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create`, `insertInTx` (PLACED), `findByTransactionInTx`, `settleInTx` (guarded PLACED→SETTLED), `releaseInTx(qr, id, RELEASED\|EXPIRED)` (guarded PLACED→terminal) |
 | `EXTERNAL_PAYEE_REPOSITORY` | `IExternalPayeeRepository` | `findById`, `create`, `findByOwner`, `createEnrollment(ownerId, displayName, rail, destinationRef, coolingOffSeconds)` (DB-clock `cooling_off_until`) |
 | `USER_LIMITS_REPOSITORY` | `IUserLimitsRepository` | `findById`, `create`, `findByOwner` |
 | `OUTBOX_EVENT_REPOSITORY` | `IOutboxEventRepository` | `findById`, `create` |
@@ -350,9 +350,16 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
   ad-hoc owner-scoped reads. `ILedgerEntryRepository.findByAccount(accountId, limit)` backs
   the per-account statement (`GET /api/accounts/:id/transactions`) — newest-first
   (`created_at DESC, id DESC`), always bounded by `limit`.
+- **`Hold` lifecycle (spec 04 step 5b).** The reservation ledger's guarded, tx-aware seam:
+  `insertInTx` appends a `PLACED` hold; `findByTransactionInTx` reads the (single) hold backing a
+  transfer; `settleInTx` / `releaseInTx` flip `PLACED → SETTLED` / `PLACED → RELEASED|EXPIRED`
+  (each guarded on `status = 'PLACED'`, returning `affected > 0`). The transfers service calls
+  these alongside `IAccountRepository.updateHeldInTx` under the source's `FOR UPDATE` lock, so
+  `SUM(PLACED holds per account) == account.held` holds at every commit; the reconciliation SUM
+  query itself lives in tests, not as a repo method.
 - **Deferred to the domain step (driven by real callers):** outbox `pollUnpublished`
-  (FOR UPDATE SKIP LOCKED) + `markPublished`; hold PLACED-sum / reconciliation; ledger
-  reconstruction / delta-sum; transaction-by-debit-account history; and the remaining
-  status-transition helpers. These are intentionally absent now to avoid speculative,
-  caller-less query surface. (The idempotency soft-duplicate-window lookup —
-  `findRecentByFingerprintInTx` — landed with spec 04 step 3.)
+  (FOR UPDATE SKIP LOCKED) + `markPublished`; ledger reconstruction / delta-sum;
+  transaction-by-debit-account history; and the remaining status-transition helpers. These are
+  intentionally absent now to avoid speculative, caller-less query surface. (The idempotency
+  soft-duplicate-window lookup — `findRecentByFingerprintInTx` — landed with spec 04 step 3; the
+  `Hold` lifecycle methods above landed with step 5b.)

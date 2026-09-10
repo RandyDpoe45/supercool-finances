@@ -50,4 +50,13 @@ export class AccountRepository implements IAccountRepository {
       .where('id = :id', { id })
       .execute();
   }
+
+  async updateHeldInTx(queryRunner: QueryRunner, id: string, newHeld: string): Promise<void> {
+    await queryRunner.manager
+      .createQueryBuilder()
+      .update(Account)
+      .set({ held: newHeld, updatedAt: () => 'now()' })
+      .where('id = :id', { id })
+      .execute();
+  }
 }
