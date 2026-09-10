@@ -73,11 +73,17 @@ migration. `down()` drops the index + `expires_at` column; it intentionally **do
 the enum labels — Postgres cannot drop an enum value in place, and the leftover labels are
 harmless once unused (documented in the migration).
 
+**Step 5 — `SeedBaselineUserLimits1789257600000`**
+(`…/migrations/1789257600000-SeedBaselineUserLimits.ts`) — a **data** migration (like
+`SeedSystemAccounts`), seeding the single GLOBAL baseline `user_limits` row so the limit check has
+a cap to resolve on boot. See [the baseline-limits seed](#system-seed--the-global-baseline-limits).
+
 Each migration's `down()` drops its tables (any order for the satellites; reverse FK
 order for the spine) then removes its enum types — a clean inverse. Step 3's `down()` drops the
 FK, the `account_number` index and column, then the two `customer` unique indexes, then the
 `customer` table. Step 4's `down()` drops `uq_one_pending_per_initiator` + `expires_at` (the two
-enum labels remain, by design).
+enum labels remain, by design). The two data migrations' `down()` delete only the rows they
+inserted.
 
 ## Enumerations — native Postgres enum types
 
@@ -285,9 +291,30 @@ The two per-rail **clearing accounts** are seeded by a migration, `SeedSystemAcc
   `spent_month_date` are supplied (`CURRENT_DATE`, `date_trunc('month', CURRENT_DATE)::date`)
   because they are NOT NULL without a DB default; balance/held/spend counters default to 0,
   `status` to `active`, `id` to `gen_random_uuid()`. `down()` deletes the two rows.
-- **Deliberately NOT seeded here:** global/default `user_limits`, and any customer or demo
-  data. Those belong to **spec 08 / `tools/seed`** (customers are provisioned in Keycloak
-  and keyed by `sub`), not to the schema's boot migrations.
+- **Deliberately NOT seeded here:** any customer or demo data. Those belong to **spec 08 /
+  `tools/seed`** (customers are provisioned in Keycloak and keyed by `sub`), not to the schema's
+  boot migrations. (The **global baseline `user_limits`** row IS a system constant and is seeded —
+  by its own data migration, [below](#system-seed--the-global-baseline-limits).)
+
+## System seed — the global baseline limits
+
+The single GLOBAL baseline `user_limits` row is seeded by a migration,
+`SeedBaselineUserLimits1789257600000` (`…/migrations/1789257600000-SeedBaselineUserLimits.ts`), so
+the reducer's limit check (spec 04 Limits, step 7) always has a cap to resolve on boot:
+
+| scope | owner_id | currency | per_transaction_max | daily_max | monthly_max |
+|---|---|---|---|---|---|
+| `global` | NULL | MXN | `5000000` (50,000.00) | `10000000` (100,000.00) | `100000000` (1,000,000.00) |
+
+- **Why a migration, not `tools/seed`.** The baseline caps are a **system constant** — every
+  customer-initiated outbound is checked against them until an admin sets a per-customer override —
+  exactly like the clearing accounts and the MXN `currency` row. Not demo data, so a boot migration.
+- **Idempotent.** `up()` does `INSERT … ON CONFLICT ON CONSTRAINT "uq_user_limits_scope" DO NOTHING`
+  (the `UNIQUE NULLS NOT DISTINCT (scope, owner_id)` constraint that actually enforces the single
+  NULL-owner global row), so a re-run is a no-op; `id` defaults to `gen_random_uuid()`, timestamps
+  to `now()`. `down()` deletes that one global row.
+- **Deliberately NOT seeded here:** per-customer override rows (`scope='customer'`). Those come from
+  the admin `PUT /limits` surface (a later step), not a boot migration.
 
 ## Repository layer (minimal, per-aggregate)
 

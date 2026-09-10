@@ -525,6 +525,11 @@ export interface ResolvedDomainErrors {
   CurrencyMismatchError?: any;
   AccountNotFoundError?: any;
   InvalidPostingCommandError?: any;
+  /** Limits (spec 04 step 7): a customer-initiated outbound movement would breach the owner's
+   *  per-transaction / daily / monthly cap, checked under the account's `FOR UPDATE` lock BEFORE
+   *  any balance mutation (code `LIMIT_EXCEEDED` → 422). Owned by the posting reducer feature
+   *  (posting/service/errors), already in the candidates below. */
+  LimitExceededError?: any;
   IdempotencyKeyReuseError?: any;
   SuspectedDuplicateError?: any;
   // Transfers/OTP domain errors added by Step-4b (internal transfers end-to-end). Best-effort
@@ -632,6 +637,9 @@ export function getDomainErrors(): ResolvedDomainErrors {
       'InvalidPostingCommand',
       'InvalidCommandError',
     ]),
+    // Step-7 limits enforcement (best-effort). Owned by the posting reducer (posting/service/errors),
+    // already in `candidates`.
+    LimitExceededError: findExportAcross(candidates, ['LimitExceededError', 'LimitExceeded']),
     IdempotencyKeyReuseError: findExportAcross(candidates, [
       'IdempotencyKeyReuseError',
       'IdempotencyKeyReusedError',
@@ -853,6 +861,13 @@ export function getTransfersServiceToken(): symbol {
  *  guarded transitions (`insertPendingInTx`, `expireIfOverdue`, `transitionToCancelled`, …). */
 export function getTransactionRepositoryToken(): symbol {
   return getRepositoryToken('TRANSACTION_REPOSITORY', 'transaction');
+}
+
+/** `USER_LIMITS_REPOSITORY` — the DI token the persistence layer binds the user-limits repo to
+ *  (spec 04 step 7). Reuses the multi-path repo-token resolver so a limits suite can drive
+ *  `resolveInTx(qr, ownerId, currency)` directly or seed rows via `tests/support/pg.ts:insertUserLimits`. */
+export function getUserLimitsRepositoryToken(): symbol {
+  return getRepositoryToken('USER_LIMITS_REPOSITORY', 'user-limits');
 }
 
 /** `HOLD_REPOSITORY` — the DI token the persistence layer binds the hold (reservation-ledger) repo

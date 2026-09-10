@@ -59,4 +59,36 @@ export class AccountRepository implements IAccountRepository {
       .where('id = :id', { id })
       .execute();
   }
+
+  async currentSpendWindowInTx(
+    queryRunner: QueryRunner,
+  ): Promise<{ today: string; monthStart: string }> {
+    const rows: { today: string; month_start: string }[] = await queryRunner.query(
+      `SELECT (now() AT TIME ZONE 'UTC')::date::text AS today,
+              (date_trunc('month', now() AT TIME ZONE 'UTC'))::date::text AS month_start`,
+    );
+    return { today: rows[0].today, monthStart: rows[0].month_start };
+  }
+
+  async updateSpendCountersInTx(
+    queryRunner: QueryRunner,
+    accountId: string,
+    spentToday: string,
+    spentTodayDate: string,
+    spentMonth: string,
+    spentMonthDate: string,
+  ): Promise<void> {
+    await queryRunner.manager
+      .createQueryBuilder()
+      .update(Account)
+      .set({
+        spentToday,
+        spentTodayDate,
+        spentMonth,
+        spentMonthDate,
+        updatedAt: () => 'now()',
+      })
+      .where('id = :id', { id: accountId })
+      .execute();
+  }
 }

@@ -123,9 +123,20 @@ whole prompt is about — correctness here is the deliverable.
   **`RELEASED`**. Kept separate from the main ledger, which records only money that
   actually moved.
 - **Limits** — a per-transaction cap plus **fixed calendar-window** daily and monthly
-  **amount** caps — **no rolling windows** and no count-based velocity; checked against
-  the account's fixed-window spend counters (`spent_today` / `spent_month`) under the
-  row lock. Configurable (global baseline + per-customer override).
+  **amount** caps — **no rolling windows** and no count-based velocity. Enforced **only on
+  customer-initiated outbound** movements (internal transfer out + external outbound) at
+  **post/confirm time**, inside the reducer's account-lock critical section beside the funds
+  check: the resolved caps are checked and the account's fixed-window spend counters
+  (`spent_today` / `spent_month`) incremented under the **same** `FOR UPDATE` lock, so the
+  counters can never exceed the cap under a concurrent race. **Inbound credits and reversals
+  never count**, and a rail-failure reversal does **not** give the amount back (the fixed
+  window holds the slot until it resets). Counters are **per-account**; the cap is
+  **per-owner** (customer override) **or the global baseline** — the customer row wins
+  wholesale when present, else the global row, else uncapped (a NULL cap field = uncapped).
+  Windows reset **lazily on the next spend** off the **DB clock, UTC calendar** boundary
+  (`spent_*_date` behind the current day / month-start → zero-then-add). The **global baseline
+  is seeded** (migration, like the system accounts); the `/admin PUT /limits` configuration
+  surface is part of the admin step, not here.
 - **External payees** — enrollment with a **cooling-off period** before a new payee
   can receive money. Registration input is minimal — **`{ displayName, destinationRef }`**
   (`destination_ref` = the **external bank account number**, the human-identifier
@@ -268,6 +279,12 @@ role-based.
 - [ ] External outbound **places a hold** at initiation (available drops, balance
       unchanged), **settles** it at confirm (hold→SETTLED, balance/held updated,
       double-entry posted), and **releases** it on fail/expiry (no ledger entry).
+- [ ] **Limits enforced under the lock:** a customer-initiated outbound transfer (internal or
+      external) is rejected (422 `LIMIT_EXCEEDED`) when it would breach the per-transaction,
+      daily, or monthly cap; the account's `spent_today` / `spent_month` increment **atomically
+      with the post** and **never exceed the cap under a concurrent race** (per-account counter,
+      per-owner/global cap, customer-override-wins resolution, DB-clock UTC window reset).
+      Inbound credits and reversals do **not** touch the counters.
 - [ ] A reversal requires a second approver (maker-checker) and writes an audit row.
 - [ ] Each money change emits exactly one outbox row in the same tx; the relay
       publishes it (SKIP LOCKED verified across two instances).

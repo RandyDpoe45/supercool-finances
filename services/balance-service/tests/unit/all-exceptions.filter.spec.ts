@@ -74,6 +74,8 @@ const MAPPING: Array<{ code: string; status: number; cls: any }> = [
   { code: 'TRANSFER_NOT_FOUND', status: 404, cls: de.TransferNotFoundError },
   { code: 'CURRENCY_MISMATCH', status: 422, cls: de.CurrencyMismatchError },
   { code: 'INSUFFICIENT_FUNDS', status: 422, cls: de.InsufficientFundsError },
+  // Spec 04 step-7 limits: a breached cap is semantically valid but unprocessable → 422.
+  { code: 'LIMIT_EXCEEDED', status: 422, cls: de.LimitExceededError },
   { code: 'ACCOUNT_FROZEN', status: 409, cls: de.AccountFrozenError },
   { code: 'TRANSFER_NOT_PENDING', status: 409, cls: de.TransferNotPendingError },
   { code: 'SUSPECTED_DUPLICATE', status: 409, cls: de.SuspectedDuplicateError },

@@ -418,3 +418,103 @@ export async function outboxCountForTx(q: any, txId: string): Promise<number> {
   );
   return rows[0].count as number;
 }
+
+// ---- Limits (spec 04 step 7) -----------------------------------------------------------------
+
+/**
+ * Options for {@link insertUserLimits} — a `user_limits` cap row. `scope` defaults to `'customer'`;
+ * a `'global'` row MUST carry `ownerId: null` (that is the seeded baseline shape). `currency` FKs to
+ * `currency` (default 'MXN', the migration-seeded code). Each cap is nullable — a NULL field is
+ * uncapped for that dimension — and is a canonical minor-unit STRING (never a JS number, so int64
+ * precision is preserved). The `uq_user_limits_scope (scope, owner_id)` unique is NULLS NOT DISTINCT,
+ * so there is at most one global row and at most one customer row per owner.
+ */
+export interface InsertUserLimitsOpts {
+  id?: string;
+  scope?: 'global' | 'customer';
+  ownerId?: string | null;
+  currency?: string;
+  perTransactionMax?: string | null;
+  dailyMax?: string | null;
+  monthlyMax?: string | null;
+}
+
+/**
+ * A `user_limits` row (all NOT-NULL-without-default columns defaulted). Only the caps the caller
+ * sets are written, so an unset `per_transaction_max` / `daily_max` / `monthly_max` stays NULL
+ * (uncapped for that dimension). Seed a `customer`-scope row (with a tighter cap than the seeded
+ * global baseline) to prove customer-override-wins resolution, or seed nothing and let the seeded
+ * global row govern. Returns the inserted row (RETURNING *).
+ */
+export async function insertUserLimits(q: any, opts: InsertUserLimitsOpts = {}): Promise<any> {
+  const row: Record<string, unknown> = {
+    scope: opts.scope ?? 'customer',
+    owner_id: opts.ownerId ?? null,
+    currency: opts.currency ?? 'MXN',
+  };
+  if (opts.id !== undefined) row.id = opts.id;
+  if (opts.perTransactionMax !== undefined) row.per_transaction_max = opts.perTransactionMax;
+  if (opts.dailyMax !== undefined) row.daily_max = opts.dailyMax;
+  if (opts.monthlyMax !== undefined) row.monthly_max = opts.monthlyMax;
+  return insertRow(q, 'user_limits', row);
+}
+
+/** An account's fixed-window spend counters + window dates, plus `balance`/`held`. `spent_today` /
+ * `spent_month` are `bigint`-as-string; the two `_date` fields are forced to ISO `YYYY-MM-DD`
+ * strings (via `to_char`) so a test compares them directly against {@link TODAY}/{@link MONTH_START}
+ * without a timezone-dependent Date coercion. Returns `null` when the id does not exist. */
+export interface AccountCounters {
+  balance: string;
+  held: string;
+  spent_today: string;
+  spent_today_date: string;
+  spent_month: string;
+  spent_month_date: string;
+}
+
+export async function getAccountCounters(q: any, id: string): Promise<AccountCounters | null> {
+  const rows = await q.query(
+    `SELECT "balance", "held",
+            "spent_today"::text AS spent_today,
+            to_char("spent_today_date", 'YYYY-MM-DD') AS spent_today_date,
+            "spent_month"::text AS spent_month,
+            to_char("spent_month_date", 'YYYY-MM-DD') AS spent_month_date
+       FROM "account" WHERE "id" = $1`,
+    [id],
+  );
+  return rows.length > 0 ? (rows[0] as AccountCounters) : null;
+}
+
+/**
+ * Directly overwrite an account's spend counters + window dates — the seam the LAZY-WINDOW-RESET
+ * proof needs to plant `spent_today` near the cap with a `spent_today_date` in a PRIOR day (or a
+ * `spent_month_date` in a PRIOR month), so the NEXT spend must zero-then-add off the DB clock. Only
+ * the fields passed are written. Money values are canonical minor-unit STRINGS; dates are ISO
+ * `YYYY-MM-DD` strings.
+ */
+export interface SetAccountSpendOpts {
+  spentToday?: string;
+  spentTodayDate?: string;
+  spentMonth?: string;
+  spentMonthDate?: string;
+}
+
+export async function setAccountSpendCounters(
+  q: any,
+  id: string,
+  opts: SetAccountSpendOpts,
+): Promise<void> {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  const push = (col: string, v: unknown): void => {
+    vals.push(v);
+    sets.push(`"${col}" = $${vals.length}`);
+  };
+  if (opts.spentToday !== undefined) push('spent_today', opts.spentToday);
+  if (opts.spentTodayDate !== undefined) push('spent_today_date', opts.spentTodayDate);
+  if (opts.spentMonth !== undefined) push('spent_month', opts.spentMonth);
+  if (opts.spentMonthDate !== undefined) push('spent_month_date', opts.spentMonthDate);
+  if (sets.length === 0) return;
+  vals.push(id);
+  await q.query(`UPDATE "account" SET ${sets.join(', ')} WHERE "id" = $${vals.length}`, vals);
+}

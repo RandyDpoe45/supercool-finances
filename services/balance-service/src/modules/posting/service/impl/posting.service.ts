@@ -23,6 +23,10 @@ import {
   ITransactionRepository,
   TRANSACTION_REPOSITORY,
 } from '../../../../database/repositories/interfaces/transaction.repository.interface';
+import {
+  IUserLimitsRepository,
+  USER_LIMITS_REPOSITORY,
+} from '../../../../database/repositories/interfaces/user-limits.repository.interface';
 import { PostingLeg, PostTransactionCommand } from '../interfaces/post-transaction.command';
 import {
   AccountFrozenError,
@@ -30,6 +34,7 @@ import {
   CurrencyMismatchError,
   InsufficientFundsError,
   InvalidPostingCommandError,
+  LimitExceededError,
   TransactionNotPendingError,
 } from '../errors';
 import {
@@ -50,6 +55,17 @@ interface AppliedLeg {
   accountId: string;
   delta: string;
   balanceAfter: string;
+}
+
+/** The post-reset, post-add fixed-window spend counters to persist for the debited account when
+ * a movement is limit-enforced (`command.limitAccountId` set). Computed under the account lock
+ * BEFORE any balance mutation, written AFTER the balance/ledger fold in the same tx. */
+interface SpendCounterUpdate {
+  accountId: string;
+  spentToday: string;
+  spentTodayDate: string;
+  spentMonth: string;
+  spentMonthDate: string;
 }
 
 /**
@@ -76,10 +92,14 @@ interface AppliedLeg {
  * - {@link postPendingInTx} runs INSIDE the caller's transaction and TRANSITIONS an existing
  *   PENDING header to POSTED (the confirm-time half of an internal transfer).
  *
- * Scope: the balancing multi-leg post. Deliberately NOT here (later steps): spend-counter/limit
- * updates, hold/`held` mutation. Idempotency-key handling is the wrapper's job (the transfers
- * layer runs the initiate under it). The funds check DOES subtract existing `held` when
- * computing `available`.
+ * Scope: the balancing multi-leg post PLUS spend-counter/limit enforcement — but ONLY when the
+ * caller opts in via `command.limitAccountId` (the customer debit leg). When set, the resolved
+ * caps are checked and the account's fixed-window `spent_today`/`spent_month` incremented under
+ * the SAME `FOR UPDATE` lock as the funds check, so the counters can never exceed the cap under a
+ * concurrent race (spec 04 Limits). Unset movements (inbound credits, reversals) never touch a
+ * counter. Deliberately still NOT here: hold/`held` mutation (the transfers layer owns it).
+ * Idempotency-key handling is the wrapper's job (the transfers layer runs the initiate under it).
+ * The funds check DOES subtract existing `held` when computing `available`.
  */
 @Injectable()
 export class PostingService implements IPostingService {
@@ -89,6 +109,7 @@ export class PostingService implements IPostingService {
     @Inject(LEDGER_ENTRY_REPOSITORY) private readonly ledger: ILedgerEntryRepository,
     @Inject(TRANSACTION_REPOSITORY) private readonly transactions: ITransactionRepository,
     @Inject(OUTBOX_EVENT_REPOSITORY) private readonly outbox: IOutboxEventRepository,
+    @Inject(USER_LIMITS_REPOSITORY) private readonly userLimits: IUserLimitsRepository,
   ) {}
 
   /**
@@ -176,6 +197,14 @@ export class PostingService implements IPostingService {
     // d. Validate each leg against its (now locked) account, and compute its balance_after.
     const appliedLegs = command.legs.map((leg) => this.checkAndFold(leg, command, locked));
 
+    // d′. Limits (only when the movement counts against a customer's spend — `limitAccountId`
+    //     set): resolve the caps, lazily reset the fixed window off the DB clock, and reject a
+    //     breach — all under the SAME lock as the funds check and BEFORE any balance mutation.
+    //     The computed counters are persisted after the balance/ledger fold (step f′).
+    const spendUpdate = command.limitAccountId
+      ? await this.enforceLimits(queryRunner, command, locked)
+      : null;
+
     // e. The transaction header (insert POSTED, or guarded PENDING→POSTED transition). Runs
     //    BEFORE the ledger/outbox rows, which FK their `transaction_id` to it.
     const transaction = await applyHeader();
@@ -191,6 +220,20 @@ export class PostingService implements IPostingService {
         balanceAfter: leg.balanceAfter,
         currency: command.currency,
       });
+    }
+
+    // f′. Persist the incremented fixed-window spend counters for the debited account (same lock,
+    //     same tx) when this movement was limit-enforced — so the check (step d′) and the write
+    //     straddle one critical section and a counter can never overshoot its cap.
+    if (spendUpdate) {
+      await this.accounts.updateSpendCountersInTx(
+        queryRunner,
+        spendUpdate.accountId,
+        spendUpdate.spentToday,
+        spendUpdate.spentTodayDate,
+        spendUpdate.spentMonth,
+        spendUpdate.spentMonthDate,
+      );
     }
 
     // g. Exactly one outbox row, same tx (transactional outbox, ADR-5).
@@ -288,6 +331,79 @@ export class PostingService implements IPostingService {
       accountId: account.id,
       delta: leg.delta,
       balanceAfter: addMinor(account.balance, leg.delta),
+    };
+  }
+
+  /**
+   * Enforce the owner's spend caps for a customer-initiated outbound movement and compute the
+   * counters to persist. Runs under the SAME `FOR UPDATE` lock the funds check already took: the
+   * `limitAccountId` MUST be one of the locked legs, be a DEBIT (`delta < 0`), and name a
+   * CUSTOMER account — otherwise the directive is malformed ({@link InvalidPostingCommandError};
+   * defensive — the transfers layer only ever points it at the customer sender).
+   *
+   * Resolution is row-level, customer-wins (the repo picks the customer row over global; a NULL
+   * cap field = uncapped). The fixed window is reset lazily off the DB clock (UTC calendar): a
+   * `spent_*_date` lexically before the current boundary means the window rolled over, so its
+   * effective spend is 0 before the add (ISO `YYYY-MM-DD` strings sort chronologically). Breach
+   * order is per-transaction → daily → monthly (first breach wins), each throwing
+   * {@link LimitExceededError} BEFORE any balance mutation. Returns the post-add counters + the
+   * current window dates for the reducer to write after the balance/ledger fold.
+   */
+  private async enforceLimits(
+    queryRunner: QueryRunner,
+    command: PostTransactionCommand,
+    locked: Map<string, Account>,
+  ): Promise<SpendCounterUpdate> {
+    const accountId = command.limitAccountId as string;
+    const leg = command.legs.find((entry) => entry.accountId === accountId);
+    if (!leg) {
+      throw new InvalidPostingCommandError('limitAccountId must reference one of the legs');
+    }
+    if (BigInt(leg.delta) >= 0n) {
+      throw new InvalidPostingCommandError('limitAccountId must reference a debit leg');
+    }
+    const account = locked.get(accountId);
+    if (!account || account.kind !== AccountKind.Customer) {
+      throw new InvalidPostingCommandError('limitAccountId must reference a customer account');
+    }
+    if (account.ownerId === null) {
+      // Unreachable for a customer account (owner is an FK); defensive against malformed state.
+      throw new InvalidPostingCommandError('limit account is missing an owner');
+    }
+
+    const caps = await this.userLimits.resolveInTx(queryRunner, account.ownerId, command.currency);
+    const { today, monthStart } = await this.accounts.currentSpendWindowInTx(queryRunner);
+
+    // Charge the window against THIS account's own debit magnitude, not `command.amount`. For
+    // every current caller they are identical (a clean 2-leg customer→dest post, where
+    // `validateCommand` pins `amount == moved magnitude`), but keying off the resolved debit leg
+    // keeps the counter correct if a future multi-leg command ever debits this customer for only
+    // part of `amount`. `leg.delta` is a validated negative (a debit), so negate for the magnitude.
+    const amount = -BigInt(leg.delta);
+    // Lazy reset: a stale window date (behind the boundary) contributes 0 to the new counter.
+    const effToday = account.spentTodayDate < today ? 0n : BigInt(account.spentToday);
+    const effMonth = account.spentMonthDate < monthStart ? 0n : BigInt(account.spentMonth);
+    const newToday = effToday + amount;
+    const newMonth = effMonth + amount;
+
+    if (caps) {
+      if (caps.perTransactionMax != null && amount > BigInt(caps.perTransactionMax)) {
+        throw new LimitExceededError('per_transaction', accountId);
+      }
+      if (caps.dailyMax != null && newToday > BigInt(caps.dailyMax)) {
+        throw new LimitExceededError('daily', accountId);
+      }
+      if (caps.monthlyMax != null && newMonth > BigInt(caps.monthlyMax)) {
+        throw new LimitExceededError('monthly', accountId);
+      }
+    }
+
+    return {
+      accountId,
+      spentToday: newToday.toString(),
+      spentTodayDate: today,
+      spentMonth: newMonth.toString(),
+      spentMonthDate: monthStart,
     };
   }
 
