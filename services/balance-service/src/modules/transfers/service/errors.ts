@@ -62,6 +62,31 @@ export class InvalidTransferError extends DomainError {
   }
 }
 
+/** A confirm (or other access) targeted a PENDING transfer whose 2-minute `expires_at` has
+ * lapsed: it is no longer valid and was lazily transitioned to EXPIRED (DB clock). Distinct from
+ * TRANSFER_NOT_PENDING (which is an already-terminal / never-pending transfer) so the caller can
+ * tell "you waited too long" from "not confirmable" — maps to 410 Gone. The OTP is NOT consumed
+ * when this is raised. Carries no ids or code. */
+export class TransferExpiredError extends DomainError {
+  readonly code = 'TRANSFER_EXPIRED';
+
+  constructor() {
+    super('The transfer has expired');
+  }
+}
+
+/** A same-initiator initiate raced another and collided on the single-pending unique index
+ * (`uq_one_pending_per_initiator`, SQLSTATE 23505): a user may hold at most one PENDING transfer
+ * awaiting authorization at a time. The loser retries after resolving the existing pending —
+ * maps to 409 Conflict. Carries no ids. */
+export class PendingTransferConflictError extends DomainError {
+  readonly code = 'PENDING_TRANSFER_CONFLICT';
+
+  constructor() {
+    super('A pending transfer awaiting authorization already exists');
+  }
+}
+
 /** Initiate was called without a valid confirmation-of-payee token for THIS destination: the
  * caller either never resolved the destination, the token expired, or the token was bound to a
  * different destination. A transfer can only be initiated after the payer resolved+confirmed the

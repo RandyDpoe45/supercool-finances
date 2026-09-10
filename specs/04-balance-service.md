@@ -68,13 +68,28 @@ whole prompt is about — correctness here is the deliverable.
     single-row overdraft invariant and the multi-row limit invariants
     without SERIALIZABLE. Retry only on the rare deadlock (`40P01`). See
     [ADR-13](../docs/DECISIONS.md#adr-13--concurrency--balance-projection).
-  - **Lifecycle:** `PENDING → POSTED → FAILED / REVERSED`; reversals are
-    compensating entries, never mutations. External outbound is two-phase:
-    initiation **places a hold** (reserves funds; `balance` unchanged) and
-    settlement/OTP-confirm **settles** it into a posted movement (fail/expiry
-    **releases** it). Internal transfers place **no hold** but are still
-    **OTP-gated**: they stay `PENDING` at initiation and **post on OTP-confirm**,
-    with the funds check performed at confirm-time under the account lock.
+  - **Lifecycle:** `PENDING → POSTED / EXPIRED / CANCELLED`, and posted movements
+    may later be `REVERSED`; reversals are compensating entries, never mutations.
+    Terminal states are **retained** (never deleted) for compliance. External
+    outbound is two-phase: initiation **places a hold** (reserves funds; `balance`
+    unchanged) and settlement/OTP-confirm **settles** it into a posted movement
+    (fail/expiry **releases** it). Internal transfers place **no hold** but are
+    still **OTP-gated**: they stay `PENDING` at initiation and **post on
+    OTP-confirm**, with the funds check performed at confirm-time under the account
+    lock.
+  - **Pending authorization is single and time-boxed.** A user has **at most one
+    PENDING transfer awaiting authorization at any time** — enforced by a partial
+    unique index on `initiated_by WHERE status = 'PENDING'`, not just a service
+    check. A pending transfer carries an **`expires_at` = `created_at` + 2 minutes**;
+    once past it the transfer is **no longer valid** and lazily transitions to
+    **`EXPIRED`** on the next access (confirm / read / the next initiate) — the DB
+    clock (`now()`) is the single source of truth, **no scheduler**. **Confirm checks
+    expiry before consuming the OTP**, so an expired transfer never burns the
+    caller's code. Initiating a new transfer while one is still pending
+    **auto-supersedes** the old one (→ `CANCELLED`, retained) and creates the new;
+    the caller may also **cancel** a pending transfer explicitly (guarded
+    `PENDING → CANCELLED`, retained). The single-pending rule spans **all**
+    user-initiated types (internal and, later, external outbound).
 - **Holds (reservation ledger)** — an append-only `Hold` log for funds reserved
   but not yet posted (external outbound awaiting OTP/settlement). Lifecycle
   `PLACED → SETTLED | RELEASED | EXPIRED`; each hold carries an `externalRef` for
@@ -113,7 +128,8 @@ whole prompt is about — correctness here is the deliverable.
   not** (it arrives already approved by the originating external institution, not ours
   to authorize). A dedicated `POST /api/otp` **generate** endpoint mints the code (the code is
   **not** auto-minted at transfer initiation); confirm verifies the user's active code and posts
-  their pending transfer; expose `GET /api/pending-authorizations` for the OTP app.
+  their pending transfer; expose `GET /api/pending-authorization` (the caller's single active
+  pending transfer, or none) for the OTP app.
 - **Outbox + relay worker** — write the `OutboxEvent` in the **same DB
   transaction** as the ledger change; a background worker polls with
   `SELECT ... FOR UPDATE SKIP LOCKED`, `XADD`s to `events:transactions`, then marks
@@ -132,7 +148,7 @@ whole prompt is about — correctness here is the deliverable.
 
 - `/api`: `GET /accounts`, `GET /accounts/:id/transactions`,
   `POST /transfers/resolve-destination`, `POST /transfers`, `POST /transfers/:id/confirm`,
-  `POST /otp`, `POST /payees`, `GET /pending-authorizations`.
+  `POST /transfers/:id/cancel`, `POST /otp`, `POST /payees`, `GET /pending-authorization`.
   `POST /transfers/resolve-destination` is the **confirmation-of-payee query**: body
   `{ accountNumber }` (10-digit numeric) → `{ maskedName, currency, confirmationToken }`
   (no money moves). `POST /transfers` addresses the payee by
@@ -140,7 +156,9 @@ whole prompt is about — correctness here is the deliverable.
   `GET /accounts` exposes the owner's own `accountNumber` per account.
   `POST /otp` mints the caller's user-scoped one-time code (the mocked out-of-band delivery to
   the OTP app) — a **dedicated generate endpoint**, singleton-gated; OTP is **not** auto-minted
-  at transfer initiation.
+  at transfer initiation. `POST /transfers/:id/cancel` cancels the caller's pending transfer
+  (guarded `PENDING → CANCELLED`, retained); `GET /pending-authorization` returns the caller's
+  **single** active pending transfer (or none), with the destination's masked holder name.
 - `/admin`: `POST /accounts/:id/freeze`, `PUT /limits`, `POST /transfers/:id/reverse`,
   `POST /approvals/:id/approve`, `GET /transactions`, `POST /external/inbound`.
 - `/internal`: `POST /rails/settlement-callback`, `GET /health`.
@@ -171,6 +189,13 @@ role-based.
 - [ ] Internal transfer works end-to-end; **concurrency test** (N simultaneous
       transfers) proves no double-spend / no overdraft / no money created or lost.
 - [ ] **Idempotency test**: a replayed `Idempotency-Key` moves money once.
+- [ ] **At most one PENDING transfer per user** — proven under a concurrent
+      double-initiate race (partial unique index, not just a service check); a new
+      initiate **auto-supersedes** the prior pending (→ CANCELLED, retained).
+- [ ] A pending transfer **expires after 2 minutes** (`expires_at`): confirming or
+      reading an overdue transfer transitions it to **EXPIRED** (retained) and
+      confirm does **not** consume the OTP; the caller can **cancel** a pending
+      transfer (→ CANCELLED, retained). Terminal transfers are never deleted.
 - [ ] **Every user-initiated transfer — internal and external outbound — requires
       OTP confirm** (user-scoped, single-use code): internal posts on confirm,
       external settles its hold on confirm.

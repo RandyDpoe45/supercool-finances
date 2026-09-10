@@ -80,7 +80,7 @@ export class TransfersApiController {
     @Identity() identity: RequestIdentity,
   ): Promise<TransferDto> {
     const idempotencyKey = idempotencyKeyPipe.transform(idempotencyKeyHeader) as string;
-    const view = await this.transfers.initiateTransfer({
+    const tx = await this.transfers.initiateTransfer({
       ownerId: identity.userId,
       sourceAccountId: body.sourceAccountId,
       destinationAccountNumber: body.destinationAccountNumber,
@@ -90,7 +90,7 @@ export class TransfersApiController {
       confirmationToken: body.confirmationToken,
       confirmDuplicate: body.confirmDuplicate,
     });
-    return serializeTransfer(view);
+    return serializeTransfer(tx);
   }
 
   /** Confirm a PENDING transfer with the caller's one-time code — posts it (money moves). 200. */
@@ -102,20 +102,36 @@ export class TransfersApiController {
     @Body(new ZodValidationPipe(confirmTransferSchema)) body: ConfirmTransferBody,
     @Identity() identity: RequestIdentity,
   ): Promise<TransferDto> {
-    const view = await this.transfers.confirmTransfer({
+    const tx = await this.transfers.confirmTransfer({
       ownerId: identity.userId,
       transferId: id,
       code: body.code,
     });
-    return serializeTransfer(view);
+    return serializeTransfer(tx);
   }
 
-  /** The caller's PENDING transfers awaiting confirm (the OTP app's feed). 200. */
-  @Get('pending-authorizations')
-  async listPending(
+  /** Cancel the caller's PENDING transfer (guarded `PENDING → CANCELLED`, retained). Idempotent
+   * on an already CANCELLED/EXPIRED transfer; a POSTED one cannot be cancelled (409). 200. */
+  @Post('transfers/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  async cancel(
+    @Param('id', ParseUUIDPipe) id: string,
     @Identity() identity: RequestIdentity,
-  ): Promise<{ authorizations: PendingAuthorizationDto[] }> {
-    const pending = await this.transfers.listPendingAuthorizations(identity.userId);
-    return { authorizations: pending.map(serializePendingAuthorization) };
+  ): Promise<TransferDto> {
+    const tx = await this.transfers.cancelTransfer({
+      ownerId: identity.userId,
+      transferId: id,
+    });
+    return serializeTransfer(tx);
+  }
+
+  /** The caller's SINGLE active pending transfer awaiting confirm (the OTP app's feed), or none.
+   * Reading lazily expires an overdue pending. 200, `{ authorization: … | null }`. */
+  @Get('pending-authorization')
+  async getPending(
+    @Identity() identity: RequestIdentity,
+  ): Promise<{ authorization: PendingAuthorizationDto | null }> {
+    const pending = await this.transfers.getPendingAuthorization(identity.userId);
+    return { authorization: pending ? serializePendingAuthorization(pending) : null };
   }
 }

@@ -54,10 +54,30 @@ accounts — not a schema step.)
 | `uq_account_account_number` (add) | Plain UNIQUE index on `account_number` (multiple NULLs coexist, so system accounts don't collide). |
 | `fk_account_owner` (add) | `account.owner_id → customer.id`, nullable (not checked for system accounts' NULL owner). |
 
+**Step 4 — `AddTransactionLifecycle1789171200000`**
+(`…/migrations/1789171200000-AddTransactionLifecycle.ts`) — the pending-authorization lifecycle:
+the two new terminal statuses, the 2-minute expiry marker, and the single-pending invariant.
+
+| Table / change | Role |
+|---|---|
+| `transaction_status` (+labels) | `ALTER TYPE … ADD VALUE IF NOT EXISTS 'EXPIRED'` then `'CANCELLED'` — the two terminal-non-posted states a pending transfer can reach (lapsed, or auto-superseded / user-cancelled), both retained. |
+| `transaction.expires_at` (add) | `timestamptz NULL` — the pending deadline set FROM THE DB CLOCK at initiate (`now() + interval '2 minutes'`). Nullable: only user-initiated PENDING transfers carry one. |
+| `uq_one_pending_per_initiator` (add) | **PARTIAL** unique index `("initiated_by") WHERE "status" = 'PENDING'` — at most ONE live pending per user (structural, not just a service check), and the concurrency backstop against a double-initiate race (→ 23505 → 409). |
+
+**PG note (ADD VALUE in a transaction).** On Postgres 12+ (this deployment is **PG 16**),
+`ALTER TYPE … ADD VALUE` is allowed inside the migration's own transaction ONLY because the new
+labels are **not used** in that same migration — the index predicate references the pre-existing
+`'PENDING'`. This is verified against the live-PG boot gate (migrations run on boot). A later
+migration that must USE `'EXPIRED'`/`'CANCELLED'` in DDL/DML has to be its own, ordered-after
+migration. `down()` drops the index + `expires_at` column; it intentionally **does not** remove
+the enum labels — Postgres cannot drop an enum value in place, and the leftover labels are
+harmless once unused (documented in the migration).
+
 Each migration's `down()` drops its tables (any order for the satellites; reverse FK
 order for the spine) then removes its enum types — a clean inverse. Step 3's `down()` drops the
 FK, the `account_number` index and column, then the two `customer` unique indexes, then the
-`customer` table.
+`customer` table. Step 4's `down()` drops `uq_one_pending_per_initiator` + `expires_at` (the two
+enum labels remain, by design).
 
 ## Enumerations — native Postgres enum types
 
@@ -72,7 +92,7 @@ truth — TypeORM never creates it (synchronize is off).
 | `account_kind` | `customer`, `system` | `account.kind` |
 | `account_status` | `active`, `frozen` | `account.status` (default `active`) |
 | `transaction_type` | `internal`, `external_outbound`, `external_inbound` | `transaction.type` |
-| `transaction_status` | `PENDING`, `POSTED`, `FAILED`, `REVERSED` | `transaction.status` |
+| `transaction_status` | `PENDING`, `POSTED`, `FAILED`, `REVERSED`, `EXPIRED`, `CANCELLED` | `transaction.status` (`EXPIRED` / `CANCELLED` added by the Step-4 lifecycle migration) |
 | `payee_status` | `pending`, `active`, `disabled` | `external_payee.status` (default `pending`) |
 | `hold_status` | `PLACED`, `SETTLED`, `RELEASED`, `EXPIRED` | `hold.status` (default `PLACED`) |
 | `user_limits_scope` | `global`, `customer` | `user_limits.scope` |
@@ -149,7 +169,15 @@ not a migration.
   `currency.code` (NOT NULL).
 - `type`, `status`, `amount`, `initiated_by` NOT NULL. `status` has **no** default — the
   service sets `PENDING` at initiation.
+- `expires_at timestamptz NULL` (Step-4 lifecycle migration) — the 2-minute pending deadline,
+  stamped from the DB clock at initiate (`now() + interval '2 minutes'`); NULL on directly-posted
+  movements. The single source of truth for lazy expiry (`now() >= expires_at`), **no scheduler**.
 - `idx_tx_account (debit_account_id, created_at)` — backs `GET /accounts/:id/transactions`.
+- `uq_one_pending_per_initiator` (Step-4) — a **partial** unique index on `("initiated_by") WHERE
+  status = 'PENDING'`: at most one live PENDING transfer per user, enforced by the DB (not just a
+  service check). Terminal rows (POSTED / EXPIRED / CANCELLED / …) are excluded, so an initiator
+  retains any number of terminal transfers but only ever one pending. A concurrent same-initiator
+  initiate collides here (23505) — the service maps that to a 409 conflict.
 
 **`ledger_entry`** — append-only, double-entry, the source of truth
 - FKs (NOT NULL): `transaction_id` → `transaction.id`, `account_id` → `account.id`,
@@ -279,7 +307,7 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
 | `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findByIdAndOwner(id, ownerId)`, `findBySystemKey`, `findByAccountNumber(accountNumber)`, `lockByIdForUpdate(queryRunner, id)`, `updateBalanceInTx(queryRunner, id, newBalance)` |
 | `CUSTOMER_REPOSITORY` | `ICustomerRepository` | `findById`, `create` |
 | `LEDGER_ENTRY_REPOSITORY` | `ILedgerEntryRepository` | `findById`, `create`, `findByAccount(accountId, limit)` |
-| `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create` |
+| `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create`, `insertInTx`, `insertPendingInTx` (DB-clock `expires_at`), `findByIdInTx`, `findPendingByInitiator` (→ single row or null), `transitionToPostedInTx`, `expireOverduePendingByInitiator`, `supersedeActivePendingByInitiator`, `expireIfOverdue`, `transitionToCancelled` |
 | `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create` |
 | `EXTERNAL_PAYEE_REPOSITORY` | `IExternalPayeeRepository` | `findById`, `create`, `findByOwner` |
 | `USER_LIMITS_REPOSITORY` | `IUserLimitsRepository` | `findById`, `create`, `findByOwner` |

@@ -27,11 +27,15 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   // Conflict with current state / a concurrent or duplicate request.
   ACCOUNT_FROZEN: HttpStatus.CONFLICT,
   TRANSFER_NOT_PENDING: HttpStatus.CONFLICT,
+  PENDING_TRANSFER_CONFLICT: HttpStatus.CONFLICT,
   SUSPECTED_DUPLICATE: HttpStatus.CONFLICT,
   IDEMPOTENCY_KEY_REUSED: HttpStatus.CONFLICT,
   IDEMPOTENCY_IN_PROGRESS: HttpStatus.CONFLICT,
   OTP_ALREADY_ACTIVE: HttpStatus.CONFLICT,
   DESTINATION_NOT_CONFIRMED: HttpStatus.CONFLICT,
+
+  // The resource was valid but is no longer available (a lapsed pending transfer).
+  TRANSFER_EXPIRED: HttpStatus.GONE,
 
   // Second-factor failures.
   INVALID_OTP: HttpStatus.UNAUTHORIZED,

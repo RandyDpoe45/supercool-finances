@@ -50,28 +50,22 @@ export interface ConfirmTransferParams {
   code: string;
 }
 
-/**
- * A transfer enriched for the wire. The SOURCE stays the account **id** (`sourceAccountId` =
- * the transaction's `debitAccountId`, the caller's own account — no lookup); only the
- * DESTINATION credit UUID is resolved to its HUMAN account number. Mirrors how
- * {@link IAccountsService.getAccountStatement} returns `{ account, entries }`: the raw entity
- * never reaches the wire — the controller whitelists this view.
- */
-export interface TransferView {
-  transaction: Transaction;
-  sourceAccountId: string | null;
-  destinationAccountNumber: string | null;
+/** Inputs to {@link ITransfersService.cancelTransfer} — the explicit cancel of the caller's own
+ * pending transfer (guarded `PENDING → CANCELLED`, retained). */
+export interface CancelTransferParams {
+  ownerId: string;
+  transferId: string;
 }
 
 /**
- * A pending transfer enriched for the OTP app's feed: the source account **id** (the caller's
- * own) plus the destination's HUMAN account number and the destination holder's MASKED name
- * (so the app shows who the payment is to). The masking is applied by the service — the raw
- * name (PII) never reaches the controller.
+ * A pending transfer projected for the OTP app's feed. It is a DOMAIN read model, NOT raw
+ * entities: the destination's HUMAN account number and the destination holder's MASKED name are
+ * resolved HERE — masking is a PII/security rule that MUST stay in the service, so the raw name
+ * never crosses the service boundary. The source account id is left on the `transaction`
+ * (`debitAccountId`, the caller's own) for the controller to whitelist at serialize time.
  */
-export interface PendingAuthorizationView {
+export interface PendingAuthorization {
   transaction: Transaction;
-  sourceAccountId: string | null;
   destinationAccountNumber: string | null;
   destinationMaskedName: string;
 }
@@ -80,9 +74,15 @@ export interface PendingAuthorizationView {
  * The internal-transfer lifecycle service (spec 04 Transfers). Two-phase and OTP-gated, and
  * fronted by a confirmation-of-payee step: resolve a destination (query only) → a masked name +
  * a confirmation token → the token is REQUIRED by initiate. A transfer is created PENDING at
- * initiate (no money moves) and posts on OTP-confirm, with the funds check performed at
- * confirm-time under the account lock. Returns enriched VIEW MODELS (human account numbers,
- * masked names) — DTO serialization is a transport concern applied at the controller boundary.
+ * initiate (no money moves), is single + time-boxed (at most one live pending per user; a
+ * 2-minute `expires_at` from the DB clock; lazily EXPIRED on the next access; a new initiate
+ * auto-supersedes the prior pending → CANCELLED; the caller may also cancel explicitly), and
+ * posts on OTP-confirm with the funds check at confirm-time under the account lock.
+ *
+ * The write methods return the plain {@link Transaction} entity — DTO serialization is a
+ * transport concern applied at the controller boundary. Only the pending READ returns a domain
+ * PROJECTION ({@link PendingAuthorization}), because resolving + masking the destination is a
+ * service-owned PII rule the raw entity cannot carry.
  */
 export interface ITransfersService {
   /**
@@ -95,19 +95,32 @@ export interface ITransfersService {
   /**
    * Initiate an internal (customer↔customer) transfer: validate + owner-scope the source,
    * resolve the destination by account number, verify the confirmation token binds to THIS
-   * destination, then create a PENDING transaction under the `Idempotency-Key` (a replay
-   * returns the original). No money moves. Returns the PENDING transfer view.
+   * destination, then — inside the idempotency-wrapped transaction — expire any overdue pending,
+   * auto-supersede any active pending (→ CANCELLED), and create the new PENDING transaction with
+   * a DB-clock `expires_at` (a replay returns the original). No money moves. A truly-concurrent
+   * same-initiator initiate collides on the single-pending index → conflict. Returns the PENDING
+   * transfer entity.
    */
-  initiateTransfer(params: InitiateTransferParams): Promise<TransferView>;
+  initiateTransfer(params: InitiateTransferParams): Promise<Transaction>;
 
   /**
-   * Confirm a PENDING transfer: verify+consume the caller's one-time code, then post the
-   * transfer (money moves) via a guarded transition. An already-POSTED transfer is returned
-   * as an idempotent replay. Returns the POSTED transfer view.
+   * Confirm a PENDING transfer: CHECK EXPIRY FIRST (an expired/overdue transfer transitions to
+   * EXPIRED and is rejected WITHOUT consuming the OTP), then verify+consume the caller's one-time
+   * code and post the transfer (money moves) via a guarded transition. An already-POSTED transfer
+   * is returned as an idempotent replay. Returns the POSTED transfer entity.
    */
-  confirmTransfer(params: ConfirmTransferParams): Promise<TransferView>;
+  confirmTransfer(params: ConfirmTransferParams): Promise<Transaction>;
 
-  /** The caller's PENDING transfers, newest-first (the OTP app's pending-authorizations feed),
-   * each enriched with the destination holder's masked name. */
-  listPendingAuthorizations(ownerId: string): Promise<PendingAuthorizationView[]>;
+  /**
+   * Explicitly cancel the caller's own PENDING transfer (guarded `PENDING → CANCELLED`, retained).
+   * A POSTED transfer cannot be cancelled; an already CANCELLED / EXPIRED transfer is returned
+   * as-is (idempotent). Owner-scoped on the debit account exactly like confirm. Returns the
+   * (now CANCELLED, or concurrently-terminal) transfer entity.
+   */
+  cancelTransfer(params: CancelTransferParams): Promise<Transaction>;
+
+  /** The caller's SINGLE active pending transfer (or `null`) for the OTP app's feed, projected
+   * with the destination holder's masked name. Lazily expires an overdue pending (→ EXPIRED) and
+   * returns `null` in that case — reading is one of the lazy-expiry access points. */
+  getPendingAuthorization(ownerId: string): Promise<PendingAuthorization | null>;
 }

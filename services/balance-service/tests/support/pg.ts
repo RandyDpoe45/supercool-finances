@@ -156,19 +156,50 @@ export function localAccountNumber(): string {
   return s;
 }
 
-/** A minimal valid transaction header (all NOT-NULL-without-default columns provided). */
-export async function insertTransaction(
-  q: any,
-  overrides: Record<string, unknown> = {},
-): Promise<any> {
-  return insertRow(q, 'transaction', {
-    type: 'internal',
-    status: 'PENDING',
-    amount: 1000,
-    currency: 'TST',
-    initiated_by: `sub-${randomUUID()}`,
-    ...overrides,
-  });
+/**
+ * Options for {@link insertTransaction} — the transfer/transaction header a lifecycle suite needs
+ * to construct explicit states. Named (camelCase) fields map to the `"transaction"` columns;
+ * `expiresAt` / `createdAt` / `postedAt` accept a JS `Date` (node-postgres serializes it to the
+ * `timestamptz` column), so a test can seed a PENDING transfer with `expiresAt` in the PAST to
+ * exercise LAZY expiry. `status` defaults to `'PENDING'`; `initiatedBy` defaults to a fresh unique
+ * `sub-<uuid>` — so two default inserts never share an initiator and thus never violate the new
+ * `uq_one_pending_per_initiator` partial unique index (at most one PENDING per initiator).
+ */
+export interface InsertTransactionOpts {
+  id?: string;
+  type?: string;
+  status?: string;
+  amount?: number | string;
+  currency?: string;
+  debitAccountId?: string | null;
+  creditAccountId?: string | null;
+  initiatedBy?: string;
+  expiresAt?: Date | null;
+  createdAt?: Date;
+  postedAt?: Date | null;
+}
+
+/**
+ * A transaction header row (all NOT-NULL-without-default columns defaulted). Only the keys the
+ * caller sets are written, so an unset `expires_at` / `created_at` / `posted_at` keeps its column
+ * default / NULL. Returns the inserted row (RETURNING *). NEVER seeds two PENDING rows for one
+ * `initiated_by` by default — the unique index forbids it.
+ */
+export async function insertTransaction(q: any, opts: InsertTransactionOpts = {}): Promise<any> {
+  const row: Record<string, unknown> = {
+    type: opts.type ?? 'internal',
+    status: opts.status ?? 'PENDING',
+    amount: opts.amount ?? 1000,
+    currency: opts.currency ?? 'TST',
+    initiated_by: opts.initiatedBy ?? `sub-${randomUUID()}`,
+  };
+  if (opts.id !== undefined) row.id = opts.id;
+  if (opts.debitAccountId !== undefined) row.debit_account_id = opts.debitAccountId;
+  if (opts.creditAccountId !== undefined) row.credit_account_id = opts.creditAccountId;
+  if (opts.expiresAt !== undefined) row.expires_at = opts.expiresAt;
+  if (opts.createdAt !== undefined) row.created_at = opts.createdAt;
+  if (opts.postedAt !== undefined) row.posted_at = opts.postedAt;
+  return insertRow(q, 'transaction', row);
 }
 
 /**

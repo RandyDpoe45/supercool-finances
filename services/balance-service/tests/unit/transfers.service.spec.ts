@@ -9,6 +9,11 @@
  *   - confirmation-of-payee: `resolveDestination` is a QUERY (masked name + a caller-bound token,
  *     no transaction); `initiateTransfer` creates a PENDING transfer ONLY with a valid token bound
  *     to the caller AND to THIS destination, else `DestinationNotConfirmedError`.
+ *   - PR #19 single + time-boxed pending: `confirmTransfer` checks EXPIRY before consuming the OTP
+ *     (overdue → `TransferExpiredError`, code NOT burned; already EXPIRED/CANCELLED →
+ *     `TransferNotPendingError`); `cancelTransfer` is a guarded, owner-scoped `PENDING→CANCELLED`
+ *     (idempotent on a terminal row); `getPendingAuthorization` returns the caller's single active
+ *     pending as a masked read model, or null.
  *
  * The service's collaborators (idempotency wrapper, posting reducer, OTP service, account &
  * customer repositories, the Redis client, the DataSource) are MOCKED — but the LOGIC UNDER TEST
@@ -24,8 +29,11 @@
  * ASSUMED service contract (spec/task-derived): `resolveDestination({ownerId, accountNumber})`,
  * `initiateTransfer(params)` (params carry sourceAccountId, destinationAccountNumber,
  * confirmationToken, amount, currency, idempotencyKey, confirmDuplicate?), `confirmTransfer(params)`,
- * `listPendingAuthorizations(ownerId)`; the service returns VIEW models (`{ transaction, ... }`);
- * posting exposes `postPendingInTx(queryRunner, transactionId, command)`.
+ * `cancelTransfer(params)`, `getPendingAuthorization(ownerId)`. Post the PR #19 layering fix
+ * initiate/confirm/cancel return the Transaction ENTITY and getPendingAuthorization returns a
+ * `{ transaction, destinationAccountNumber, destinationMaskedName }` read model (or null); the
+ * `statusOf`/`idOf` unwrappers below accept either the entity or a `{transaction}` wrapper. Posting
+ * exposes `postPendingInTx(queryRunner, transactionId, command)`.
  */
 import 'reflect-metadata';
 import { Test } from '@nestjs/testing';
@@ -46,7 +54,10 @@ import {
 } from '../support/harness';
 
 const TransfersService = getTransfersService();
-const de = getDomainErrors();
+// `any` so the best-effort error-class map tolerates keys added by the PR #19 harness update
+// (TransferExpiredError / PendingTransferConflictError) without a compile-time coupling — these
+// classes are used only for a secondary `instanceof` signal; the primary assertion is the `.code`.
+const de: any = getDomainErrors();
 
 const OWNER = 'sub-alice';
 
@@ -85,6 +96,8 @@ interface Mocks {
     byId: Map<string, any>;
     holdersById: Map<string, any>;
     findByIdResult: any; // transactionRepo.findById for the created id (initiate happy path)
+    // The caller's single active pending transfer (findPendingByInitiator's return), or null.
+    pendingRow: any;
   };
 }
 
@@ -119,6 +132,8 @@ function makeMocks(): Mocks {
       ['owner-y', { id: 'owner-y', name: 'Ana', phone: '5215555550101', email: 'y@t.test' }],
     ]),
     findByIdResult: null as any,
+    // The caller's single active pending transfer (what findPendingByInitiator returns), or null.
+    pendingRow: null as any,
   };
 
   const fakeManager = {
@@ -202,14 +217,43 @@ function makeMocks(): Mocks {
     }),
   };
 
-  const transactionRepo = {
-    findByIdAndOwner: jest.fn(async () => null),
+  // The real ITransactionRepository surface (developer-confirmed):
+  //  - findPendingByInitiator(initiatedBy) → the SINGLE pending transfer or null (NOT an array);
+  //  - insertPendingInTx(qr, data) → the created PENDING row (carries `.id`);
+  //  - expireOverduePendingByInitiator / supersedeActivePendingByInitiator(qr, initiatedBy) → void
+  //    (the initiate op's expire-then-supersede-then-insert sequence);
+  //  - expireIfOverdue(id) → boolean, the AUTHORITY for "is this pending overdue?" (flips
+  //    PENDING→EXPIRED, returns true iff it flipped) — confirm/read gate on THIS, not on a JS clock;
+  //  - transitionToCancelled(id) → boolean (guarded PENDING→CANCELLED).
+  // A Proxy fallback returns a fresh jest.fn for any other access so an incidental call never
+  // throws a TypeError and masks the assertion under test.
+  const transactionRepoBase: any = {
     findById: jest.fn(async () => state.findByIdResult),
-    findPendingByInitiator: jest.fn(async () => []),
-    insertInTx: jest.fn(async (_qr: any, d: any) => ({ id: 'tx-op', ...(d ?? {}) })),
-    create: jest.fn(async (d: any) => ({ id: 'tx-op', ...(d ?? {}) })),
-    save: jest.fn(async (e: any) => e),
+    findPendingByInitiator: jest.fn(async () => state.pendingRow),
+    insertPendingInTx: jest.fn(async (_qr: any, d: any) => ({ id: 'tx-op', ...(d ?? {}) })),
+    expireOverduePendingByInitiator: jest.fn(async () => undefined),
+    supersedeActivePendingByInitiator: jest.fn(async () => undefined),
+    expireIfOverdue: jest.fn(async () => false),
+    transitionToCancelled: jest.fn(async () => true),
+    // Legacy owner-scoped finder kept for any pre-existing wiring; confirm's owner scope is the
+    // account-repo check (accounts.findByIdAndOwner on the debit account).
+    findByIdAndOwner: jest.fn(async () => null),
   };
+  const transactionRepo: any = new Proxy(transactionRepoBase, {
+    get(target, prop, receiver) {
+      if (typeof prop !== 'string') return Reflect.get(target, prop, receiver);
+      if (prop === 'then') return undefined; // must not look like a thenable
+      if (prop in target) return target[prop];
+      // An unmocked method is fine to ACCESS (jest/util may probe the object), but CALLING it means
+      // the service reached for a repo method the mock never stubbed — surface that loudly rather
+      // than silently resolving `undefined` and letting a test pass that should fail.
+      const fn = jest.fn(() => {
+        throw new Error(`unexpected transactionRepo.${prop} call — add it to the mock base`);
+      });
+      target[prop] = fn;
+      return fn;
+    },
+  });
 
   const dataSource = {
     transaction: jest.fn(async (arg1: any, arg2: any) => {
@@ -323,6 +367,20 @@ function pendingTransfer(overrides: Record<string, unknown> = {}): any {
     initiatedBy: OWNER,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     postedAt: null,
+    // Non-overdue by default so the new confirm-time expiry gate treats it as still-valid; the
+    // overdue proof overrides this with a past date.
+    expiresAt: new Date(Date.now() + 120_000),
+    ...overrides,
+  };
+}
+
+function cancelParams(overrides: Record<string, unknown> = {}): any {
+  return {
+    ownerId: OWNER,
+    sub: OWNER,
+    transferId: 'transfer-1',
+    id: 'transfer-1',
+    transactionId: 'transfer-1',
     ...overrides,
   };
 }
@@ -372,7 +430,7 @@ describe('TransfersService.resolveDestination — masked name + a caller-bound t
     expect((res.value?.confirmationToken as string).length).toBeGreaterThan(0);
 
     // QUERY ONLY: no transaction is created, the idempotency wrapper is never touched.
-    expect(mocks.transactionRepo.insertInTx).not.toHaveBeenCalled();
+    expect(mocks.transactionRepo.insertPendingInTx).not.toHaveBeenCalled();
     expect(mocks.idempotency.execute).not.toHaveBeenCalled();
 
     // The token is stored bound to the CALLER (owner id in the key) with a 300s TTL (contract).
@@ -437,7 +495,7 @@ describe('TransfersService.initiateTransfer — confirmation-of-payee gate', () 
     // The gate is a PRECONDITION: a transfer must NOT be created without a valid token. A missing
     // gate would let the idempotency wrapper run and mint a PENDING header.
     expect(mocks.idempotency.execute).not.toHaveBeenCalled();
-    expect(mocks.transactionRepo.insertInTx).not.toHaveBeenCalled();
+    expect(mocks.transactionRepo.insertPendingInTx).not.toHaveBeenCalled();
     expect(mocks.posting.postPendingInTx).not.toHaveBeenCalled();
   });
 
@@ -460,7 +518,7 @@ describe('TransfersService.initiateTransfer — confirmation-of-payee gate', () 
     expect(res.ok).toBe(false);
     expectDomainCode(res.error, ['DESTINATION_NOT_CONFIRMED'], de.DestinationNotConfirmedError);
     expect(mocks.idempotency.execute).not.toHaveBeenCalled();
-    expect(mocks.transactionRepo.insertInTx).not.toHaveBeenCalled();
+    expect(mocks.transactionRepo.insertPendingInTx).not.toHaveBeenCalled();
   });
 
   it("rejects caller B using caller A's token (caller-binding) and creates no PENDING", async () => {
@@ -502,7 +560,7 @@ describe('TransfersService.initiateTransfer — confirmation-of-payee gate', () 
     expect(res.ok).toBe(true);
     // The gate let a legitimate transfer through — this catches an "always-rejects" regression.
     expect(mocks.idempotency.execute).toHaveBeenCalledTimes(1);
-    expect(mocks.transactionRepo.insertInTx).toHaveBeenCalledTimes(1);
+    expect(mocks.transactionRepo.insertPendingInTx).toHaveBeenCalledTimes(1);
     expect(statusOf(res.value)).toBe('PENDING');
     expect(idOf(res.value)).toBe('tx-op');
   });
@@ -658,5 +716,158 @@ describe('TransfersService.confirmTransfer — OTP gating, ordering, and lifecyc
     const postIdx = mocks.callLog.indexOf('postPendingInTx');
     expect(consumeIdx).toBeGreaterThanOrEqual(0);
     expect(postIdx).toBeGreaterThan(consumeIdx); // consume happened first
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// confirmTransfer — 2-minute expiry gate: expiry is checked BEFORE the OTP is consumed
+// ---------------------------------------------------------------------------------------------
+
+describe('TransfersService.confirmTransfer — expiry gate (checked BEFORE consuming the OTP)', () => {
+  it('MONEY-SAFETY: an OVERDUE pending transfer throws TransferExpiredError and does NOT burn the OTP or post', async () => {
+    const { service, mocks } = await setup();
+    // A PENDING transfer the DB-clock authority reports overdue: `expireIfOverdue` flips it to
+    // EXPIRED and returns true; the confirm path gates on THIS before touching the single-use code.
+    const overdue = pendingTransfer({ expiresAt: new Date(Date.now() - 60_000) });
+    mocks.transactionRepo.findById.mockResolvedValue(overdue);
+    mocks.transactionRepo.expireIfOverdue.mockResolvedValue(true);
+    mocks.state.consumeResult = { ok: true, remainingAttempts: 3, lockedOut: false };
+
+    const res = await capture(service.confirmTransfer(confirmParams()));
+
+    expect(res.ok).toBe(false);
+    expectDomainCode(res.error, ['TRANSFER_EXPIRED'], de.TransferExpiredError);
+    // The whole point of "expiry before OTP": the code is NEVER consumed, and nothing posts.
+    expect(mocks.otp.consume).not.toHaveBeenCalled();
+    expect(mocks.posting.postPendingInTx).not.toHaveBeenCalled();
+  });
+
+  it('DETERMINISTIC 410: a concurrent access that expires the transfer between the DB-clock check and the re-read still yields TransferExpiredError (not 409), OTP untouched', async () => {
+    const { service, mocks } = await setup();
+    // Initial load: PENDING and not yet overdue by the DB clock, so THIS caller's `expireIfOverdue`
+    // returns false. But a concurrent initiate/read/confirm flips it to EXPIRED before the re-read.
+    const pending = pendingTransfer();
+    const expiredByRace = pendingTransfer({ status: 'EXPIRED' });
+    mocks.transactionRepo.findById
+      .mockResolvedValueOnce(pending) // initial load
+      .mockResolvedValue(expiredByRace); // the re-read sees the concurrent EXPIRED
+    mocks.transactionRepo.expireIfOverdue.mockResolvedValue(false);
+    mocks.state.consumeResult = { ok: true, remainingAttempts: 3, lockedOut: false };
+
+    const res = await capture(service.confirmTransfer(confirmParams()));
+
+    expect(res.ok).toBe(false);
+    expectDomainCode(res.error, ['TRANSFER_EXPIRED'], de.TransferExpiredError);
+    // Still money-safe AND now precise: EXPIRED (410), and the single-use code is never consumed.
+    expect(mocks.otp.consume).not.toHaveBeenCalled();
+    expect(mocks.posting.postPendingInTx).not.toHaveBeenCalled();
+  });
+
+  it('rejects confirming an already-EXPIRED transfer with TransferNotPendingError (terminal, no OTP, no post)', async () => {
+    const { service, mocks } = await setup();
+    const expired = pendingTransfer({ status: 'EXPIRED' });
+    mocks.transactionRepo.findByIdAndOwner.mockResolvedValue(expired);
+    mocks.transactionRepo.findById.mockResolvedValue(expired);
+
+    const res = await capture(service.confirmTransfer(confirmParams()));
+
+    expect(res.ok).toBe(false);
+    expectDomainCode(res.error, ['TRANSFER_NOT_PENDING'], de.TransferNotPendingError);
+    expect(mocks.otp.consume).not.toHaveBeenCalled();
+    expect(mocks.posting.postPendingInTx).not.toHaveBeenCalled();
+  });
+
+  it('rejects confirming a CANCELLED (superseded) transfer with TransferNotPendingError and never posts', async () => {
+    const { service, mocks } = await setup();
+    const cancelled = pendingTransfer({ status: 'CANCELLED', failureReason: 'superseded' });
+    mocks.transactionRepo.findByIdAndOwner.mockResolvedValue(cancelled);
+    mocks.transactionRepo.findById.mockResolvedValue(cancelled);
+
+    const res = await capture(service.confirmTransfer(confirmParams()));
+
+    expect(res.ok).toBe(false);
+    expectDomainCode(res.error, ['TRANSFER_NOT_PENDING'], de.TransferNotPendingError);
+    expect(mocks.posting.postPendingInTx).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// cancelTransfer — guarded PENDING→CANCELLED, owner-scoped, idempotent on a terminal row
+// ---------------------------------------------------------------------------------------------
+
+describe('TransfersService.cancelTransfer — guarded transition + owner scope', () => {
+  it('rejects a missing / non-owned transfer (owner-scoped lookup → null) with TransferNotFoundError', async () => {
+    const { service, mocks } = await setup();
+    // The owner-scoped lookup (by transfer id + the caller as the debit-account owner) misses.
+    mocks.transactionRepo.findByIdAndOwner.mockResolvedValue(null);
+    mocks.transactionRepo.findById.mockResolvedValue(null);
+
+    const res = await capture(service.cancelTransfer(cancelParams()));
+
+    expect(res.ok).toBe(false);
+    expectDomainCode(res.error, ['TRANSFER_NOT_FOUND'], de.TransferNotFoundError);
+  });
+
+  it('rejects cancelling a POSTED transfer with TransferNotPendingError (money already moved)', async () => {
+    const { service, mocks } = await setup();
+    const posted = pendingTransfer({ status: 'POSTED', postedAt: new Date() });
+    mocks.transactionRepo.findByIdAndOwner.mockResolvedValue(posted);
+    mocks.transactionRepo.findById.mockResolvedValue(posted);
+
+    const res = await capture(service.cancelTransfer(cancelParams()));
+
+    expect(res.ok).toBe(false);
+    expectDomainCode(res.error, ['TRANSFER_NOT_PENDING'], de.TransferNotPendingError);
+  });
+
+  it('is idempotent on an already-CANCELLED transfer: returns it CANCELLED without throwing', async () => {
+    const { service, mocks } = await setup();
+    const cancelled = pendingTransfer({ status: 'CANCELLED', failureReason: 'superseded' });
+    mocks.transactionRepo.findByIdAndOwner.mockResolvedValue(cancelled);
+    mocks.transactionRepo.findById.mockResolvedValue(cancelled);
+
+    const res = await capture(service.cancelTransfer(cancelParams()));
+
+    expect(res.ok).toBe(true);
+    expect(statusOf(res.value)).toBe('CANCELLED');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// getPendingAuthorization — the caller's SINGLE active pending transfer, or null, masked
+// ---------------------------------------------------------------------------------------------
+
+describe('TransfersService.getPendingAuthorization — single active pending or null (masked name)', () => {
+  it('returns null when the caller has no active pending transfer (findPendingByInitiator → null)', async () => {
+    const { service, mocks } = await setup();
+    mocks.state.pendingRow = null; // findPendingByInitiator resolves null
+
+    const res = await capture(service.getPendingAuthorization(OWNER));
+
+    expect(res.ok).toBe(true);
+    expect(res.value ?? null).toBeNull();
+  });
+
+  it('returns the single pending as a read model carrying the destination MASKED name (raw name withheld)', async () => {
+    const { service, mocks } = await setup();
+    // findPendingByInitiator returns THIS single pending; it credits dst-x (owned by owner-x, holder
+    // "Juan Perez", number 2222222222); expireIfOverdue reports it still valid (false).
+    const pending = pendingTransfer({
+      id: 'pend-1',
+      creditAccountId: 'dst-x',
+      debitAccountId: 'src-1',
+    });
+    mocks.state.pendingRow = pending;
+    mocks.transactionRepo.expireIfOverdue.mockResolvedValue(false);
+
+    const res = await capture(service.getPendingAuthorization(OWNER));
+
+    expect(res.ok).toBe(true);
+    expect(res.value).toBeTruthy();
+    // Read model shape: { transaction, destinationAccountNumber, destinationMaskedName }.
+    expect(idOf(res.value)).toBe('pend-1');
+    expect(res.value.destinationMaskedName).toBe('Jua** Per**'); // masked in the SERVICE
+    expect(res.value.destinationAccountNumber).toBe('2222222222'); // dst-x's human number
+    expect(JSON.stringify(res.value)).not.toContain('Juan Perez'); // the raw holder name never crosses
   });
 });

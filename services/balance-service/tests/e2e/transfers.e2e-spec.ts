@@ -6,21 +6,24 @@
  *
  * Endpoints under test:
  *   POST /api/transfers/resolve-destination  (body {accountNumber})  → 200 {maskedName, currency, confirmationToken}
- *   POST /api/transfers                       (Idempotency-Key hdr)   → 201 + a PENDING Transfer DTO
+ *   POST /api/transfers                       (Idempotency-Key hdr)   → 201 + a PENDING Transfer DTO (with expiresAt)
  *   POST /api/otp                                                      → 201 + {code, ttlSeconds}
  *   POST /api/transfers/:id/confirm           (body {code})            → 200 + a POSTED Transfer DTO
- *   GET  /api/pending-authorizations                                   → the caller's PENDING transfers
+ *   POST /api/transfers/:id/cancel                                     → 200 + a CANCELLED Transfer DTO
+ *   GET  /api/pending-authorization                                    → { authorization: PendingAuthorizationDto | null }
  *   GET  /api/accounts                                                 → AccountDto[] (now with accountNumber)
  *
  * It proves: the resolve DTO whitelist (masked name over the wire, NO raw name/phone/email leak);
  * the resolve→initiate gate (a well-formed but unissued token → 409 DESTINATION_NOT_CONFIRMED; a
  * bad account number → 400 zod); the DomainError→HTTP mapping AT THE EDGE (the response `error.code`
- * is the DOMAIN code); object-level authorization (X-User-Id scoping; non-owned → 404, never a
- * leak); and the anti-leak whitelist DTOs — TransferDto / PendingAuthorizationDto expose the
- * caller's OWN `sourceAccountId` (a UUID, mirrors `AccountDto.id`, not a leak) and the DESTINATION
- * as a human account NUMBER (never the destination's raw UUID) and never `initiatedBy`/owner. A
- * wrong status, a status-derived code, an authorization leak, a leaked owner id, a leaked
- * destination UUID, or a leaked raw name FAILS a test.
+ * is the DOMAIN code, incl. 410 TRANSFER_EXPIRED / 409 TRANSFER_NOT_PENDING); object-level
+ * authorization (X-User-Id scoping; non-owned → 404, never a leak); single + time-boxed pending
+ * (auto-supersede across two initiates, cancel, overdue-confirm → 410); and the anti-leak whitelist
+ * DTOs after the PR #19 review fix — the WRITE Transfer DTO (initiate/confirm/cancel) exposes the
+ * caller's OWN `sourceAccountId` + `expiresAt` but NEVER `destinationAccountNumber` / the raw credit
+ * UUID / `initiatedBy` / owner; the singular PendingAuthorizationDto DOES carry the destination as a
+ * human account NUMBER + masked name. A wrong status, a status-derived code, an authorization leak,
+ * a leaked owner id, a leaked destination UUID, or a leaked raw name FAILS a test.
  *
  * Honest-SKIP: OPT-IN via BALANCE_INTEGRATION=1 (the write path hits Postgres AND Redis). beforeAll
  * TCP-probes both and fails loud if unreachable; boots AppModule (migrationsRun:true). Unique
@@ -37,7 +40,14 @@ import request from 'supertest';
 
 import { getAppModule, getRedisClientToken, tcpProbe } from '../support/harness';
 import { completeRawEnv } from '../support/env.fixture';
-import { insertRow, insertCustomer, localAccountNumber, TODAY, MONTH_START } from '../support/pg';
+import {
+  insertRow,
+  insertCustomer,
+  insertTransaction,
+  localAccountNumber,
+  TODAY,
+  MONTH_START,
+} from '../support/pg';
 
 const ENABLED = process.env.BALANCE_INTEGRATION === '1';
 
@@ -274,15 +284,18 @@ suite(
       const t = body?.transfer ?? body?.transaction ?? body;
       return t?.status;
     }
-    function pendingList(body: any): any[] {
-      const list =
-        body?.authorizations ??
-        body?.pendingAuthorizations ??
-        body?.transfers ??
-        body?.items ??
-        body?.pending ??
-        (Array.isArray(body) ? body : []);
-      return Array.isArray(list) ? list : [];
+
+    /** GET /api/pending-authorization returns `{ authorization: PendingAuthorizationDto | null }`. */
+    async function getPendingAuth(owner: string) {
+      return asUser(owner).get('/api/pending-authorization');
+    }
+    /** The single authorization object (or null) from the pending-authorization response body. */
+    function authOf(body: any): any {
+      return body?.authorization ?? null;
+    }
+
+    async function cancelTransfer(owner: string, transferId: string) {
+      return asUser(owner).post(`/api/transfers/${transferId}/cancel`).send({});
     }
 
     function expectErrorDto(body: any, code?: string): void {
@@ -370,7 +383,7 @@ suite(
 
     // ---- TransferDto over the wire: caller's own source id + destination number ----------
 
-    it("the Transfer DTO exposes the caller's OWN sourceAccountId + the destination account NUMBER (never the destination raw UUID) and never initiatedBy/owner", async () => {
+    it("the write Transfer DTO exposes the caller's OWN sourceAccountId + expiresAt, and NEVER destinationAccountNumber / raw credit UUID / initiatedBy / owner", async () => {
       const owner = newOwner();
       const src = await mkCustomer(owner, { balance: 10000 });
       const dst = await mkCustomer(newOwner(), { balance: 0 });
@@ -380,19 +393,36 @@ suite(
 
       const t = res.body?.transfer ?? res.body?.transaction ?? res.body;
       // Source is the caller's OWN account id (a UUID equal to the seeded source id) — mirrors
-      // AccountDto.id, not a leak. Destination stays a human NUMBER (never the internal UUID).
+      // AccountDto.id, not a leak.
       expect(t.sourceAccountId).toBe(src.id);
-      expect(t.destinationAccountNumber).toBe(dst.account_number);
+      // Post review-fix: the write DTO is serialized FROM the Transaction entity, which carries only
+      // the raw credit UUID — so it exposes NEITHER the human destination number NOR the raw UUID;
+      // the destination number is a read-model concern (pending-authorization) only.
+      expect('destinationAccountNumber' in t).toBe(false);
+      // The time-box IS on the wire (expires_at → expiresAt), value present (string or null).
+      expect('expiresAt' in t).toBe(true);
 
       const serialized = JSON.stringify(res.body);
-      // The DESTINATION's raw UUID and the owner sub are NEVER on the wire (serialization security);
-      // the caller's own source id IS expected (asserted above), so it is not checked for absence.
+      // The DESTINATION's raw UUID, the owner sub, and internal fields are NEVER on the wire; the
+      // caller's own source id IS expected (asserted above), so it is not checked for absence.
       expect(serialized).not.toContain(dst.id);
       expect(serialized).not.toContain(owner);
       expect(serialized.toLowerCase()).not.toContain('initiatedby');
+      expect(serialized.toLowerCase()).not.toContain('failurereason');
     });
 
-    it("GET /api/pending-authorizations exposes the caller's source account id + destination number + masked name, no destination-UUID/owner leak", async () => {
+    it('GET /api/pending-authorization returns { authorization: null } when the caller has none (never an array)', async () => {
+      const owner = newOwner();
+      await mkCustomer(owner, { balance: 10000 });
+
+      const res = await getPendingAuth(owner);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body)).toBe(false); // the endpoint is singular, not a list
+      expect('authorization' in res.body).toBe(true);
+      expect(authOf(res.body)).toBeNull();
+    });
+
+    it('GET /api/pending-authorization returns the SINGLE authorization (source id + destination number + masked name + expiresAt), no destination-UUID/owner/PII leak', async () => {
       const owner = newOwner();
       const src = await mkCustomer(owner, { balance: 10000 });
       const dst = await mkCustomer(newOwner(), { name: 'Juan Perez', balance: 0 });
@@ -400,14 +430,17 @@ suite(
       const created = await postTransfer(owner, src.id, dst, 1000);
       const transferId = idOf(created.body);
 
-      const res = await asUser(owner).get('/api/pending-authorizations');
+      const res = await getPendingAuth(owner);
       expect(res.status).toBe(200);
-      const entry = pendingList(res.body).find((t) => idOf(t) === transferId);
-      expect(entry).toBeTruthy();
+      expect(Array.isArray(res.body)).toBe(false);
+      const auth = authOf(res.body);
+      expect(auth).toBeTruthy();
+      expect(idOf(auth)).toBe(transferId);
       // Source is the caller's OWN account id (UUID equal to the seeded source id), not a leak.
-      expect(entry.sourceAccountId).toBe(src.id);
-      expect(entry.destinationAccountNumber).toBe(dst.account_number);
-      expect(entry.destinationMaskedName).toBe('Jua** Per**'); // masked, never the raw name
+      expect(auth.sourceAccountId).toBe(src.id);
+      expect(auth.destinationAccountNumber).toBe(dst.account_number); // the read model DOES carry it
+      expect(auth.destinationMaskedName).toBe('Jua** Per**'); // masked, never the raw name
+      expect('expiresAt' in auth).toBe(true);
 
       const serialized = JSON.stringify(res.body);
       // Destination holder PII and the destination's raw UUID never cross the wire; the owner sub
@@ -534,10 +567,10 @@ suite(
       const created = await postTransfer(ownerA, srcA.id, dst, 1000);
       const transferId = idOf(created.body);
 
-      // B cannot see A's pending transfer.
-      const listB = await asUser(ownerB).get('/api/pending-authorizations');
-      expect(listB.status).toBe(200);
-      expect(pendingList(listB.body).map((t) => idOf(t))).not.toContain(transferId);
+      // B cannot see A's pending transfer — B's own single-pending read is null (B has none).
+      const authB = await getPendingAuth(ownerB);
+      expect(authB.status).toBe(200);
+      expect(authOf(authB.body)).toBeNull();
 
       // B cannot confirm A's transfer — 404 for B, never 403.
       const otpB = await mintOtp(ownerB);
@@ -622,6 +655,162 @@ suite(
       const override = await postTransfer(owner, src.id, dst, 1500, { confirmDuplicate: true });
       expect(override.status).toBe(201); // an explicit repeat is allowed
       expect(idOf(override.body)).not.toBe(idOf(first.body));
+    });
+
+    // ---- cancel: POST /api/transfers/:id/cancel → 200 CANCELLED, then pending is null ----------
+
+    it('POST /api/transfers/:id/cancel → 200 CANCELLED; then GET /api/pending-authorization is null', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000 });
+      const dst = await mkCustomer(newOwner(), { balance: 0 });
+
+      const created = await postTransfer(owner, src.id, dst, 2000);
+      const transferId = idOf(created.body);
+
+      const cancelled = await cancelTransfer(owner, transferId);
+      expect(cancelled.status).toBe(200);
+      expect(statusOf(cancelled.body)).toBe('CANCELLED');
+      // The cancel write DTO obeys the same whitelist: expiresAt present, no destination number.
+      const body = cancelled.body?.transfer ?? cancelled.body?.transaction ?? cancelled.body;
+      expect('expiresAt' in body).toBe(true);
+      expect('destinationAccountNumber' in body).toBe(false);
+
+      // The caller now has no pending authorization, and the row is retained as CANCELLED.
+      const auth = await getPendingAuth(owner);
+      expect(authOf(auth.body)).toBeNull();
+      const row = await ds.query(`SELECT status FROM "transaction" WHERE id = $1`, [transferId]);
+      expect(row[0].status).toBe('CANCELLED');
+    });
+
+    it('POST /api/transfers/:id/cancel on a POSTED transfer → 409 TRANSFER_NOT_PENDING', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000 });
+      const dst = await mkCustomer(newOwner(), { balance: 0 });
+
+      const created = await postTransfer(owner, src.id, dst, 3000);
+      const transferId = idOf(created.body);
+      const otp = await mintOtp(owner);
+      const confirmed = await asUser(owner)
+        .post(`/api/transfers/${transferId}/confirm`)
+        .send({ code: otp.code });
+      expect(confirmed.status).toBe(200);
+
+      const res = await cancelTransfer(owner, transferId);
+      expect(res.status).toBe(409);
+      expectErrorDto(res.body, 'TRANSFER_NOT_PENDING');
+    });
+
+    it("POST /api/transfers/:id/cancel on ANOTHER user's transfer → 404 (anti-IDOR, no leak)", async () => {
+      const ownerA = newOwner();
+      const ownerB = newOwner();
+      const srcA = await mkCustomer(ownerA, { balance: 10000 });
+      const dst = await mkCustomer(newOwner(), { balance: 0 });
+
+      const created = await postTransfer(ownerA, srcA.id, dst, 1000);
+      const transferId = idOf(created.body);
+
+      const res = await cancelTransfer(ownerB, transferId);
+      expect(res.status).toBe(404);
+      expectErrorDto(res.body);
+      // A's transfer is untouched.
+      const row = await ds.query(`SELECT status FROM "transaction" WHERE id = $1`, [transferId]);
+      expect(row[0].status).toBe('PENDING');
+    });
+
+    // ---- confirm write DTO shape (POSTED) obeys the whitelist -----------------------------------
+
+    it('the confirm (POSTED) write DTO carries expiresAt and never destinationAccountNumber / raw credit UUID', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000 });
+      const dst = await mkCustomer(newOwner(), { balance: 0 });
+
+      const created = await postTransfer(owner, src.id, dst, 4000);
+      const transferId = idOf(created.body);
+      const otp = await mintOtp(owner);
+      const confirmed = await asUser(owner)
+        .post(`/api/transfers/${transferId}/confirm`)
+        .send({ code: otp.code });
+      expect(confirmed.status).toBe(200);
+      expect(statusOf(confirmed.body)).toBe('POSTED');
+
+      const t = confirmed.body?.transfer ?? confirmed.body?.transaction ?? confirmed.body;
+      expect('expiresAt' in t).toBe(true);
+      expect('destinationAccountNumber' in t).toBe(false);
+      expect(JSON.stringify(confirmed.body)).not.toContain(dst.id); // no raw credit UUID
+    });
+
+    // ---- expiry at the HTTP edge: an OVERDUE confirm → 410 TRANSFER_EXPIRED ---------------------
+
+    it('POST /api/transfers/:id/confirm on an OVERDUE pending → 410 TRANSFER_EXPIRED (code NOT burned)', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 10000 });
+      const dst = await mkCustomer(newOwner(), { balance: 0 });
+
+      // Plant an overdue PENDING transfer for the caller (expires_at already in the past).
+      const overdue = await insertTransaction(ds, {
+        initiatedBy: owner,
+        debitAccountId: src.id,
+        creditAccountId: dst.id,
+        amount: '3000',
+        currency: MXN,
+        expiresAt: new Date(Date.now() - 60_000),
+      });
+
+      const otp = await mintOtp(owner);
+      const res = await asUser(owner)
+        .post(`/api/transfers/${overdue.id}/confirm`)
+        .send({ code: otp.code });
+      expect(res.status).toBe(410);
+      expectErrorDto(res.body, 'TRANSFER_EXPIRED');
+
+      // The row transitioned to EXPIRED (retained), and no money moved.
+      const row = await ds.query(`SELECT status FROM "transaction" WHERE id = $1`, [overdue.id]);
+      expect(row[0].status).toBe('EXPIRED');
+      const bal = await ds.query(`SELECT balance FROM account WHERE id = $1`, [src.id]);
+      expect(bal[0].balance).toBe('10000');
+    });
+
+    // ---- single pending + auto-supersede visible across two initiates --------------------------
+
+    it('a second POST /api/transfers auto-supersedes the first (→ CANCELLED); pending-authorization shows only the new one', async () => {
+      const owner = newOwner();
+      const src = await mkCustomer(owner, { balance: 20000 });
+      const dst = await mkCustomer(newOwner(), { balance: 0 });
+
+      const first = await postTransfer(owner, src.id, dst, 1000);
+      expect(first.status).toBe(201);
+      const firstId = idOf(first.body);
+
+      // A DIFFERENT amount → different fingerprint (not a soft-duplicate) → a NEW pending.
+      const second = await postTransfer(owner, src.id, dst, 2000);
+      expect(second.status).toBe(201);
+      const secondId = idOf(second.body);
+      expect(secondId).not.toBe(firstId);
+
+      // The single pending read shows ONLY the new one.
+      const auth = await getPendingAuth(owner);
+      expect(idOf(authOf(auth.body))).toBe(secondId);
+
+      // The first is retained as CANCELLED (superseded).
+      const rows = await ds.query(`SELECT id, status FROM "transaction" WHERE initiated_by = $1`, [
+        owner,
+      ]);
+      const byId = new Map<string, string>(rows.map((r: any) => [r.id, r.status]));
+      expect(byId.get(firstId)).toBe('CANCELLED');
+      expect(byId.get(secondId)).toBe('PENDING');
+    });
+
+    // ---- ParseUUIDPipe: a malformed transfer id on confirm/cancel → 400 ------------------------
+
+    it('POST /api/transfers/:id/confirm and /cancel with a malformed (non-UUID) id → 400 (ParseUUIDPipe)', async () => {
+      const owner = newOwner();
+      const badConfirm = await asUser(owner)
+        .post('/api/transfers/not-a-uuid/confirm')
+        .send({ code: '123456' });
+      expect(badConfirm.status).toBe(400);
+
+      const badCancel = await cancelTransfer(owner, 'not-a-uuid');
+      expect(badCancel.status).toBe(400);
     });
   },
 );

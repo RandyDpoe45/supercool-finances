@@ -544,6 +544,13 @@ export interface ResolvedDomainErrors {
   /** Confirmation-of-payee follow-up: initiate was called without a valid confirmation token
    *  bound to the caller AND to THIS destination (code `DESTINATION_NOT_CONFIRMED` → 409). */
   DestinationNotConfirmedError?: any;
+  /** Pending-lifecycle follow-up: a PENDING transfer whose 2-minute `expires_at` lapsed —
+   *  confirm/read lazily transitions it to EXPIRED and confirm rejects WITHOUT consuming the OTP
+   *  (code `TRANSFER_EXPIRED` → 410). Distinct class from `TransferNotPendingError`. */
+  TransferExpiredError?: any;
+  /** Pending-lifecycle follow-up: a same-initiator concurrent initiate collided on the
+   *  single-pending unique index (code `PENDING_TRANSFER_CONFLICT` → 409). */
+  PendingTransferConflictError?: any;
 }
 
 /**
@@ -648,6 +655,14 @@ export function getDomainErrors(): ResolvedDomainErrors {
       'DestinationNotConfirmedError',
       'DestinationNotConfirmed',
       'PayeeNotConfirmedError',
+    ]),
+    // Pending-lifecycle follow-up: the two new transfers/service errors. Distinct classes (like
+    // the TransferNotPendingError / TransactionNotPendingError split), resolved under their own
+    // keys so an `instanceof` proof targets the right one.
+    TransferExpiredError: findExportAcross(candidates, ['TransferExpiredError', 'TransferExpired']),
+    PendingTransferConflictError: findExportAcross(candidates, [
+      'PendingTransferConflictError',
+      'PendingTransferConflict',
     ]),
   };
 }
@@ -778,6 +793,27 @@ export function tcpProbe(host: string, port: number, timeoutMs = 1500): Promise<
  *  by token, never by class, per the interface/impl split). Reuses the shared service-token probe. */
 export function getTransfersServiceToken(): symbol {
   return resolveServiceToken('TRANSFERS_SERVICE', 'transfers');
+}
+
+/** `TRANSACTION_REPOSITORY` — the DI token the persistence layer binds the transaction repo to.
+ *  Reuses the multi-path repo-token resolver so the pending-lifecycle suites can drive the new
+ *  guarded transitions (`insertPendingInTx`, `expireIfOverdue`, `transitionToCancelled`, …). */
+export function getTransactionRepositoryToken(): symbol {
+  return getRepositoryToken('TRANSACTION_REPOSITORY', 'transaction');
+}
+
+/**
+ * The `TransactionStatus` enum (native-Postgres-enum mirror) — including the new terminal
+ * `EXPIRED` / `CANCELLED` labels — so a suite can assert the lifecycle status of a transfer row
+ * without hard-coding the string values. Resolved from the entities barrel; the single
+ * coordination point if the implementor moves it.
+ */
+export function getTransactionStatus(): Record<string, string> {
+  return resolveOrThrow(
+    'the TransactionStatus enum',
+    [`${SRC}/database/entities/enums`],
+    ['TransactionStatus'],
+  );
 }
 
 /**

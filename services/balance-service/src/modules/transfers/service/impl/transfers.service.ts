@@ -25,6 +25,7 @@ import {
 import { REDIS_CLIENT } from '../../../../redis/redis.tokens';
 import {
   IDEMPOTENCY_SERVICE,
+  IdempotencyOutcome,
   IIdempotencyService,
 } from '../../../idempotency/service/interfaces/idempotency.service.interface';
 import { IOtpService, OTP_SERVICE } from '../../../otp/service/interfaces/otp.service.interface';
@@ -39,19 +40,42 @@ import {
   InvalidOtpError,
   InvalidTransferError,
   OtpLockedOutError,
+  PendingTransferConflictError,
+  TransferExpiredError,
   TransferNotFoundError,
   TransferNotPendingError,
 } from '../errors';
 import { maskName } from './mask-name';
 import {
+  CancelTransferParams,
   ConfirmTransferParams,
   DestinationResolution,
   InitiateTransferParams,
   ITransfersService,
-  PendingAuthorizationView,
+  PendingAuthorization,
   ResolveDestinationParams,
-  TransferView,
 } from '../interfaces/transfers.service.interface';
+
+/** The partial unique index enforcing at most one PENDING transfer per initiator. A same-owner
+ * concurrent initiate collides on it (SQLSTATE 23505); the service maps that to a 409. */
+const PENDING_UNIQUE_CONSTRAINT = 'uq_one_pending_per_initiator';
+
+/** True iff the error is (or wraps) a Postgres unique violation on {@link PENDING_UNIQUE_CONSTRAINT}
+ * — the single-pending index. TypeORM surfaces the driver error as `QueryFailedError`; the
+ * SQLSTATE + constraint live on the error or its `driverError`, so both are checked. */
+function isPendingUniqueViolation(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const candidate = error as {
+    code?: unknown;
+    constraint?: unknown;
+    driverError?: { code?: unknown; constraint?: unknown };
+  };
+  const code = candidate.code ?? candidate.driverError?.code;
+  const constraint = candidate.constraint ?? candidate.driverError?.constraint;
+  return code === '23505' && constraint === PENDING_UNIQUE_CONSTRAINT;
+}
 
 /** Canonical unsigned minor-unit string (a positive amount magnitude). Validated before any
  * `BigInt()` so a malformed value raises the domain error, not a raw `SyntaxError`. */
@@ -84,9 +108,18 @@ interface ConfirmationRecord {
  * then fails (insufficient funds under the lock, etc.) the code is spent and the transfer
  * stays PENDING, so a retry needs a fresh code (matching the spec's confirm-time funds check).
  *
- * The service returns enriched VIEW MODELS (the source account id, the destination human
- * account number + masked holder name); DTO serialization is a transport concern applied at the
- * controller. The raw holder name (PII) is masked HERE so it never crosses the service boundary.
+ * Pending authorization is SINGLE and TIME-BOXED: at most one live PENDING per user (a partial
+ * unique index, not just a service check), each carrying a 2-minute `expires_at` set from the DB
+ * clock. Overdue pendings transition to EXPIRED lazily on the next access (confirm / read / next
+ * initiate) — no scheduler. Confirm CHECKS EXPIRY BEFORE consuming the OTP, so an expired
+ * transfer never burns the caller's code. A new initiate auto-supersedes any active pending
+ * (→ CANCELLED, retained); the caller may also cancel a pending explicitly. Terminal states are
+ * retained, never deleted.
+ *
+ * The write methods return the plain {@link Transaction} entity; DTO serialization is a transport
+ * concern applied at the controller. Only the pending READ returns a domain PROJECTION (the
+ * destination human account number + masked holder name), because masking the raw name (PII) is a
+ * service-owned rule that must never cross the service boundary.
  */
 @Injectable()
 export class TransfersService implements ITransfersService {
@@ -137,7 +170,7 @@ export class TransfersService implements ITransfersService {
     return { maskedName: maskName(holder.name), currency: destination.currency, confirmationToken };
   }
 
-  async initiateTransfer(params: InitiateTransferParams): Promise<TransferView> {
+  async initiateTransfer(params: InitiateTransferParams): Promise<Transaction> {
     const {
       ownerId,
       sourceAccountId,
@@ -184,47 +217,61 @@ export class TransfersService implements ITransfersService {
     //    destination. Without it they were only querying — a transfer cannot be initiated.
     await this.assertDestinationConfirmed(ownerId, confirmationToken, destination.id);
 
-    // e. Claim the Idempotency-Key and create the PENDING header under it (no money moves).
-    //    A replayed key returns the original transaction id; SUSPECTED_DUPLICATE /
-    //    IDEMPOTENCY_KEY_REUSED propagate from the wrapper.
-    const outcome = await this.idempotency.execute(
-      {
-        ownerId,
-        key: idempotencyKey,
-        fingerprintInput: {
-          type: 'internal',
-          source: source.id,
-          destination: destination.id,
-          amount,
-          currency,
+    // e. Claim the Idempotency-Key and create the PENDING header under it (no money moves). The
+    //    operation runs in ONE transaction: first EXPIRE any overdue pending for this initiator
+    //    (DB clock), then AUTO-SUPERSEDE any remaining active pending (→ CANCELLED, retained), then
+    //    INSERT the new PENDING with a DB-clock `expires_at`. A replayed key returns the original
+    //    id WITHOUT re-running any of this; SUSPECTED_DUPLICATE / IDEMPOTENCY_KEY_REUSED propagate.
+    let outcome: IdempotencyOutcome;
+    try {
+      outcome = await this.idempotency.execute(
+        {
+          ownerId,
+          key: idempotencyKey,
+          fingerprintInput: {
+            type: 'internal',
+            source: source.id,
+            destination: destination.id,
+            amount,
+            currency,
+          },
+          confirmDuplicate,
         },
-        confirmDuplicate,
-      },
-      async (queryRunner) => {
-        const created = await this.transactions.insertInTx(queryRunner, {
-          id: randomUUID(),
-          type: TransactionType.Internal,
-          status: TransactionStatus.Pending,
-          amount,
-          currency,
-          debitAccountId: source.id,
-          creditAccountId: destination.id,
-          initiatedBy: ownerId,
-          postedAt: null,
-        });
-        return { transactionId: created.id };
-      },
-    );
+        async (queryRunner) => {
+          await this.transactions.expireOverduePendingByInitiator(queryRunner, ownerId);
+          await this.transactions.supersedeActivePendingByInitiator(queryRunner, ownerId);
+          const created = await this.transactions.insertPendingInTx(queryRunner, {
+            id: randomUUID(),
+            type: TransactionType.Internal,
+            status: TransactionStatus.Pending,
+            amount,
+            currency,
+            debitAccountId: source.id,
+            creditAccountId: destination.id,
+            initiatedBy: ownerId,
+            postedAt: null,
+          });
+          return { transactionId: created.id };
+        },
+      );
+    } catch (error) {
+      // Concurrency backstop: two same-initiator initiates (different keys) racing collide on
+      // the single-pending index. The idempotent same-key replay never reaches the insert.
+      if (isPendingUniqueViolation(error)) {
+        throw new PendingTransferConflictError();
+      }
+      throw error;
+    }
 
     const transfer = await this.transactions.findById(outcome.transactionId);
     if (!transfer) {
       // Unreachable: the wrapper just committed (or replayed) this id.
       throw new TransferNotFoundError();
     }
-    return this.toTransferView(transfer);
+    return transfer;
   }
 
-  async confirmTransfer(params: ConfirmTransferParams): Promise<TransferView> {
+  async confirmTransfer(params: ConfirmTransferParams): Promise<Transaction> {
     const { ownerId, transferId, code } = params;
 
     // 1. Load the transfer (unscoped: ownership is verified on the debit account below).
@@ -245,49 +292,128 @@ export class TransfersService implements ITransfersService {
     }
 
     // 3. Idempotent confirm-after-success: an already-POSTED transfer is returned as-is (the
-    //    money already moved). Anything else non-PENDING cannot be posted.
+    //    money already moved). A terminal EXPIRED / CANCELLED (or any other non-PENDING) cannot
+    //    be posted.
     if (transfer.status === TransactionStatus.Posted) {
-      return this.toTransferView(transfer);
+      return transfer;
     }
     if (transfer.status !== TransactionStatus.Pending) {
+      // EXPIRED / CANCELLED / FAILED / REVERSED — a stale confirm against a terminal transfer.
       throw new TransferNotPendingError();
     }
 
-    const creditAccountId = transfer.creditAccountId;
+    // 4. EXPIRY BEFORE OTP (money-safety): let the guarded DB-clock predicate be the authority.
+    //    If `expireIfOverdue` flips the row, it WAS overdue → reject WITHOUT consuming the code,
+    //    so an expired transfer never burns the caller's one-time code.
+    const expired = await this.transactions.expireIfOverdue(transferId);
+    if (expired) {
+      throw new TransferExpiredError();
+    }
+    // Not overdue by the DB clock — but a concurrent confirm/cancel/expiry may have moved it
+    // since the load; re-check it is still PENDING before consuming the code.
+    const current = await this.transactions.findById(transferId);
+    if (!current) {
+      throw new TransferNotFoundError();
+    }
+    if (current.status === TransactionStatus.Posted) {
+      return current;
+    }
+    if (current.status === TransactionStatus.Expired) {
+      // A concurrent access (initiate/read/confirm) expired it between the check and this re-read;
+      // report EXPIRED (410) deterministically rather than a generic not-pending (409).
+      throw new TransferExpiredError();
+    }
+    if (current.status !== TransactionStatus.Pending) {
+      throw new TransferNotPendingError();
+    }
+
+    const creditAccountId = current.creditAccountId;
     if (!creditAccountId) {
       // A PENDING internal transfer always carries a destination; a breach is malformed state.
       throw new InvalidTransferError('transfer is missing a destination account');
     }
 
-    // 4. Consume the one-time code. Single-use is atomic (GETDEL): a correct code authorizes
+    // 5. Consume the one-time code. Single-use is atomic (GETDEL): a correct code authorizes
     //    exactly one confirm. A wrong code is retryable until lockout.
     const result = await this.otp.consume(ownerId, code);
     if (!result.ok) {
       throw result.lockedOut ? new OtpLockedOutError() : new InvalidOtpError();
     }
 
-    // 5. Post the pending transfer: the guarded transition + funds check under the account
+    // 6. Post the pending transfer: the guarded transition + funds check under the account
     //    lock, inside one deadlock-retried transaction. The legs are the signed double-entry:
     //    debit source (−amount), credit destination (+amount).
     const command: PostTransactionCommand = {
       type: TransactionType.Internal,
-      currency: transfer.currency,
-      amount: transfer.amount,
+      currency: current.currency,
+      amount: current.amount,
       legs: [
-        { accountId: debitAccountId, delta: `-${transfer.amount}` },
-        { accountId: creditAccountId, delta: transfer.amount },
+        { accountId: debitAccountId, delta: `-${current.amount}` },
+        { accountId: creditAccountId, delta: current.amount },
       ],
       initiatedBy: ownerId,
     };
     const posted = await runInTransactionWithRetry(this.dataSource, (queryRunner) =>
       this.posting.postPendingInTx(queryRunner, transferId, command),
     );
-    return this.toTransferView(posted);
+    return posted;
   }
 
-  async listPendingAuthorizations(ownerId: string): Promise<PendingAuthorizationView[]> {
+  async cancelTransfer(params: CancelTransferParams): Promise<Transaction> {
+    const { ownerId, transferId } = params;
+
+    // 1. Load + anti-IDOR on the debit account, exactly like confirm (404 on missing/non-owned).
+    const transfer = await this.transactions.findById(transferId);
+    if (!transfer) {
+      throw new TransferNotFoundError();
+    }
+    const debitAccountId = transfer.debitAccountId;
+    if (!debitAccountId) {
+      throw new TransferNotFoundError();
+    }
+    const debitAccount = await this.accounts.findByIdAndOwner(debitAccountId, ownerId);
+    if (!debitAccount) {
+      throw new TransferNotFoundError();
+    }
+
+    // 2. POSTED money cannot be cancelled; an already CANCELLED / EXPIRED transfer is returned
+    //    as-is (idempotent). FAILED / REVERSED are not user-cancellable either.
+    if (transfer.status === TransactionStatus.Posted) {
+      throw new TransferNotPendingError();
+    }
+    if (
+      transfer.status === TransactionStatus.Cancelled ||
+      transfer.status === TransactionStatus.Expired
+    ) {
+      return transfer;
+    }
+    if (transfer.status !== TransactionStatus.Pending) {
+      throw new TransferNotPendingError();
+    }
+
+    // 3. Guarded PENDING → CANCELLED (retained). A 0-row result means a concurrent transition
+    //    beat us; either way, reload and return the current terminal state.
+    await this.transactions.transitionToCancelled(transferId);
+    const cancelled = await this.transactions.findById(transferId);
+    if (!cancelled) {
+      // Unreachable: terminal rows are retained, never deleted.
+      throw new TransferNotFoundError();
+    }
+    return cancelled;
+  }
+
+  async getPendingAuthorization(ownerId: string): Promise<PendingAuthorization | null> {
     const pending = await this.transactions.findPendingByInitiator(ownerId);
-    return Promise.all(pending.map((transaction) => this.toPendingView(transaction)));
+    if (!pending) {
+      return null;
+    }
+    // Reading is a lazy-expiry access point: an overdue pending flips to EXPIRED (DB clock) and
+    // is no longer an active authorization, so return none.
+    const expired = await this.transactions.expireIfOverdue(pending.id);
+    if (expired) {
+      return null;
+    }
+    return this.buildPendingAuthorization(pending);
   }
 
   /** Redis key binding a confirmation token to the CALLER — another user's token cannot be
@@ -319,22 +445,12 @@ export class TransfersService implements ITransfersService {
     }
   }
 
-  /** Enrich a transfer for the wire. The SOURCE stays the account id (the caller's own —
-   * straight from `debitAccountId`, NO lookup); only the DESTINATION credit UUID is resolved
-   * to its human account number. Per-row lookups are acceptable (prototype). */
-  private async toTransferView(transaction: Transaction): Promise<TransferView> {
-    const destinationAccountNumber = await this.accountNumberOf(transaction.creditAccountId);
-    return {
-      transaction,
-      sourceAccountId: transaction.debitAccountId,
-      destinationAccountNumber,
-    };
-  }
-
-  /** Enrich a pending transfer for the OTP feed: the source account id (the caller's own, no
-   * lookup) PLUS the destination's human account number and the holder's MASKED name (so the
-   * app shows who the payment is to). */
-  private async toPendingView(transaction: Transaction): Promise<PendingAuthorizationView> {
+  /** Project a pending transfer for the OTP feed: the destination's human account number and the
+   * holder's MASKED name (so the app shows who the payment is to). Masking is applied HERE (PII
+   * never crosses the service boundary); the source account id is left on the `transaction`
+   * (`debitAccountId`, the caller's own) for the controller to whitelist. Only the DESTINATION
+   * needs a per-row account/customer lookup (prototype). */
+  private async buildPendingAuthorization(transaction: Transaction): Promise<PendingAuthorization> {
     let destinationAccountNumber: string | null = null;
     let destinationMaskedName = '';
     if (transaction.creditAccountId) {
@@ -346,20 +462,6 @@ export class TransfersService implements ITransfersService {
       }
     }
 
-    return {
-      transaction,
-      sourceAccountId: transaction.debitAccountId,
-      destinationAccountNumber,
-      destinationMaskedName,
-    };
-  }
-
-  /** Resolve an account id to its human account number, or `null` if the id is absent/unknown. */
-  private async accountNumberOf(accountId: string | null): Promise<string | null> {
-    if (!accountId) {
-      return null;
-    }
-    const account = await this.accounts.findById(accountId);
-    return account?.accountNumber ?? null;
+    return { transaction, destinationAccountNumber, destinationMaskedName };
   }
 }

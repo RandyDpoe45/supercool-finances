@@ -43,6 +43,7 @@ import {
   insertRow,
   insertAccount,
   insertCustomer,
+  insertTransaction,
   expectPgError,
   seedTestCurrency,
   localAccountNumber,
@@ -68,7 +69,10 @@ const EXPECTED_ENUMS: Record<string, string[]> = {
   account_kind: ['customer', 'system'],
   account_status: ['active', 'frozen'],
   transaction_type: ['internal', 'external_outbound', 'external_inbound'],
-  transaction_status: ['PENDING', 'POSTED', 'FAILED', 'REVERSED'],
+  // PR #19 (single + time-boxed pending authorization) adds the two terminal lifecycle labels the
+  // auto-supersede (CANCELLED) and lazy-expiry (EXPIRED) transitions produce — see spec 04
+  // Transactions "Lifecycle" + "Pending authorization is single and time-boxed".
+  transaction_status: ['PENDING', 'POSTED', 'FAILED', 'REVERSED', 'EXPIRED', 'CANCELLED'],
   payee_status: ['pending', 'active', 'disabled'],
 };
 
@@ -429,6 +433,69 @@ suite('balance schema — Step 1 constraints (integration, needs Postgres)', () 
         }),
         PG.UNIQUE_VIOLATION,
       );
+    });
+  });
+
+  // ---- Single + time-boxed pending: uq_one_pending_per_initiator (partial UNIQUE) ----------
+  // PR #19 enforces "at most one PENDING transfer per user" at the DB, not just in the service:
+  // a partial unique index on transaction(initiated_by) WHERE status = 'PENDING'. Each test is
+  // power-bearing — drop the index and the second PENDING stops colliding (the "expected
+  // rejection but it succeeded" branch fires), or make it non-partial and the POSTED sibling
+  // wrongly collides.
+
+  it('creates uq_one_pending_per_initiator as a PARTIAL unique index on initiated_by WHERE status = PENDING', async () => {
+    const rows: Array<{ indexname: string; indexdef: string }> = await ds.query(
+      `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public'`,
+    );
+    const byName = new Map(rows.map((r) => [r.indexname, r.indexdef.toLowerCase()]));
+    expect(byName.has('uq_one_pending_per_initiator')).toBe(true);
+    const def = byName.get('uq_one_pending_per_initiator')!;
+    expect(def).toContain('unique');
+    expect(def).toContain('initiated_by');
+    expect(def).toContain('where'); // partial — only PENDING rows participate
+    expect(def).toContain('pending');
+  });
+
+  it('rejects a SECOND PENDING transaction for the same initiator (uq_one_pending_per_initiator, 23505)', async () => {
+    await withRollback(async (q) => {
+      await seedTestCurrency(q);
+      const initiator = `sub-${randomUUID()}`;
+      const first = await insertTransaction(q, {
+        initiatedBy: initiator,
+        currency: 'TST',
+        expiresAt: new Date(Date.now() + 120_000),
+      });
+      expect(first.status).toBe('PENDING'); // helper defaults status to PENDING
+      // A SECOND still-PENDING transfer for the SAME initiator must collide on the partial index.
+      await expectPgError(
+        insertTransaction(q, {
+          initiatedBy: initiator,
+          currency: 'TST',
+          expiresAt: new Date(Date.now() + 120_000),
+        }),
+        PG.UNIQUE_VIOLATION,
+      );
+    });
+  });
+
+  it('ALLOWS a second NON-pending (POSTED) transaction for the same initiator (index is partial)', async () => {
+    await withRollback(async (q) => {
+      await seedTestCurrency(q);
+      const initiator = `sub-${randomUUID()}`;
+      await insertTransaction(q, {
+        initiatedBy: initiator,
+        currency: 'TST',
+        expiresAt: new Date(Date.now() + 120_000),
+      }); // the one PENDING
+      // A POSTED transfer for the SAME initiator is OUTSIDE the partial predicate → inserts fine.
+      const posted = await insertTransaction(q, {
+        initiatedBy: initiator,
+        currency: 'TST',
+        status: 'POSTED',
+        postedAt: new Date(),
+      });
+      expect(posted.status).toBe('POSTED');
+      expect(posted.id).toBeTruthy();
     });
   });
 
