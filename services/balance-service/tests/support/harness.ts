@@ -10,6 +10,7 @@
  * ./env.fixture; a TCP reachability probe for the honest-SKIP integration gate).
  */
 
+import { createHmac } from 'crypto';
 import * as net from 'net';
 import { completeRawEnv } from './env.fixture';
 
@@ -1179,10 +1180,13 @@ function buildConfigFromEnv(): any {
 
 // ---- Rails module (spec 04 "Mocked external rails", step 5c: `/external` webhooks) --------
 // The outbound settlement callback + inbound credit behind the `/external` surface (a distinct
-// API-key trust domain). Resolved through the same single-seam convention: the running instance
-// BY TOKEN through the app graph. The domain error classes are resolved via `getDomainErrors()`
-// above. The booted `AppModule` already wires the `/external` surface (ExternalModule) and its
-// global `ExternalApiKeyGuard` — nothing extra to import here; `getAppModule()` yields them.
+// HMAC-signature trust domain). Resolved through the same single-seam convention: the running
+// instance BY TOKEN through the app graph. The domain error classes are resolved via
+// `getDomainErrors()` above. The booted `AppModule` already wires the `/external` surface
+// (ExternalModule) and its global `RailSignatureGuard` — nothing extra to import here;
+// `getAppModule()` yields them. NOTE: to exercise the guard over HTTP, the e2e must boot the app
+// with `{ rawBody: true }` (`moduleRef.createNestApplication({ rawBody: true })`) so `req.rawBody`
+// is captured — the same option production sets in `main.ts` — and sign with `railSignatureHeader`.
 
 /** `RAILS_SERVICE` — the DI token the RailsModule binds the RailsService to (resolved by token,
  *  never by class, per the interface/impl split). Reuses the shared service-token probe. */
@@ -1217,11 +1221,33 @@ export function getRailsService(): any {
 }
 
 /**
- * The `/external` rail-webhook API key the booted app validates `X-Api-Key` against — the
- * `RAILS_WEBHOOK_API_KEY` fixture value (the SAME value the integration/e2e boot injects into the
- * environment via `completeRawEnv()`). Returned so an e2e can send the correct key (200) and a
- * wrong/missing key (401). If a suite boots with a different key it must pass that value instead.
+ * The `/external` rail-webhook HMAC signing secret the booted app verifies `X-Rail-Signature`
+ * against — the `RAILS_WEBHOOK_SIGNING_SECRET` fixture value (the SAME value the integration/e2e
+ * boot injects into the environment via `completeRawEnv()`). Returned so an e2e can sign a valid
+ * request (200) and prove 401 on a wrong secret. If a suite boots with a different secret it must
+ * pass that value instead.
  */
-export function getRailsWebhookApiKey(): string {
-  return completeRawEnv().RAILS_WEBHOOK_API_KEY as string;
+export function getRailsWebhookSigningSecret(): string {
+  return completeRawEnv().RAILS_WEBHOOK_SIGNING_SECRET as string;
+}
+
+/**
+ * The canonical SENDER-SIDE signer for the `/external` rail webhooks — mirrors the
+ * `RailSignatureGuard` verification exactly. Given the RAW request-body string (the exact bytes
+ * the e2e will POST), it returns the `X-Rail-Signature` header value
+ * `` `t=${t},v1=${hmacHex}` `` where `hmacHex = HMAC-SHA256(secret ?? fixture secret,
+ * `${t ?? nowSeconds}.${rawBody}`)` (hex). Defaults: `t` = current unix seconds (inside the ±300s
+ * replay window), `secret` = the fixture signing secret. Override `t` to prove the replay guard
+ * (e.g. `t: nowSeconds - 400` → 401) and `secret` to prove a wrong-secret rejection (401). The
+ * signed payload is `"<t>.<rawBody>"` — the SAME string the guard rebuilds from `req.rawBody`, so
+ * the e2e MUST send `rawBody` verbatim as the request body (no re-stringify) for the bytes to match.
+ */
+export function railSignatureHeader(
+  rawBody: string,
+  opts: { secret?: string; t?: number } = {},
+): string {
+  const t = opts.t ?? Math.floor(Date.now() / 1000);
+  const secret = opts.secret ?? getRailsWebhookSigningSecret();
+  const hmacHex = createHmac('sha256', secret).update(`${t}.${rawBody}`).digest('hex');
+  return `t=${t},v1=${hmacHex}`;
 }

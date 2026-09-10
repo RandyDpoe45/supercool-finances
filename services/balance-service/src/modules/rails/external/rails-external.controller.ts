@@ -15,9 +15,10 @@ import { serializeRailAck } from './serializers/rails.serializer';
  * DECLARED by {@link ExternalModule}; the {@link RailsModule} feature module provides + exports
  * the service behind the `RAILS_SERVICE` token, injected here as `IRailsService`.
  *
- * Under the global `/external` prefix — a DISTINCT trust domain guarded by
- * {@link ExternalApiKeyGuard} (the third-party rail's `X-Api-Key`, NOT a user JWT or the service
- * token). Request bodies are validated by the {@link ZodValidationPipe} (`.strict()` schemas,
+ * Under the global `/external` prefix — a DISTINCT trust domain guarded by the
+ * `RailSignatureGuard` (the third-party rail's HMAC `X-Rail-Signature` over the raw body, NOT a
+ * user JWT or the service token). Request bodies are validated by the {@link ZodValidationPipe}
+ * (`.strict()` schemas,
  * malformed → 400); the service returns entities, serialized to a minimal ack DTO at this
  * boundary (no PII / internal leak). Both endpoints are idempotent, so a retried webhook is a
  * safe no-op that returns the same 200 ack.

@@ -38,7 +38,7 @@ per step:
   lifecycle around the posting keystone.
 - **Step 5c — external rail webhooks**
   ([below](#step-5c--external-rail-webhooks)): the mocked rail's third-party callbacks on a new
-  **`/external`** surface (API-key trust domain) — the **outbound settlement callback** (SUCCESS
+  **`/external`** surface (HMAC-signature trust domain) — the **outbound settlement callback** (SUCCESS
   reconciles via the hold `externalRef`, no new ledger post; FAILURE reverses `clearing → customer`
   with a customer-first lock + `POSTED → REVERSED` + `reverses_transaction_id`) and the **inbound
   credit** (`clearing:rail-inbound → customer` by account number, not OTP-gated, idempotent by the
@@ -1202,27 +1202,43 @@ reports whether an external outbound completed) and the **inbound credit** (the 
 into a customer account). Both are money-critical and both are **idempotent** — a retried webhook is
 a safe no-op. Every movement here still funnels through the single posting reducer
 (balance + ledger + outbox). Three developer decisions are LOCKED: the callbacks live on a **new
-`/external` surface** authenticated by an **external API key** (a distinct trust domain); outbound
-**SUCCESS is reconcile-only** (record the rail ref, NO new ledger post); and **both** the outbound
-callback and the inbound webhook are built in this step.
+`/external` surface** authenticated by an **HMAC request signature** (a distinct trust domain);
+outbound **SUCCESS is reconcile-only** (record the rail ref, NO new ledger post); and **both** the
+outbound callback and the inbound webhook are built in this step.
 
-### The `/external` surface + API-key guard (a distinct trust domain)
+### The `/external` surface + rail-signature guard (a distinct trust domain)
 
 `/external` is a **third distinct trust domain**, separate from `/api` (customers behind the
 gateway, `X-User-Id`) and `/internal` (our own network peers, `X-Service-Token`): the caller is an
-external rail, not a user or a peer service.
+external rail, not a user or a peer service. It authenticates with a **Stripe-style HMAC request
+signature** over the RAW request body — never a user JWT, never the service token.
 
-- `src/common/identity/external-api-key.guard.ts` `ExternalApiKeyGuard` (implements `CanActivate`)
-  is bound **globally** (`APP_GUARD`, registered in `AppModule` alongside the gateway + service
-  guards). It **scopes itself** to the `external` prefix (`prefixSegment(request.path) !==
-  'external'` → returns true, another guard's concern) and requires `X-Api-Key ==
-  config.rails.webhookApiKey`, **constant-time compared** (`timingSafeEqual`, length-guarded — the
-  same `constantTimeEquals` helper as the service-identity guard); a missing/mismatched key →
-  **401** (`UnauthorizedException`). There is **NO health carve-out** (health lives on `/internal`).
+- **rawBody capture.** The app boots as `NestFactory.create(AppModule, { rawBody: true })`, so the
+  untouched request-body bytes are available on `req.rawBody` (a Buffer). The signature is verified
+  over exactly those bytes — **not reparsed JSON**, which a serializer round-trip could subtly alter
+  (key order, number formatting). Global capture is harmless; only the `/external` guard reads it.
+- `src/common/identity/rail-signature.guard.ts` `RailSignatureGuard` (implements `CanActivate`) is
+  bound **globally** (`APP_GUARD`, registered in `AppModule` alongside the gateway + service guards).
+  It **scopes itself** to the `external` prefix (`prefixSegment(request.path) !== 'external'` →
+  returns true, another guard's concern; a case-insensitive match so `/EXTERNAL/*` stays guarded).
+  For an `/external` request it verifies, in order:
+  1. **Parse** `X-Rail-Signature: t=<unix-seconds>,v1=<hex>` (tolerant of field order/whitespace).
+     Both fields are REQUIRED; `t` must be an integer and `v1` non-empty hex. Missing/malformed → 401.
+  2. **Replay guard** — `nowSeconds = Math.floor(Date.now()/1000)`; if `|nowSeconds − t| > 300` → 401.
+  3. **Raw body present** — `req.rawBody` must exist (fail-closed: a missing raw body → 401, never a
+     silent pass).
+  4. **HMAC compare** — recompute `HMAC-SHA256(config.rails.webhookSigningSecret, "<t>.<rawBody>")`
+     (hex) and compare against `v1` with the length-guarded `timingSafeEqual` helper (the same
+     `constantTimeEquals` as the service-identity guard). Mismatch → 401.
+
+  Every failure raises `UnauthorizedException` with a **generic message** ("Invalid or missing rail
+  signature") that never reveals which check failed. There is **NO health carve-out** (health lives
+  on `/internal`). The per-`externalRef` idempotency in `RailsService` remains UNCHANGED as
+  defense-in-depth inside the replay window (a retried webhook is still a safe no-op).
 - `src/modules/external/external.module.ts` `ExternalModule` is the `/external` **surface registry**
   (mirroring `ApiModule` / `InternalModule`): it **declares** `RailsExternalController` and imports
   `RailsModule` for the `RAILS_SERVICE` the controller injects. `AppModule` imports `ExternalModule`
-  and binds `ExternalApiKeyGuard`.
+  and binds `RailSignatureGuard`.
 
 ### Module structure
 
@@ -1246,7 +1262,8 @@ the root holds only `rails.module.ts`; business logic under `service/`; the cont
 
 ### Endpoints
 
-Both under the global `/external` prefix (the `ExternalApiKeyGuard` has required `X-Api-Key`). Bodies
+Both under the global `/external` prefix (the `RailSignatureGuard` has verified the HMAC
+`X-Rail-Signature` over the raw body). Bodies
 validated by the `ZodValidationPipe` (`.strict()`, malformed → 400). Both return **200** with a
 minimal `RailAckDto` `{ status: 'ok', transactionId }` (idempotent, so a retry returns the same ack).
 

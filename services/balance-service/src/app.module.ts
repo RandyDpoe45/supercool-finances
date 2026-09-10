@@ -1,8 +1,8 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { AllExceptionsFilter } from './common/errors/all-exceptions.filter';
-import { ExternalApiKeyGuard } from './common/identity/external-api-key.guard';
 import { GatewayIdentityGuard } from './common/identity/gateway-identity.guard';
+import { RailSignatureGuard } from './common/identity/rail-signature.guard';
 import { ServiceIdentityGuard } from './common/identity/service-identity.guard';
 import { requestIdMiddleware } from './common/request-context/request-id.middleware';
 import { AppConfigModule } from './config/config.module';
@@ -50,7 +50,7 @@ import { RedisModule } from './redis/redis.module';
   providers: [
     { provide: APP_GUARD, useClass: GatewayIdentityGuard },
     { provide: APP_GUARD, useClass: ServiceIdentityGuard },
-    { provide: APP_GUARD, useClass: ExternalApiKeyGuard },
+    { provide: APP_GUARD, useClass: RailSignatureGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })

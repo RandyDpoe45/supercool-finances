@@ -23,9 +23,10 @@ export function completeRawEnv(overrides: Record<string, unknown> = {}): Record<
     INTERNAL_SERVICE_TOKEN: 'test-internal-service-token',
     // Pepper for the keyed HMAC that hashes OTP codes at rest (env.schema requires >= 16 chars).
     OTP_HASH_SECRET: 'test-otp-hash-secret-0123456789',
-    // Shared API key the `/external` rail webhooks present as `X-Api-Key` (env.schema requires
-    // >= 16 chars). Used by the e2e as the correct key and to prove 401 on a wrong/missing one.
-    RAILS_WEBHOOK_API_KEY: 'test-rails-webhook-api-key-0123456789',
+    // Shared HMAC signing secret the `/external` rail webhooks sign each request with
+    // (`X-Rail-Signature`; env.schema requires >= 16 chars). Used by the e2e to sign a valid
+    // request and to prove 401 on a wrong secret / stale timestamp / mismatched body.
+    RAILS_WEBHOOK_SIGNING_SECRET: 'test-rails-webhook-signing-secret-0123456789',
     ...overrides,
   };
 }

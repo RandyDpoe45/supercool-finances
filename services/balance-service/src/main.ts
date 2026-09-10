@@ -34,7 +34,10 @@ async function bootstrap(): Promise<void> {
   // 2. Create the app — migrations run during DataSource init (before listen).
   //    Global guards, the exception filter, and the request-id middleware are all
   //    bound in AppModule, so the module carries those guarantees on its own.
-  const app = await NestFactory.create(AppModule);
+  //    `rawBody: true` captures the untouched request-body bytes on `req.rawBody`
+  //    so the RailSignatureGuard verifies the HMAC over exactly what the sender
+  //    signed (not reparsed JSON). Global capture is harmless; only `/external` reads it.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   // 3. Listen.
   const config = app.get<AppConfig>(APP_CONFIG);

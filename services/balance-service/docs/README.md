@@ -45,7 +45,7 @@ string and **composes its own** Postgres DSN and Redis URL from the discrete par
 | `INTERNAL_SERVICE_TOKEN` | shared secret for the `/internal` guard | — |
 | `OTP_HASH_SECRET` | pepper for the keyed HMAC that hashes OTP codes at rest (spec 04); min 16 chars, never stored in Redis | — |
 | `PAYEE_COOLING_OFF_SECONDS` | external-payee cooling-off window in seconds — how long after enrollment a payee becomes a usable destination (spec 04); positive integer | `86400` (24h) |
-| `RAILS_WEBHOOK_API_KEY` | shared API key the `/external` rail webhooks present as `X-Api-Key` (spec 04 step 5c) — a distinct trust domain from `INTERNAL_SERVICE_TOKEN` / the gateway; min 16 chars | — |
+| `RAILS_WEBHOOK_SIGNING_SECRET` | HMAC signing secret the `/external` rail webhooks sign each request with — `X-Rail-Signature: t=…,v1=HMAC-SHA256(secret, "<t>.<rawBody>")`, recomputed over the raw body and compared constant-time, ±300s replay window (spec 04 step 5c) — a distinct trust domain from `INTERNAL_SERVICE_TOKEN` / the gateway; min 16 chars | — |
 
 - **Validation is zod, at boot, fail-fast.** `parseEnv` (`config/env.schema.ts`)
   validates and coerces `process.env`; any missing/invalid required var throws an
@@ -124,12 +124,16 @@ is booted without `case sensitive routing` or without `main.ts`.
     Docker healthcheck can reach liveness/readiness **without credentials**. The
     carve-out is case-insensitive but **exact** (`/internal/health-and-secrets`
     stays guarded), so it can't be widened into a prefix bypass.
-- **External API-key guard** (`/external`, spec 04 step 5c) —
-  `common/identity/external-api-key.guard.ts`. The third-party rail webhooks are a
+- **Rail signature guard** (`/external`, spec 04 step 5c) —
+  `common/identity/rail-signature.guard.ts`. The third-party rail webhooks are a
   **distinct trust domain**: the caller is neither a user (no `X-User-Id`) nor a peer
   service (no `X-Service-Token`) but an external rail, so it authenticates with a
-  dedicated `X-Api-Key == RAILS_WEBHOOK_API_KEY` (constant-time compare) → **401**
-  otherwise. **No** health carve-out (health lives on `/internal`). See
+  Stripe-style HMAC signature. The rail sends `X-Rail-Signature: t=<unix-seconds>,v1=<hex>`;
+  the guard recomputes `HMAC-SHA256(RAILS_WEBHOOK_SIGNING_SECRET, "<t>.<rawBody>")` over the
+  **raw request-body bytes** (`req.rawBody`, captured via `NestFactory.create(AppModule,
+  { rawBody: true })`) and compares it constant-time. A missing/malformed header, a timestamp
+  outside a **±300s** replay window, an absent raw body (fail-closed), or a mismatch → **401**
+  (generic message). **No** health carve-out (health lives on `/internal`). See
   [`domain.md`](./domain.md) step 5c for the endpoints behind it.
 
 ## Prefix routing (ADR-12)

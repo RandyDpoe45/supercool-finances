@@ -145,7 +145,11 @@ suite(
         REDIS_PASSWORD: process.env.REDIS_PASSWORD || 'changeme-redis-local',
         INTERNAL_SERVICE_TOKEN: process.env.INTERNAL_SERVICE_TOKEN || 'test-internal-service-token',
         OTP_HASH_SECRET: process.env.OTP_HASH_SECRET || 'test-otp-hash-secret-0123456789',
-        RAILS_WEBHOOK_API_KEY: process.env.RAILS_WEBHOOK_API_KEY || 'test-rails-webhook-api-key',
+        // This suite drives RailsService BY TOKEN (not over HTTP), so it never hits the signature
+        // guard — the value only has to satisfy env validation on boot. `completeRawEnv()` already
+        // supplies a default; overriding keeps it consistent with the shell env when one is set.
+        RAILS_WEBHOOK_SIGNING_SECRET:
+          process.env.RAILS_WEBHOOK_SIGNING_SECRET || 'test-rails-signing-secret-0123456789',
       });
       for (const [k, v] of Object.entries(env)) process.env[k] = String(v);
 

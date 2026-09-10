@@ -382,7 +382,7 @@ function makeMocks(): Mocks {
   const appConfig = {
     otp: { hashSecret: 'x'.repeat(24) },
     internalServiceToken: 'svc',
-    rails: { webhookApiKey: 'test-rails-webhook-api-key' },
+    rails: { webhookSigningSecret: 'test-rails-signing-secret' },
     payees: { coolingOffSeconds: 3600 },
   };
 

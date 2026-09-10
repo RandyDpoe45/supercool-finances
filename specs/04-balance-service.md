@@ -174,12 +174,17 @@ whole prompt is about — correctness here is the deliverable.
 - **Mocked external rails** — outbound settlement callback + inbound webhook behind
   an interface. The settlement callback is a **third-party webhook** the external
   rail calls to notify completion, so it lives on a dedicated **`/external` surface**
-  authenticated by an **external API key** (`X-Api-Key` == env
-  `RAILS_WEBHOOK_API_KEY`, constant-time compared, 401 otherwise) — a **distinct
-  trust domain** from `/internal` (our own network peers, `X-Service-Token`) and
-  `/api` (customers, gateway `X-User-Id`). The `/external` surface is a per-surface
-  controller registry like the others (`ExternalModule` + a global
-  `ExternalApiKeyGuard` scoped to the `external` prefix). Each rail has its own
+  authenticated by an **HMAC request signature** (Stripe-style) — header
+  **`X-Rail-Signature: t=<unix-seconds>,v1=<hex>`**, where `v1` must equal
+  **`HMAC-SHA256(RAILS_WEBHOOK_SIGNING_SECRET, "<t>.<rawBody>")`** computed over the
+  **raw request-body bytes** (not reparsed JSON) and compared constant-time; a missing/
+  malformed header, a signature mismatch, or a **timestamp outside ±300s** (replay guard)
+  is **401**. This is a **distinct trust domain** from `/internal` (our own network peers,
+  `X-Service-Token`) and `/api` (customers, gateway `X-User-Id`). The `/external` surface is
+  a per-surface controller registry like the others (`ExternalModule` + a global
+  signature guard scoped to the `external` prefix; the app captures the raw body on
+  `/external` routes so the verified bytes are exactly what the sender signed). The
+  per-`externalRef` idempotency remains as defense-in-depth inside the replay window. Each rail has its own
   internal **clearing account** (a system account, not a customer account); the
   prototype seeds two — `clearing:rail-outbound` and `clearing:rail-inbound`. A
   clearing balance is the net in transit for that rail and reconciles against that
@@ -217,7 +222,7 @@ whole prompt is about — correctness here is the deliverable.
   payee with its `coolingOffUntil`); `GET /payees` lists the caller's enrolled payees.
 - `/admin`: `POST /accounts/:id/freeze`, `PUT /limits`, `POST /transfers/:id/reverse`,
   `POST /approvals/:id/approve`, `GET /transactions`, `POST /external/inbound`.
-- `/external` (third-party rail webhooks — `X-Api-Key` == `RAILS_WEBHOOK_API_KEY`):
+- `/external` (third-party rail webhooks — HMAC-signed: `X-Rail-Signature: t=…,v1=…`, `v1 == HMAC-SHA256(RAILS_WEBHOOK_SIGNING_SECRET, "<t>.<rawBody>")`, ±300s replay window, 401 otherwise):
   `POST /rails/settlement-callback` (outbound completion: SUCCESS reconciles — records
   the rail `externalRef`, no new ledger post; FAILURE reverses `clearing → customer`),
   `POST /rails/inbound` (external inbound credit — debit `clearing:rail-inbound`, credit

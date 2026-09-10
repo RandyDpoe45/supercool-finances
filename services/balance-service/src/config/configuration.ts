@@ -32,11 +32,12 @@ export interface PayeesConfig {
 }
 
 export interface RailsConfig {
-  /** Shared API key the external rail webhooks (`/external` surface) must present as
-   *  `X-Api-Key`, constant-time compared. A raw secret — never composed into a URL/DSN
-   *  (discrete-credentials rule). A DISTINCT trust domain from the `/internal` service token
-   *  (`X-Service-Token`) and the `/api` gateway identity (`X-User-Id`). */
-  webhookApiKey: string;
+  /** Shared HMAC signing secret the external rail webhooks (`/external` surface) sign each
+   *  request with — the guard recomputes `HMAC-SHA256(secret, "<t>.<rawBody>")` and compares it
+   *  constant-time. A raw secret — never composed into a URL/DSN (discrete-credentials rule). A
+   *  DISTINCT trust domain from the `/internal` service token (`X-Service-Token`) and the `/api`
+   *  gateway identity (`X-User-Id`). */
+  webhookSigningSecret: string;
 }
 
 export interface AppConfig {
@@ -78,7 +79,7 @@ export function buildConfig(env: Env): AppConfig {
 
   const payees: PayeesConfig = { coolingOffSeconds: env.PAYEE_COOLING_OFF_SECONDS };
 
-  const rails: RailsConfig = { webhookApiKey: env.RAILS_WEBHOOK_API_KEY };
+  const rails: RailsConfig = { webhookSigningSecret: env.RAILS_WEBHOOK_SIGNING_SECRET };
 
   return {
     nodeEnv: env.NODE_ENV,
