@@ -1,9 +1,10 @@
 # client-app — customer SPA
 
 The public customer SPA for SuperCool Finances (spec 07). This document covers the
-F1 scaffold: the app structure, the auth + data spine, the MSW stub harness, and the
-environment variables. Feature screens (accounts, transfers, payees) arrive in later
-steps and will be documented as they land.
+F1 scaffold (app structure, auth + data spine, MSW stub harness, environment variables)
+and the **F2 accounts experience**: the accounts overview, the account statement/history
+view, and the float-free money + edge-timezone helpers those views rely on. Transfers,
+payees and OTP arrive in later steps and will be documented as they land.
 
 This app is **self-contained** (ADR-16): no imports from other folders and no shared
 component library. Any contract shared with a service (e.g. the `/api/accounts` shape)
@@ -33,24 +34,37 @@ web/client/
 ├── src/
 │   ├── main.tsx               # bootstrap: start MSW (dev) → render <App/>
 │   ├── App.tsx                # AuthProvider → Provider(store) → Router → AuthGate
-│   ├── app/routes.tsx         # authenticated routes (home only, for F1)
+│   ├── app/routes.tsx         # authenticated routes (accounts overview + statement)
 │   ├── auth/
 │   │   ├── userManager.ts     # OIDC settings + shared UserManager + getAccessToken()
 │   │   └── AuthGate.tsx       # protected-route gate (login redirect / callback / error)
+│   ├── lib/
+│   │   ├── money.ts           # float-free minor-unit → human money (BigInt/string math)
+│   │   ├── datetime.ts        # UTC ISO → Mexico City time via Intl (edge conversion)
+│   │   └── apiError.ts        # RTK Query error → short human phrase
 │   ├── store/                 # configureStore + typed hooks
 │   ├── services/api/
 │   │   ├── baseApi.ts         # createApi + fetchBaseQuery(prepareHeaders: bearer)
-│   │   ├── accountsApi.ts     # getAccounts query (the smoke call)
+│   │   ├── accountsApi.ts     # getAccounts + getAccountStatement queries
 │   │   └── contracts/         # app-local copies of the /api wire contract
-│   ├── mocks/                 # MSW handlers, fixtures, browser worker, node server
+│   ├── mocks/                 # MSW handlers, fixtures (accounts, statements), worker, server
 │   └── components/            # atomic design: atoms / molecules / organisms / templates / pages
 └── tests/
     └── setup.ts               # jsdom matchers + MSW server lifecycle (runner wiring)
 ```
 
 The `components/` tree follows **atomic design** (atoms → molecules → organisms →
-templates → pages). For F1 only the components actually used exist; `atoms/` and
-`molecules/` are intentionally empty placeholders.
+templates → pages). Only the components actually used exist:
+
+- **atoms** — `Money` (renders a minor-unit string via `lib/money`), `StatusBadge`
+  (account status), `Timestamp` (renders a UTC instant in Mexico City time, keeping the
+  canonical UTC in the `<time dateTime>` attribute).
+- **molecules** — `AccountCard` (one account: id/link, currency, kind, status, and the
+  balance/held/available money fields), `StatementRow` (one ledger leg as a table row).
+- **organisms** — `AccountsList` (semantic list of account cards; empty state),
+  `StatementTable` (newest-first statement table; empty state).
+- **pages** — `AccountsPage` (`/`, the overview; loading/error) and
+  `AccountStatementPage` (`/accounts/:id/transactions`; loading/error).
 
 ## Auth spine (OIDC Authorization Code + PKCE)
 
@@ -80,23 +94,36 @@ see `tools/keycloak/realm-export.json`).
 `baseApi` is a single `createApi` with `fetchBaseQuery({ baseUrl, prepareHeaders })`.
 `baseUrl` defaults to **`/api`** (same-origin) — never an absolute backend URL — so
 calls flow through the app's own origin (MSW in dev/test; the real nginx origin once
-transport lands). Feature endpoints are added with `injectEndpoints`. F1 ships one:
-`getAccounts` → `GET /api/accounts`, rendered as a bare list on the home route to
-prove the spine end to end.
+transport lands). Feature endpoints are added with `injectEndpoints`. The accounts slice
+(`services/api/accountsApi.ts`) ships two reads:
+
+- `getAccounts` → `GET /api/accounts`, unwrapping the `{ accounts }` envelope to the array.
+- `getAccountStatement(accountId)` → `GET /api/accounts/:id/transactions`, keeping its
+  `{ accountId, entries }` envelope; `entries` arrive **newest-first** (the server orders
+  by `created_at DESC, id DESC`) and are rendered in that order.
+
+Both are cache-tagged under the `Account` tag. Their app-local response contracts live in
+`services/api/contracts/accounts.ts` (`AccountDto`, `StatementEntryDto`, and the two
+envelopes) — the SPA's own copy per ADR-16, synced via the specs.
 
 ## MSW stub harness and how it maps to the real contract
 
 MSW intercepts **only `/api`**; OIDC traffic to Keycloak is left alone
 (`onUnhandledRequest: 'bypass'` in dev, `'error'` in tests).
 
-- `src/mocks/handlers.ts` implements `GET /api/accounts` faithful to the real wire
-  contract (mirrors balance-service's `AccountDto` serializer): the `{ accounts }`
-  envelope, money as canonical **bigint minor-unit strings**, and `available` =
-  `balance − held` precomputed in the fixtures.
-- It also mirrors the **identity/error contract**: a request without a bearer token
-  is rejected **401** with the service-wide `ErrorResponse` envelope
-  (`{ error: { code, message, requestId } }`), the same way `GatewayIdentityGuard`
-  rejects a request that carries no gateway identity.
+- `src/mocks/handlers.ts` implements `GET /api/accounts` and
+  `GET /api/accounts/:id/transactions` faithful to the real wire contract (mirrors
+  balance-service's serializers + controller): the `{ accounts }` / `{ accountId, entries }`
+  envelopes, money as canonical **bigint minor-unit strings**, `available` =
+  `balance − held`, and statement `entries` **newest-first** with a running `balanceAfter`
+  fold. Seed data is in `src/mocks/fixtures/accounts.ts` and `.../statements.ts`; the
+  statement fixtures include credits and debits (non-zero, both directions) with UTC
+  timestamps, and each account's final `balanceAfter` matches its `balance`.
+- It mirrors the **identity/error contract** on every route with the service-wide
+  `ErrorResponse` envelope (`{ error: { code, message, requestId } }`): no bearer → **401**
+  (like `GatewayIdentityGuard`); a malformed account id → **400** (like the controller's
+  `ParseUUIDPipe`); and an unknown / non-owned / system account id → **404** (the service
+  makes those indistinguishable — never 403 — so existence cannot be probed, ADR-3).
 - `src/mocks/browser.ts` (dev worker) and `src/mocks/node.ts` (test server) share the
   same handlers. The node `server` is imported and driven by `tests/setup.ts`.
 - The app-local contract types in `src/services/api/contracts/` are the SPA's own
@@ -115,11 +142,46 @@ copy to `.env.local` to override locally. Never put a secret here.
 | `VITE_OIDC_CLIENT_ID` | `client-app` | Public OIDC client id. |
 | `VITE_ENABLE_API_MOCKS` | `true` | Set `false` to disable the dev MSW stub. |
 
-## Timezone
+## Accounts & statement views
 
-The server is UTC-only; any date shown/entered is converted at the edge to
-`America/Mexico_City`. F1 renders no dates, so no conversion is wired yet — it will be
-added when date-bearing data is displayed.
+- **Accounts overview** (`/`, `AccountsPage` → `AccountsList` → `AccountCard`): each
+  account shows its number (or id), currency, kind, status badge, and the three money
+  fields — **balance, held, available**. Selecting an account navigates to its statement.
+- **Statement / history** (`/accounts/:id/transactions`, `AccountStatementPage` →
+  `StatementTable` → `StatementRow`): each ledger leg shows its timestamp (Mexico City
+  time), direction (**Credit** / **Debit**, derived from the sign of `delta`), the signed
+  amount, the running **balance after**, and the transaction reference. Newest-first, as
+  delivered by the server. Loading and error states live on the pages; empty states on the
+  organisms. A 404 (missing / non-owned / system account) surfaces as a plain "not found"
+  so the view never reveals whether an account exists.
+
+## Money formatting (float-free) — `lib/money.ts`
+
+Money on the wire is a canonical **minor-unit integer string** (int64 precision).
+Formatting it for humans **must never touch a float**: `Number`/`parseFloat` silently loses
+precision above 2^53 and introduces rounding error — a money-safety defect. So `lib/money`
+does the whole conversion with **BigInt and string math**:
+
+- `minorUnitDigits(currency)` — the currency's minor-unit exponent (MXN = 2; default 2).
+- `toDecimalString(minorUnits, exponent)` — the core split: BigInt division/modulo →
+  `'-15000.00'`. Throws on a non-integer input rather than yielding `NaN`.
+- `formatAmount(minorUnits, currency)` — grouped human amount `'-15,000.00'` (thousands
+  grouped by string regex, so it stays exact for arbitrarily large balances).
+- `formatMoney(minorUnits, currency)` — `formatAmount` plus the ISO code, `'-15,000.00 MXN'`.
+- `amountDirection(minorUnits)` — sign of a signed `delta`: `'in' | 'out' | 'zero'`.
+
+The `Money` atom is the only place components render an amount, and it delegates entirely to
+these helpers.
+
+## Timezone — `lib/datetime.ts` (convert at the edge)
+
+The server is **UTC-only** and sends ISO-8601 `Z` instants; the SPA converts to
+**`America/Mexico_City`** *at the edge* for display (spec 07 / cross-cutting rule 5) and
+never sends a localized time back. `formatInstant(iso)` parses the instant and renders it
+with `Intl.DateTimeFormat(..., { timeZone: 'America/Mexico_City' })` — the **IANA zone via
+`Intl`, never a hardcoded UTC offset**, so DST history (and Mexico's 2022 DST abolition) is
+handled by the tz database, not by us. The `Timestamp` atom keeps the raw UTC instant in the
+`<time dateTime>` attribute while showing the localized text.
 
 ## Running it
 
@@ -131,8 +193,10 @@ npm run dev                 # serves at http://localhost:8080
 ```
 
 Then in the browser: open `http://localhost:8080/` → you are redirected to Keycloak
-→ sign in → you land back on the home route → the bare accounts list (from the MSW
-stub) renders, proving PKCE token → RTK Query bearer → `/api/accounts` → render.
+→ sign in → you land on the **accounts overview** (formatted balances from the MSW stub),
+proving PKCE token → RTK Query bearer → `/api/accounts` → render. Select an account to open
+its **statement** at `/accounts/:id/transactions` (amounts formatted, timestamps in Mexico
+City time).
 
 Other scripts: `npm run build`, `npm run typecheck`, `npm run lint`,
 `npm run format` / `npm run format:check`, `npm test`.

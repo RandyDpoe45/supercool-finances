@@ -29,3 +29,29 @@ export interface AccountDto {
 export interface AccountsResponse {
   accounts: AccountDto[];
 }
+
+/**
+ * One ledger leg in an account's statement on `GET /api/accounts/:id/transactions`.
+ * Mirrors balance-service's `StatementEntryDto` serializer output. `delta` (signed:
+ * debit < 0, credit > 0) and `balanceAfter` (the running balance fold) are canonical
+ * bigint minor-unit strings — NEVER parse them into a float. `createdAt` is an ISO-8601
+ * UTC instant (rendered in Mexico City time at the edge, per spec 07).
+ */
+export interface StatementEntryDto {
+  id: string;
+  transactionId: string;
+  delta: string;
+  balanceAfter: string;
+  currency: string;
+  createdAt: string;
+}
+
+/**
+ * Envelope returned by `GET /api/accounts/:id/transactions`. `entries` are newest-first
+ * (server orders by `created_at DESC, id DESC`) and bounded to the latest page; consumers
+ * render them in the order received. `accountId` echoes the resolved (owned) account.
+ */
+export interface StatementResponse {
+  accountId: string;
+  entries: StatementEntryDto[];
+}
