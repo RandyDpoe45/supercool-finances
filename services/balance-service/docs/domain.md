@@ -27,8 +27,12 @@ per step:
   ([below](#confirmation-of-payee--customer-representation-step-4c)): the `customer` table, the
   human `account_number`, and the resolve→token→initiate gate that makes internal transfers
   human-usable (addressed by account number, with a masked payee name shown before initiate).
+- **Step 5 — external payee enrollment**
+  ([below](#external-payee-enrollment-step-5)): the `POST /api/payees` / `GET /api/payees`
+  surface, the constant outbound rail, the env-configured cooling-off, and the DB-clock,
+  date-gated usability. No money movement yet.
 
-Holds, external transfers, limits, and the outbox relay still arrive in later steps.
+Holds, external outbound money movement, limits, and the outbox relay still arrive in later steps.
 
 ## Module structure
 
@@ -688,7 +692,7 @@ generic-message path.
 | `INVALID_POSTING_COMMAND`, `INVALID_TRANSFER` | 400 |
 | `ACCOUNT_NOT_FOUND`, `TRANSFER_NOT_FOUND` | 404 |
 | `CURRENCY_MISMATCH`, `INSUFFICIENT_FUNDS` | 422 |
-| `ACCOUNT_FROZEN`, `TRANSFER_NOT_PENDING`, `PENDING_TRANSFER_CONFLICT`, `SUSPECTED_DUPLICATE`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `OTP_ALREADY_ACTIVE`, `DESTINATION_NOT_CONFIRMED` | 409 |
+| `ACCOUNT_FROZEN`, `TRANSFER_NOT_PENDING`, `PENDING_TRANSFER_CONFLICT`, `SUSPECTED_DUPLICATE`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `OTP_ALREADY_ACTIVE`, `DESTINATION_NOT_CONFIRMED`, `PAYEE_ALREADY_ENROLLED` | 409 |
 | `TRANSFER_EXPIRED` | 410 |
 | `INVALID_OTP` | 401 |
 | `OTP_LOCKED_OUT` | 429 |
@@ -941,9 +945,96 @@ outbound**, its initiate shares the SAME `uq_one_pending_per_initiator` index an
 expire → supersede → insert sequence (plus its hold), so a user still holds at most one pending
 authorization across internal and external-outbound alike.
 
+## External payee enrollment (step 5)
+
+The first step of the external rail: a customer **enrolls** a beneficiary they can later send
+money to. This step is **enrollment only** — no holds, no outbound money movement, no migration
+(the `external_payee` table/entity/repo already exist). Enrollment is **not** OTP-gated and has
+**no resolve/confirm step** (there is no external name to look up — the user supplies the
+`displayName`); the **cooling-off delay is the anti-fraud control**.
+
+### Module structure
+
+`src/modules/payees/` — the payees FEATURE module (module-layout + controller-surface
+conventions): the root holds only `payees.module.ts`; business logic under `service/`; the
+controller in its own `api/` surface folder with `dto/` + `serializers/`.
+
+| File | Role |
+|---|---|
+| `payees.module.ts` | Feature module: `imports: [PersistenceModule]`, binds `{ provide: PAYEES_SERVICE, useClass: PayeesService }`, exports the token. **No controllers of its own.** `APP_CONFIG` (the injected cooling-off window) is `@Global`, so it is not imported here. |
+| `service/interfaces/payees.service.interface.ts` | `IPayeesService` + `PAYEES_SERVICE` token + the `RegisterPayeeParams` contract type. |
+| `service/errors.ts` | `PayeeAlreadyEnrolledError` (`PAYEE_ALREADY_ENROLLED`), extends `DomainError`. |
+| `service/impl/payees.service.ts` | `PayeesService implements IPayeesService` — enroll + list; injects `EXTERNAL_PAYEE_REPOSITORY` + `APP_CONFIG`; the `uq_payee` 23505→409 translation helper. |
+| `api/payees-api.controller.ts` | `PayeesApiController`, `@Controller('api')` — the two routes; **declared by `ApiModule`**. |
+| `api/dto/payee.dto.ts` | `PayeeDto` (the wire contract). |
+| `api/dto/payees.schema.ts` | zod `registerPayeeSchema` for the body (`.strict()` — rejects unknown keys). |
+| `api/serializers/payees.serializer.ts` | Explicit-whitelist `serializePayee` (entity→DTO). |
+
+### Endpoints
+
+Both under the global `/api` prefix (the `GatewayIdentityGuard` has required the Kong
+`X-User-Id`); the caller id is read **only** via `@Identity()`, never the body/query.
+
+| Route | Effect |
+|---|---|
+| `POST /api/payees` | Enroll an external beneficiary. Body `{ displayName, destinationRef }` — the outbound **rail is NOT accepted from the caller** (a server-side constant). Stamps the DB-clock `coolingOffUntil`. **201**, `PayeeDto`. A duplicate `(owner_id, rail, destination_ref)` → `PayeeAlreadyEnrolledError` (**409**). |
+| `GET /api/payees` | List the caller's enrolled payees. **200**, `{ payees: PayeeDto[] }`. |
+
+`PayeeDto` = `{ id, displayName, destinationRef, coolingOffUntil, usable, createdAt }` —
+timestamps ISO-8601 UTC. Internal columns `ownerId`, `rail` (a system constant), `status` and
+`activatedAt` (reserved & unused) are **never** serialized. `usable` is a presentation-derived
+hint (`now() >= coolingOffUntil`) computed at serialize time; the **authoritative** usability gate
+is date-checked against the DB clock at outbound time (a later step), never trusted from the flag.
+
+### The constant outbound rail
+
+`src/common/rails/outbound-rail.ts` exports `OUTBOUND_RAIL = 'rail-outbound'` — the single rail
+all external outbound clears through in the prototype. It is **not** user-supplied (the enrollment
+body carries no `rail`); the service sets it. It names the counter-leg clearing account
+`clearing:${OUTBOUND_RAIL}` (`clearing:rail-outbound`, seeded by `SeedSystemAccounts`), which the
+later holds/outbound step debits against. Kept in `common/` because that step reuses the same
+constant.
+
+### Date-gated usability (no status lifecycle)
+
+Usability is **date-gated, not status-driven** (a LOCKED developer decision):
+
+- Enrollment stamps `cooling_off_until = now() + PAYEE_COOLING_OFF_SECONDS` (env-configured,
+  default **24h**; `config.payees.coolingOffSeconds`). A payee is a valid destination from that
+  instant on — `now() >= cooling_off_until`.
+- There is **no** PENDING→ACTIVE transition and **no** `activated_at` stamping. The entity's
+  `status` stays at its DB default (`pending`) and `activated_at` stays NULL — **both are reserved
+  for a future admin/self-disable flow and are unused now**. Nothing reads them as a usability gate.
+
+`IExternalPayeeRepository.createEnrollment(ownerId, displayName, rail, destinationRef,
+coolingOffSeconds)` performs a parameterized INSERT that sets `cooling_off_until` on the **DB
+clock** — `now() + make_interval(secs => <n>)` — so the deadline is authoritative and consistent
+with the DB-defaulted `created_at` (both resolve to the enrolling transaction's `now()`). The
+`<n>` is the validated positive integer from config (never user input), safe to inline into the
+interval expression; every row value is parameterized. `status` / `created_at` / `activated_at`
+keep their DB defaults, and the row is re-read so the returned entity carries them. It does **not**
+app-clock the cooling-off.
+
+### Duplicate → 409
+
+`PayeesService.registerPayee` sets `rail = OUTBOUND_RAIL` and calls `createEnrollment` with the
+configured cooling-off. A duplicate `(owner_id, rail, destination_ref)` collides on the `uq_payee`
+unique index (SQLSTATE 23505); the service detects that with an `isPayeeUniqueViolation` helper
+(matched on the constraint name `uq_payee`, checking the error or its `driverError` — same shape as
+the transfers single-pending helper) and throws `PayeeAlreadyEnrolledError` (`PAYEE_ALREADY_ENROLLED`
+→ **409**, added to `domain-error-status.ts`). With a single constant rail this is effectively one
+enrollment per external account per customer. `listPayees` is a straight `findByOwner`.
+
+### Config
+
+`PAYEE_COOLING_OFF_SECONDS` (`z.coerce.number().int().positive().default(86400)`) is added to
+`env.schema.ts` and surfaced as `AppConfig.payees.coolingOffSeconds` (a `PayeesConfig` interface,
+mirroring `OtpConfig`) in `configuration.ts`. Tests / compose override the default.
+
 ## Not in this slice (later steps)
 
-Holds + external outbound + external inbound, the outbox **relay worker**, limits + external
-payees, and admin ops + maker-checker + external rails. Statement pagination beyond the first
-page is likewise deferred — the read slice returns only the most recent `STATEMENT_PAGE_LIMIT`
-legs.
+Holds + external **outbound money movement** + external inbound, the outbox **relay worker**,
+limits, and admin ops + maker-checker + external rails. The external-payee **usability check at
+outbound time** (the authoritative `now() >= cooling_off_until` gate) lands with the outbound money
+step — this step only records the payee. Statement pagination beyond the first page is likewise
+deferred — the read slice returns only the most recent `STATEMENT_PAGE_LIMIT` legs.

@@ -158,9 +158,15 @@ not a migration.
 
 **`external_payee`**
 - `owner_id`, `display_name`, `rail`, `destination_ref`, `cooling_off_until` NOT NULL;
-  `status` defaults `pending`; `activated_at` nullable.
-- `uq_payee (owner_id, rail, destination_ref)` — UNIQUE. A destination is usable only
-  when `status = 'active'` AND `now() >= cooling_off_until` (enforced in the service).
+  `status` defaults `pending`; `activated_at` nullable. **No FK on `owner_id`** (a payee is
+  metadata, not owner-joined to `customer`) — so seeding a payee needs no customer parent row.
+- `uq_payee (owner_id, rail, destination_ref)` — UNIQUE. A destination is **date-gated**: usable
+  from `cooling_off_until` onward — `now() >= cooling_off_until` (checked in the domain layer at
+  outbound time, a later step). There is **no** status lifecycle — `status` / `activated_at` stay at
+  their defaults (`pending` / NULL), reserved for a future admin/self-disable flow, unused now.
+  `cooling_off_until` is stamped from the **DB clock** at enrollment
+  (`now() + make_interval(secs => PAYEE_COOLING_OFF_SECONDS)`) — see
+  [domain.md](./domain.md#external-payee-enrollment-step-5).
 
 **`transaction`** (the table name is a SQL keyword — quoted `"transaction"` everywhere)
 - FKs (all `NO ACTION`): `debit_account_id`/`credit_account_id` → `account.id`
@@ -309,7 +315,7 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
 | `LEDGER_ENTRY_REPOSITORY` | `ILedgerEntryRepository` | `findById`, `create`, `findByAccount(accountId, limit)` |
 | `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create`, `insertInTx`, `insertPendingInTx` (DB-clock `expires_at`), `findByIdInTx`, `findPendingByInitiator` (→ single row or null), `transitionToPostedInTx`, `expireOverduePendingByInitiator`, `supersedeActivePendingByInitiator`, `expireIfOverdue`, `transitionToCancelled` |
 | `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create` |
-| `EXTERNAL_PAYEE_REPOSITORY` | `IExternalPayeeRepository` | `findById`, `create`, `findByOwner` |
+| `EXTERNAL_PAYEE_REPOSITORY` | `IExternalPayeeRepository` | `findById`, `create`, `findByOwner`, `createEnrollment(ownerId, displayName, rail, destinationRef, coolingOffSeconds)` (DB-clock `cooling_off_until`) |
 | `USER_LIMITS_REPOSITORY` | `IUserLimitsRepository` | `findById`, `create`, `findByOwner` |
 | `OUTBOX_EVENT_REPOSITORY` | `IOutboxEventRepository` | `findById`, `create` |
 | `AUDIT_LOG_REPOSITORY` | `IAuditLogRepository` | `findById`, `create` |

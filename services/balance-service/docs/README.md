@@ -44,6 +44,7 @@ string and **composes its own** Postgres DSN and Redis URL from the discrete par
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis (used from spec 04) | port `6379` |
 | `INTERNAL_SERVICE_TOKEN` | shared secret for the `/internal` guard | — |
 | `OTP_HASH_SECRET` | pepper for the keyed HMAC that hashes OTP codes at rest (spec 04); min 16 chars, never stored in Redis | — |
+| `PAYEE_COOLING_OFF_SECONDS` | external-payee cooling-off window in seconds — how long after enrollment a payee becomes a usable destination (spec 04); positive integer | `86400` (24h) |
 
 - **Validation is zod, at boot, fail-fast.** `parseEnv` (`config/env.schema.ts`)
   validates and coerces `process.env`; any missing/invalid required var throws an

@@ -3,6 +3,8 @@ import { AccountsModule } from '../accounts/accounts.module';
 import { AccountsApiController } from '../accounts/api/accounts-api.controller';
 import { OtpModule } from '../otp/otp.module';
 import { OtpApiController } from '../otp/api/otp-api.controller';
+import { PayeesModule } from '../payees/payees.module';
+import { PayeesApiController } from '../payees/api/payees-api.controller';
 import { TransfersModule } from '../transfers/transfers.module';
 import { TransfersApiController } from '../transfers/api/transfers-api.controller';
 import { ApiController } from './api.controller';
@@ -18,9 +20,17 @@ import { ApiController } from './api.controller';
  * - `OtpApiController` — mint the caller's one-time code, injecting `OTP_SERVICE`
  *   ({@link OtpModule}). `TransfersModule` also imports `OtpModule`; module singletons make the
  *   shared import safe.
+ * - `PayeesApiController` — enroll + list external payees, injecting `PAYEES_SERVICE`
+ *   ({@link PayeesModule}).
  */
 @Module({
-  imports: [AccountsModule, TransfersModule, OtpModule],
-  controllers: [ApiController, AccountsApiController, TransfersApiController, OtpApiController],
+  imports: [AccountsModule, TransfersModule, OtpModule, PayeesModule],
+  controllers: [
+    ApiController,
+    AccountsApiController,
+    TransfersApiController,
+    OtpApiController,
+    PayeesApiController,
+  ],
 })
 export class ApiModule {}

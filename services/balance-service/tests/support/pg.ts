@@ -244,3 +244,62 @@ export async function insertIdempotencyKey(
     ...overrides,
   });
 }
+
+/**
+ * The constant outbound rail literal, mirroring the production `OUTBOUND_RAIL` (spec of record).
+ * Kept as a LITERAL here (not imported from src) so this plumbing file stays source-free; a suite
+ * that needs the AUTHORITATIVE constant uses `harness.getOutboundRail()`. The `uq_payee` unique
+ * index is `(owner_id, rail, destination_ref)`, so two default inserts for one owner never collide
+ * as long as `destination_ref` differs (it defaults to a unique-per-call digit string).
+ */
+const PAYEE_OUTBOUND_RAIL = 'rail-outbound';
+
+/** A locally-minted numeric external account number (a random 12-digit string, within the 6–20
+ * digit registration bound), unique-per-call so repeated default seeds for one owner don't collide
+ * on `uq_payee`. */
+export function localDestinationRef(): string {
+  let s = '';
+  for (let i = 0; i < 12; i++) s += String(Math.floor(Math.random() * 10));
+  return s;
+}
+
+/**
+ * Options for {@link insertExternalPayee}. Named (camelCase) fields map to the `"external_payee"`
+ * columns. `ownerId` is REQUIRED (there is NO owner FK on `external_payee` — the migration/entity
+ * carry none — so no `customer` parent row is seeded). `coolingOffUntil` accepts a JS `Date`
+ * (node-postgres serializes it to the `timestamptz` column): a **PAST** date → the payee is already
+ * usable (`now() >= cooling_off_until`); a **FUTURE** date → still in cooling-off. `rail` defaults to
+ * the constant outbound rail and `destinationRef` to a unique-per-call digit string; `status`
+ * (default `pending`) / `created_at` (default `now()`) keep their DB defaults unless set.
+ */
+export interface InsertExternalPayeeOpts {
+  id?: string;
+  ownerId: string;
+  displayName?: string;
+  rail?: string;
+  destinationRef?: string;
+  coolingOffUntil?: Date;
+  createdAt?: Date;
+  status?: string;
+}
+
+/**
+ * An `external_payee` row (all NOT-NULL-without-default columns defaulted). `cooling_off_until`
+ * defaults to a moment in the PAST (already usable) — the common case for downstream outbound
+ * tests; pass a FUTURE `coolingOffUntil` to seed a payee still inside its cooling-off window. Only
+ * the keys the caller sets beyond the defaults are written, so an unset `status` / `created_at`
+ * keeps its DB default. Returns the inserted row (RETURNING *).
+ */
+export async function insertExternalPayee(q: any, opts: InsertExternalPayeeOpts): Promise<any> {
+  const row: Record<string, unknown> = {
+    owner_id: opts.ownerId,
+    display_name: opts.displayName ?? 'Acme Payments',
+    rail: opts.rail ?? PAYEE_OUTBOUND_RAIL,
+    destination_ref: opts.destinationRef ?? localDestinationRef(),
+    cooling_off_until: opts.coolingOffUntil ?? new Date(Date.now() - 1000),
+  };
+  if (opts.id !== undefined) row.id = opts.id;
+  if (opts.status !== undefined) row.status = opts.status;
+  if (opts.createdAt !== undefined) row.created_at = opts.createdAt;
+  return insertRow(q, 'external_payee', row);
+}
