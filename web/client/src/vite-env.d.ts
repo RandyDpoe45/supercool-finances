@@ -7,6 +7,7 @@ interface ImportMetaEnv {
   readonly VITE_OIDC_AUTHORITY?: string;
   readonly VITE_OIDC_CLIENT_ID?: string;
   readonly VITE_ENABLE_API_MOCKS?: string;
+  readonly VITE_DEV_OTP_CODE?: string;
 }
 
 interface ImportMeta {

@@ -120,3 +120,98 @@ main {
 .direction--out {
   color: #b45309;
 }
+
+/* Transfer flow */
+.transfer-page {
+  max-width: 32rem;
+}
+
+.transfer-form {
+  display: grid;
+  gap: 0.4rem;
+  max-width: 24rem;
+}
+
+.transfer-form label {
+  font-weight: 600;
+}
+
+.transfer-form input,
+.transfer-form select {
+  padding: 0.4rem 0.5rem;
+  font: inherit;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  align-items: center;
+}
+
+.field-error {
+  color: #b91c1c;
+  margin: 0.1rem 0 0;
+  font-size: 0.9rem;
+}
+
+.captcha {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0.5rem 0;
+}
+
+.captcha__row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.captcha__ok {
+  color: #15803d;
+  font-weight: 700;
+}
+
+.payee-confirm__details,
+.transfer-summary {
+  margin: 0.5rem 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.payee-confirm__details > div,
+.transfer-summary > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.payee-confirm__details dt,
+.transfer-summary dt {
+  opacity: 0.8;
+}
+
+.payee-confirm__details dd,
+.transfer-summary dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.transfer-confirm__hint {
+  opacity: 0.85;
+}
+
+.button--secondary {
+  opacity: 0.9;
+}
+
+.button--link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}

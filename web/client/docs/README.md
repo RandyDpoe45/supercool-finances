@@ -1,10 +1,12 @@
 # client-app — customer SPA
 
 The public customer SPA for SuperCool Finances (spec 07). This document covers the
-F1 scaffold (app structure, auth + data spine, MSW stub harness, environment variables)
-and the **F2 accounts experience**: the accounts overview, the account statement/history
-view, and the float-free money + edge-timezone helpers those views rely on. Transfers,
-payees and OTP arrive in later steps and will be documented as they land.
+F1 scaffold (app structure, auth + data spine, MSW stub harness, environment variables),
+the **F2 accounts experience** (accounts overview, statement/history, and the float-free
+money + edge-timezone helpers those views rely on), and the **F3 internal-transfer
+journey** (confirmation of payee → amount + captcha → OTP-confirm, idempotent + duplicate-
+aware, with the money-safe input parsing it depends on). External payees arrive in a later
+step and will be documented as they land.
 
 This app is **self-contained** (ADR-16): no imports from other folders and no shared
 component library. Any contract shared with a service (e.g. the `/api/accounts` shape)
@@ -34,20 +36,24 @@ web/client/
 ├── src/
 │   ├── main.tsx               # bootstrap: start MSW (dev) → render <App/>
 │   ├── App.tsx                # AuthProvider → Provider(store) → Router → AuthGate
-│   ├── app/routes.tsx         # authenticated routes (accounts overview + statement)
+│   ├── app/routes.tsx         # authenticated routes (accounts, statement, transfers/new)
 │   ├── auth/
 │   │   ├── userManager.ts     # OIDC settings + shared UserManager + getAccessToken()
 │   │   └── AuthGate.tsx       # protected-route gate (login redirect / callback / error)
 │   ├── lib/
-│   │   ├── money.ts           # float-free minor-unit → human money (BigInt/string math)
+│   │   ├── money.ts           # float-free minor-unit ↔ human money (BigInt/string math)
 │   │   ├── datetime.ts        # UTC ISO → Mexico City time via Intl (edge conversion)
-│   │   └── apiError.ts        # RTK Query error → short human phrase
+│   │   ├── apiError.ts        # RTK Query error → short human phrase
+│   │   ├── transferError.ts   # transfers domain code → UI message + flow branch
+│   │   ├── transferFlow.ts    # PURE transfer wizard state machine (reducer)
+│   │   └── captcha.ts         # PURE demo captcha challenge/verify
 │   ├── store/                 # configureStore + typed hooks
 │   ├── services/api/
-│   │   ├── baseApi.ts         # createApi + fetchBaseQuery(prepareHeaders: bearer)
+│   │   ├── baseApi.ts         # createApi + fetchBaseQuery(prepareHeaders: bearer) + tag types
 │   │   ├── accountsApi.ts     # getAccounts + getAccountStatement queries
+│   │   ├── transfersApi.ts    # resolve/initiate/confirm/cancel + pending-authorization
 │   │   └── contracts/         # app-local copies of the /api wire contract
-│   ├── mocks/                 # MSW handlers, fixtures (accounts, statements), worker, server
+│   ├── mocks/                 # MSW handlers, fixtures, in-memory transfer state, worker, server
 │   └── components/            # atomic design: atoms / molecules / organisms / templates / pages
 └── tests/
     └── setup.ts               # jsdom matchers + MSW server lifecycle (runner wiring)
@@ -58,13 +64,19 @@ templates → pages). Only the components actually used exist:
 
 - **atoms** — `Money` (renders a minor-unit string via `lib/money`), `StatusBadge`
   (account status), `Timestamp` (renders a UTC instant in Mexico City time, keeping the
-  canonical UTC in the `<time dateTime>` attribute).
+  canonical UTC in the `<time dateTime>` attribute), `FieldError` (inline form/validation
+  message).
 - **molecules** — `AccountCard` (one account: id/link, currency, kind, status, and the
-  balance/held/available money fields), `StatementRow` (one ledger leg as a table row).
+  balance/held/available money fields), `StatementRow` (one ledger leg as a table row),
+  `CaptchaStub` (client-only demo captcha), `PayeeConfirmation` (masked payee + confirm/deny),
+  `PendingTransferSummary` (amount / masked destination / expiry).
 - **organisms** — `AccountsList` (semantic list of account cards; empty state),
-  `StatementTable` (newest-first statement table; empty state).
-- **pages** — `AccountsPage` (`/`, the overview; loading/error) and
-  `AccountStatementPage` (`/accounts/:id/transactions`; loading/error).
+  `StatementTable` (newest-first statement table; empty state), `ResolveDestinationForm`
+  (account-number lookup), `TransferAmountForm` (source + amount + captcha, gated initiate),
+  `TransferConfirmPanel` (pending summary + OTP code + cancel).
+- **pages** — `AccountsPage` (`/`, the overview; loading/error), `AccountStatementPage`
+  (`/accounts/:id/transactions`; loading/error), and `TransferPage` (`/transfers/new`, the
+  transfer-journey orchestrator).
 
 ## Auth spine (OIDC Authorization Code + PKCE)
 
@@ -106,6 +118,22 @@ Both are cache-tagged under the `Account` tag. Their app-local response contract
 `services/api/contracts/accounts.ts` (`AccountDto`, `StatementEntryDto`, and the two
 envelopes) — the SPA's own copy per ADR-16, synced via the specs.
 
+The transfers slice (`services/api/transfersApi.ts`) adds the write surface + the pending
+feed: the `resolveDestination` / `initiateTransfer` / `confirmTransfer` / `cancelTransfer`
+mutations and the `getPendingAuthorization` query, all on `baseApi` (so the bearer is
+reused). `initiateTransfer` sends the idempotency key as the **`Idempotency-Key` header**
+(never a body field). Its contracts live in `services/api/contracts/transfers.ts`
+(`TransferDto`, `ResolveDestinationDto`, `PendingAuthorizationDto`, request bodies) — again
+the SPA's own copy per ADR-16.
+
+**Cache invalidation (the load-bearing correctness).** `baseApi` declares two tag types,
+`Account` and `PendingAuthorization`. A **POSTED confirm moves money**, so `confirmTransfer`
+invalidates the accounts `LIST` tag **and** the source account's per-id tag — refetching
+`getAccounts` (all balances) and any open statement for that account. `initiateTransfer`,
+`confirmTransfer` and `cancelTransfer` all invalidate `PendingAuthorization`, so the pending
+feed reflects the new lifecycle state. (An internal `cancelTransfer` moves no money — no hold
+— so it does **not** invalidate `Account`.)
+
 ## MSW stub harness and how it maps to the real contract
 
 MSW intercepts **only `/api`**; OIDC traffic to Keycloak is left alone
@@ -124,6 +152,28 @@ MSW intercepts **only `/api`**; OIDC traffic to Keycloak is left alone
   (like `GatewayIdentityGuard`); a malformed account id → **400** (like the controller's
   `ParseUUIDPipe`); and an unknown / non-owned / system account id → **404** (the service
   makes those indistinguishable — never 403 — so existence cannot be probed, ADR-3).
+- It also stubs the **transfers surface** — `POST /api/transfers/resolve-destination`,
+  `POST /api/transfers`, `POST /api/transfers/:id/confirm`, `POST /api/transfers/:id/cancel`,
+  and `GET /api/pending-authorization` — with small in-memory state in
+  `src/mocks/state/transferStore.ts`: confirmation-of-payee tokens, idempotent initiate — a
+  replay compares the incoming **request fingerprint** (source + destination + amount + currency,
+  EXCLUDING `confirmDuplicate`, matching the service's `computeFingerprint`) against the one
+  stored under the key: a **match** replays the same transfer, a **mismatch** is key reuse
+  (`IDEMPOTENCY_KEY_REUSED` 409, mirroring the service's `resolveExisting`) — never a silent
+  replay of a different request. It also honors the 60-second **soft-duplicate window** (via
+  `confirmDuplicate`), the single-active-pending rule (a new initiate auto-supersedes the prior
+  pending), the 2-minute pending deadline (lazy expiry), and OTP-gated confirm/cancel. Transfer
+  errors return the **domain code** with its status (e.g. `SUSPECTED_DUPLICATE` 409,
+  `IDEMPOTENCY_KEY_REUSED` 409, `DESTINATION_NOT_CONFIRMED` 409, `TRANSFER_EXPIRED` 410,
+  `INVALID_OTP` 401, `TRANSFER_NOT_PENDING` 409, `TRANSFER_NOT_FOUND` 404), exactly as the service
+  maps them. Destinations are seeded in
+  `src/mocks/fixtures/destinations.ts` (masked names mirror the service's `maskName` rule). The
+  stub deliberately does **not** mutate account balances — the fixtures stay deterministic, and
+  the money-safety proof is the client's cache invalidation / refetch, not a simulated balance.
+  `resetTransferStore()` clears the state for test isolation.
+- The confirm step accepts a **deterministic dev one-time code** — `VITE_DEV_OTP_CODE`
+  (default `123456`). It is a mock for local dev/tests only, **not a secret** and never used
+  against the real backend (the real out-of-band code comes from the otp-app).
 - `src/mocks/browser.ts` (dev worker) and `src/mocks/node.ts` (test server) share the
   same handlers. The node `server` is imported and driven by `tests/setup.ts`.
 - The app-local contract types in `src/services/api/contracts/` are the SPA's own
@@ -141,6 +191,7 @@ copy to `.env.local` to override locally. Never put a secret here.
 | `VITE_OIDC_AUTHORITY` | `http://keycloak.localtest.me:8082/realms/supercool` | Keycloak realm issuer. |
 | `VITE_OIDC_CLIENT_ID` | `client-app` | Public OIDC client id. |
 | `VITE_ENABLE_API_MOCKS` | `true` | Set `false` to disable the dev MSW stub. |
+| `VITE_DEV_OTP_CODE` | `123456` | The one-time code the MSW transfer stub accepts on OTP-confirm. A mock for dev/tests only — **not a secret**, never used against the real backend. |
 
 ## Accounts & statement views
 
@@ -155,20 +206,74 @@ copy to `.env.local` to override locally. Never put a secret here.
   organisms. A 404 (missing / non-owned / system account) surfaces as a plain "not found"
   so the view never reveals whether an account exists.
 
-## Money formatting (float-free) — `lib/money.ts`
+## Internal-transfer journey (`/transfers/new`)
 
-Money on the wire is a canonical **minor-unit integer string** (int64 precision).
-Formatting it for humans **must never touch a float**: `Number`/`parseFloat` silently loses
-precision above 2^53 and introduces rounding error — a money-safety defect. So `lib/money`
-does the whole conversion with **BigInt and string math**:
+The **first money-moving UI**. `TransferPage` is the orchestrator: it owns a **pure state
+machine** (`lib/transferFlow.ts`) and the RTK Query mutations, dispatching transitions in
+response to server results. The journey (spec 04 Transfers):
+
+1. **Confirmation of payee.** The payer enters the destination's **10-digit account number**
+   → `resolve-destination` returns a **masked holder name** + currency + a single-use
+   `confirmationToken`; the payer must explicitly confirm it is the right person. The raw name
+   is PII the service never discloses — the client only ever sees the mask.
+2. **Amount + source.** The payer picks one of their **own** accounts (only those matching the
+   destination's currency, never the destination itself) and types a human major-unit amount,
+   converted to the exact minor-unit string by `parseAmountToMinor` (below).
+3. **Captcha stub.** A client-only demo captcha (`lib/captcha.ts` + `CaptchaStub`) — a trivial
+   arithmetic challenge, no network, no external service. Initiate stays **disabled until it is
+   solved**. It is a prototype gate, not a real bot defense (spec 07 open question: library
+   choice deferred).
+4. **Idempotency.** A `crypto.randomUUID()` is generated once the payee is confirmed and
+   **reused across every initiate attempt of that logical transfer** (including a
+   duplicate-confirm re-submit), sent as the **`Idempotency-Key` header** — so a retry can never
+   double-submit.
+5. **Initiate.** `POST /api/transfers` creates a **PENDING** transfer (no money moves). If the
+   service soft-blocks an identical recent payment (`SUSPECTED_DUPLICATE`), the form surfaces a
+   clear **"Send anyway"** that re-submits with `confirmDuplicate: true` and the **same** key. A
+   `PENDING_TRANSFER_CONFLICT` (a concurrent race) is recovered by resuming the existing pending;
+   a `DESTINATION_NOT_CONFIRMED` (expired token) is surfaced so the payer re-confirms.
+6. **OTP confirm.** The PENDING transfer awaits a one-time code the payer gets **out of band**
+   from the otp-app (built later). The client-app **never mints or reveals** the code — it only
+   submits it: `POST /api/transfers/:id/confirm` → **POSTED** (money moves). A wrong code
+   (`INVALID_OTP` 401), lockout (`OTP_LOCKED_OUT` 429) or expiry (`TRANSFER_EXPIRED` 410) map to
+   clear messages (`lib/transferError.ts`, keyed off the **domain code**, not the HTTP status).
+7. **Cancel.** `POST /api/transfers/:id/cancel` (guarded PENDING→CANCELLED; idempotent on an
+   already terminal transfer).
+8. **Resume.** On mount, `GET /api/pending-authorization` reflects the caller's single active
+   pending; if one exists the flow **resumes at the confirm step** (at most once, right after
+   the initial load).
+
+`lib/transferFlow.ts` keeps all state transitions pure and side-effect-free (the page passes in
+anything non-deterministic — the generated key, the server response — via the action payload),
+so the flow is deterministic and independently testable. Every rendered field comes from the
+whitelisted DTOs; no internal column (`initiatedBy`/`payeeId`/`failureReason`/…) exists in the
+app-local contracts, so none can leak to the DOM.
+
+## Money formatting & parsing (float-free) — `lib/money.ts`
+
+Money on the wire is a canonical **minor-unit integer string** (int64 precision). Both
+directions — formatting it for display AND parsing user input back into it — **must never touch
+a float**: `Number`/`parseFloat`/`toFixed` silently lose precision above 2^53 and introduce
+rounding error, a money-safety defect. So `lib/money` does everything with **BigInt and string
+math**:
 
 - `minorUnitDigits(currency)` — the currency's minor-unit exponent (MXN = 2; default 2).
 - `toDecimalString(minorUnits, exponent)` — the core split: BigInt division/modulo →
-  `'-15000.00'`. Throws on a non-integer input rather than yielding `NaN`.
-- `formatAmount(minorUnits, currency)` — grouped human amount `'-15,000.00'` (thousands
-  grouped by string regex, so it stays exact for arbitrarily large balances).
-- `formatMoney(minorUnits, currency)` — `formatAmount` plus the ISO code, `'-15,000.00 MXN'`.
-- `amountDirection(minorUnits)` — sign of a signed `delta`: `'in' | 'out' | 'zero'`.
+  `'-15000.00'`. **Guards its input with an explicit canonical-integer check** (`/^-?\d+$/`)
+  *before* `BigInt(...)`, so non-canonical strings that `BigInt` would silently coerce (`''` and
+  `' '` → `0n`, `'0x10'` → `16n`, `'+5'` → `5n`) fail LOUDLY instead. `amountDirection` guards
+  the same way.
+- `formatAmount` / `formatMoney` — grouped human amount `'-15,000.00'` (+ ISO code), thousands
+  grouped by string regex so it stays exact for arbitrarily large balances.
+- `parseAmountToMinor(input, currency)` — **the money-safety crux of the transfer form**:
+  converts a human major-unit string to a canonical **unsigned minor-unit integer string** with
+  BigInt/string math only. It **fails LOUDLY** (throws a typed `AmountParseError` carrying a
+  `kind` + a human message) on: empty, non-numeric, negative, zero, more fractional digits than
+  the currency's exponent, or an absurd/overflowing magnitude (`> int64`). It **never rounds or
+  coerces** — e.g. `'150.5'` → `'15050'`, `'0.05'` → `'5'`, but `'1.005'` for MXN is rejected
+  rather than truncated. `safeParseAmountToMinor` is a non-throwing wrapper for live form
+  validation (used by `TransferAmountForm`). The wire `amount` is always this string — never a
+  JS number.
 
 The `Money` atom is the only place components render an amount, and it delegates entirely to
 these helpers.
@@ -197,6 +302,13 @@ Then in the browser: open `http://localhost:8080/` → you are redirected to Key
 proving PKCE token → RTK Query bearer → `/api/accounts` → render. Select an account to open
 its **statement** at `/accounts/:id/transactions` (amounts formatted, timestamps in Mexico
 City time).
+
+To walk the **transfer journey**, click **Send money** (or open `/transfers/new`): enter a
+seeded destination number (`2000000001` or `2000000002`), confirm the masked payee, pick a
+source account and an amount, solve the demo captcha, and **Send**. On the confirm step enter
+the dev one-time code (`VITE_DEV_OTP_CODE`, default `123456`) to POST it — the accounts refetch
+via cache invalidation. Try sending the same amount to the same payee twice within a minute to
+see the duplicate-confirm path.
 
 Other scripts: `npm run build`, `npm run typecheck`, `npm run lint`,
 `npm run format` / `npm run format:check`, `npm test`.

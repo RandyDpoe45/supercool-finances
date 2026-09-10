@@ -23,6 +23,9 @@ export const baseApi = createApi({
       return headers;
     },
   }),
-  tagTypes: ['Account'],
+  // `Account` tags the accounts + statement reads; `PendingAuthorization` tags the single
+  // pending-transfer feed. A POSTED confirm invalidates the affected `Account` tags (so balances
+  // + statement refetch) and the pending feed; initiate/cancel invalidate the pending feed.
+  tagTypes: ['Account', 'PendingAuthorization'],
   endpoints: () => ({}),
 });
