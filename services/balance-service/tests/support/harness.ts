@@ -1362,3 +1362,118 @@ export function getLimitsService(): any {
   }
   return cls;
 }
+
+// ---- Maker-checker + reversals (spec 04 "Admin ops (/admin)", step 8b) -------------------------
+// The `/admin` maker-checker (four-eyes) reversal surface: a MAKER proposes a reversal
+// (`ApprovalRequest` PENDING) and a DIFFERENT CHECKER approves (executes the reversal atomically) or
+// rejects. Resolved through the same single-seam convention: the service BY TOKEN through the app
+// graph (integration), the CLASS for the pure unit spec (best-effort — the module is authored in
+// parallel), and the approval-request repo token BY name. The compensating movement is posted via
+// POSTING_SERVICE (getPostingServiceToken above), the audit rows via AUDIT_SERVICE.
+
+/** `APPROVAL_SERVICE` — the DI token the ApprovalsModule binds the IApprovalService to
+ *  (`proposeReversal(actorId, transactionId, reason?)`, `approve(actorId, approvalId)`,
+ *  `reject(actorId, approvalId)`). Resolved by token, never by class, per the interface/impl split.
+ *  The feature module folder is `approvals` (plural) but the service files are `approval.service*`
+ *  (singular), so the shared `resolveServiceToken` naming convention does not match — probe the real
+ *  paths directly with `findExportAcross`. Throws with an actionable message if unresolved (callers in
+ *  the parallel-development window wrap it defensively). */
+export function getApprovalServiceToken(): symbol {
+  const token = findExportAcross(
+    [
+      `${SRC}/modules/approvals/service/interfaces/approval.service.interface`,
+      `${SRC}/modules/approvals/service/interfaces/approvals.service.interface`,
+      `${SRC}/modules/approval/service/interfaces/approval.service.interface`,
+      `${SRC}/modules/approvals/service/interfaces`,
+      `${SRC}/modules/approvals`,
+      `${SRC}/modules/approval`,
+    ],
+    ['APPROVAL_SERVICE', 'APPROVALS_SERVICE'],
+  );
+  if (token === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the APPROVAL_SERVICE DI token. If the implementor put it ` +
+        `elsewhere, add the path/export to tests/support/harness.ts:getApprovalServiceToken — the ` +
+        `single coordination point.`,
+    );
+  }
+  return token as symbol;
+}
+
+/**
+ * The `ApprovalService` CLASS, for the pure unit spec (driven through a Nest TestingModule so the
+ * injection is order-independent, like the rails/transfers unit specs). Scanned with
+ * `findExportAcross`; returns `undefined` when the step-8b module is not yet built, so the unit spec
+ * honest-SKIPs (loudly) rather than crashing the default `npm test` run. If the implementor
+ * names/places it differently, add the path/export HERE — the single coordination point.
+ */
+export function getApprovalService(): any | undefined {
+  return findExportAcross(
+    [
+      `${SRC}/modules/approval/service/impl/approval.service`,
+      `${SRC}/modules/approval/impl/approval.service`,
+      `${SRC}/modules/approval/approval.service`,
+      `${SRC}/modules/approval/service/approval.service`,
+      `${SRC}/modules/approvals/service/impl/approvals.service`,
+      `${SRC}/modules/approvals/service/impl/approval.service`,
+      `${SRC}/modules/approvals/impl/approvals.service`,
+      `${SRC}/modules/approvals/approvals.service`,
+    ],
+    ['ApprovalService', 'ApprovalsService'],
+  );
+}
+
+/** `APPROVAL_REQUEST_REPOSITORY` — the DI token the persistence layer binds the approval-request repo
+ *  to (maker-checker). The step-8b surface adds `findByIdInTx(qr, id)`,
+ *  `findByTargetTransaction(txId)`, `transitionToExecutedInTx(qr, id, checkerId)` and
+ *  `transitionToRejectedInTx(qr, id, checkerId)` to the port. Reuses the multi-path repo-token
+ *  resolver so the unit spec can mock it BY token, or seed/read rows via tests/support/pg.ts. */
+export function getApprovalRequestRepositoryToken(): symbol {
+  return getRepositoryToken('APPROVAL_REQUEST_REPOSITORY', 'approval-request');
+}
+
+/**
+ * BEST-EFFORT resolution of the maker-checker domain error classes (so a rejection can be classified
+ * by `instanceof`). Like `getDomainErrors`, this does NOT throw when a class is absent — the proofs
+ * gate on OBSERVABLE STATE (money moved / not, target status, approval status) and the stable `.code`,
+ * with the class as a secondary (exact) signal. Codes: `TRANSACTION_NOT_REVERSIBLE`,
+ * `REVERSAL_ALREADY_REQUESTED`, `APPROVAL_NOT_FOUND`, `APPROVAL_NOT_PENDING`, `SELF_APPROVAL_FORBIDDEN`.
+ */
+export function getApprovalErrors(): Record<string, any> {
+  const candidates = [
+    `${SRC}/modules/approval/service/errors`,
+    `${SRC}/modules/approval/errors`,
+    `${SRC}/modules/approval/approval.errors`,
+    `${SRC}/modules/approvals/service/errors`,
+    `${SRC}/modules/approvals/errors`,
+    `${SRC}/common/errors/domain.errors`,
+    `${SRC}/modules/approval`,
+    `${SRC}/modules/approvals`,
+  ];
+  return {
+    TransactionNotReversibleError: findExportAcross(candidates, [
+      'TransactionNotReversibleError',
+      'TransactionNotReversible',
+      'NotReversibleError',
+    ]),
+    ReversalAlreadyRequestedError: findExportAcross(candidates, [
+      'ReversalAlreadyRequestedError',
+      'ReversalAlreadyRequested',
+      'ApprovalAlreadyRequestedError',
+    ]),
+    ApprovalNotFoundError: findExportAcross(candidates, [
+      'ApprovalNotFoundError',
+      'ApprovalNotFound',
+      'ApprovalRequestNotFoundError',
+    ]),
+    ApprovalNotPendingError: findExportAcross(candidates, [
+      'ApprovalNotPendingError',
+      'ApprovalNotPending',
+    ]),
+    SelfApprovalForbiddenError: findExportAcross(candidates, [
+      'SelfApprovalForbiddenError',
+      'SelfApprovalForbidden',
+      'FourEyesViolationError',
+    ]),
+  };
+}

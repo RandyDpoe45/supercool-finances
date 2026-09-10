@@ -15,6 +15,10 @@ export const AUDIT_ACTIONS = {
   ACCOUNT_UNFREEZE: 'account.unfreeze',
   LIMITS_CHANGE: 'limits.change',
   EXTERNAL_INBOUND_SIMULATED: 'external.inbound.simulated',
+  // Maker-checker reversals (step 8b): a maker proposes, a different checker executes or rejects.
+  REVERSAL_PROPOSED: 'reversal.proposed',
+  REVERSAL_EXECUTED: 'reversal.executed',
+  REVERSAL_REJECTED: 'reversal.rejected',
 } as const;
 
 /**

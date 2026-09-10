@@ -720,3 +720,132 @@ export async function countUserLimitsExact(
   );
   return rows[0].count as number;
 }
+
+// ---- Maker-checker + reversals (spec 04 step 8b) ---------------------------------------------
+
+/**
+ * Options for {@link insertApprovalRow} — one `approval_request` row seeded DIRECTLY (bypassing the
+ * service's best-effort propose-time duplicate guard) so a suite can construct the TOCTOU the guard
+ * admits: TWO live PENDING approvals for the SAME target, proposed by DIFFERENT makers. `payload` is
+ * NOT NULL jsonb (defaults to `{}`); `actionType` defaults to the `'reversal'` enum label and
+ * `status` to `'PENDING'`. `checkerId` MUST differ from `makerId` when set (the DB CHECK
+ * `chk_approval_four_eyes` fires otherwise). `targetTransactionId` FKs `transaction` — seed the
+ * target first.
+ */
+export interface InsertApprovalRowOpts {
+  id?: string;
+  actionType?: string;
+  status?: string;
+  makerId: string;
+  checkerId?: string | null;
+  targetTransactionId: string;
+  payload?: Record<string, unknown>;
+  createdAt?: Date;
+}
+
+/**
+ * An `approval_request` row (NOT-NULL-without-default columns defaulted). Returns the inserted row
+ * (RETURNING *). `payload` is written as a JSON STRING so Postgres parses text → jsonb. Only the keys
+ * set beyond the defaults are written, so an unset `checker_id` / `created_at` keeps its DB default /
+ * NULL.
+ */
+export async function insertApprovalRow(q: any, opts: InsertApprovalRowOpts): Promise<any> {
+  const row: Record<string, unknown> = {
+    action_type: opts.actionType ?? 'reversal',
+    status: opts.status ?? 'PENDING',
+    maker_id: opts.makerId,
+    target_transaction_id: opts.targetTransactionId,
+    payload: JSON.stringify(opts.payload ?? {}),
+  };
+  if (opts.id !== undefined) row.id = opts.id;
+  if (opts.checkerId !== undefined) row.checker_id = opts.checkerId;
+  if (opts.createdAt !== undefined) row.created_at = opts.createdAt;
+  return insertRow(q, 'approval_request', row);
+}
+
+/**
+ * Read one `approval_request` row by id — the seam the maker-checker proofs use to assert the
+ * four-eyes lifecycle committed: `status` (PENDING → EXECUTED / REJECTED), `checker_id` (NULL until a
+ * checker decides; the DB backstops `checker_id <> maker_id`), `maker_id`, `target_transaction_id`
+ * (the transaction being reversed), and the `decided_at` / `executed_at` timestamps. Returns `null`
+ * when the id does not exist. `action_type` / `status` are the native-enum text labels.
+ */
+export async function getApprovalRow(
+  q: any,
+  id: string,
+): Promise<{
+  id: string;
+  action_type: string;
+  status: string;
+  maker_id: string;
+  checker_id: string | null;
+  target_transaction_id: string | null;
+  created_at: Date;
+  decided_at: Date | null;
+  executed_at: Date | null;
+} | null> {
+  const rows = await q.query(
+    `SELECT "id", "action_type", "status", "maker_id", "checker_id", "target_transaction_id",
+            "created_at", "decided_at", "executed_at"
+       FROM "approval_request" WHERE "id" = $1`,
+    [id],
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+/**
+ * All `approval_request` rows targeting a given transaction, oldest-first — the tripwire the
+ * "second reverse-proposal is rejected" proof reads (a target that already has a PENDING/EXECUTED
+ * approval must never accrue a second live one) and the concurrency keystone reads (exactly ONE
+ * approval, and it ends EXECUTED, no matter how many checkers race).
+ */
+export async function getApprovalsByTarget(
+  q: any,
+  targetTransactionId: string,
+): Promise<Array<{ id: string; status: string; maker_id: string; checker_id: string | null }>> {
+  return q.query(
+    `SELECT "id", "status", "maker_id", "checker_id" FROM "approval_request"
+       WHERE "target_transaction_id" = $1 ORDER BY "created_at" ASC, "id" ASC`,
+    [targetTransactionId],
+  );
+}
+
+/**
+ * The compensating transactions that reverse a given original (`reverses_transaction_id` = orig) —
+ * oldest-first. The keystone money-safety seam: a correct reversal yields EXACTLY ONE such row
+ * (POSTED, linked to the original), whatever concurrency or replay it faced; two would be a
+ * double-reversal (money created). `type` / `status` are the native-enum text labels.
+ */
+export async function getReversalTxsFor(
+  q: any,
+  originalTransactionId: string,
+): Promise<Array<{ id: string; status: string; type: string; reverses_transaction_id: string }>> {
+  return q.query(
+    `SELECT "id", "status", "type", "reverses_transaction_id" FROM "transaction"
+       WHERE "reverses_transaction_id" = $1 ORDER BY "created_at" ASC, "id" ASC`,
+    [originalTransactionId],
+  );
+}
+
+/** Read one transaction's `status` (`PENDING` | `POSTED` | `REVERSED` | …) — the seam the reversal
+ * proofs use to assert the guarded `POSTED → REVERSED` flip committed (or, on a rejected/blocked
+ * path, that NOTHING changed). Returns `null` when the id does not exist. (The harness
+ * `getTransactionStatus()` resolves the enum type; this reads a row's value from the DB — different
+ * modules, no collision.) */
+export async function getTransactionStatus(q: any, id: string): Promise<string | null> {
+  const rows = await q.query(`SELECT "status" FROM "transaction" WHERE "id" = $1`, [id]);
+  return rows.length > 0 ? (rows[0].status as string) : null;
+}
+
+/** Delete every `approval_request` row targeting any of the given transaction ids — best-effort
+ * per-test cleanup that MUST run BEFORE the transactions it points at are deleted (the
+ * `fk_approval_target_transaction` FK). */
+export async function deleteApprovalsByTarget(
+  q: any,
+  targetTransactionIds: string[],
+): Promise<void> {
+  if (!targetTransactionIds.length) return;
+  await q.query(`DELETE FROM "approval_request" WHERE "target_transaction_id" = ANY($1)`, [
+    targetTransactionIds,
+  ]);
+}

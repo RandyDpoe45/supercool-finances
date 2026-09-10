@@ -61,8 +61,12 @@ per step:
   service (transactional `recordInTx` + own-tx `record`) and the single-actor admin ops that write
   it — freeze/unfreeze, `PUT /limits`, plus the reads `GET /transactions` (view ANY transaction, no
   audit) and a simulated `POST /external/inbound`. Maker-checker (reversals + approvals) is step 8b.
-
-Maker-checker admin ops (reversals + the `ApprovalRequest` four-eyes flow) still arrive in step 8b.
+- **Step 8b — maker-checker + reversals** (the FINAL balance-service step)
+  ([below](#step-8b--maker-checker--reversals)): the four-eyes reversal flow — a maker PROPOSES a
+  reversal of a POSTED internal / external_inbound movement (`POST /admin/transfers/:id/reverse` →
+  a PENDING `ApprovalRequest`), a DIFFERENT checker `POST /admin/approvals/:id/approve` (executes
+  atomically) or `/reject`s it. Approve runs two guarded gates (approval `PENDING → EXECUTED` +
+  original `POSTED → REVERSED`) then a FORCED compensating post through the reducer, all in one tx.
 
 ## Module structure
 
@@ -1733,10 +1737,174 @@ Both added to `common/errors/domain-error-status.ts`. A missing account reuses t
 `ACCOUNT_NOT_FOUND` (404) via an accounts-owned `AccountNotFoundError` (same shared-code pattern as
 `TRANSFER_NOT_PENDING`).
 
-## Not in this slice (step 8b + later)
+## Step 8b — maker-checker + reversals
 
-**Maker-checker admin ops (step 8b):** the `ApprovalRequest` four-eyes flow — `POST
-/transfers/:id/reverse` (a maker proposes a reversal → PENDING approval), `POST /approvals/:id/approve`
-| `POST /approvals/:id/reject` (a DIFFERENT checker decides; approve executes the reversal,
-`checker_id <> maker_id`). Statement pagination beyond the first page is likewise deferred — the read
-slice returns only the most recent `STATEMENT_PAGE_LIMIT` legs.
+The FINAL balance-service step and a money-safety-critical path: the four-eyes reversal flow. A
+maker PROPOSES reversing a POSTED movement; a DIFFERENT checker APPROVES (which executes the reversal
+atomically) or REJECTS it. `checker_id <> maker_id` is enforced in the service AND backstopped by the
+DB CHECK. Every step (`propose` / `approve`→execute / `reject`) writes one audit row (spec 04 DoD:
+"A reversal requires a second approver (maker-checker) and writes an audit row").
+
+### Module structure
+
+`src/modules/approvals/` — the approvals FEATURE module (module-layout + controller-surface
+conventions): the root holds only `approvals.module.ts`; business logic under `service/`; the two
+controllers in their own `admin/` surface folder with `dto/` + `serializers/`.
+
+| File | Role |
+|---|---|
+| `approvals.module.ts` | Feature module: `imports: [PersistenceModule, PostingModule, AuditModule]`, binds `{ provide: APPROVAL_SERVICE, useClass: ApprovalService }`, exports the token. **No controllers of its own** (declared by `AdminModule`). |
+| `service/interfaces/approval.service.interface.ts` | `IApprovalService` + the `APPROVAL_SERVICE` Symbol token. Methods `proposeReversal(actorId, transactionId, reason?)`, `approve(actorId, approvalId)`, `reject(actorId, approvalId)` — all return the `ApprovalRequest` entity. |
+| `service/errors.ts` | Approvals-owned domain errors (extend `DomainError`) — see the table below. |
+| `service/impl/approval.service.ts` | `ApprovalService implements IApprovalService` — injects the DataSource + `APPROVAL_REQUEST_REPOSITORY` / `TRANSACTION_REPOSITORY` / `ACCOUNT_REPOSITORY` / `POSTING_SERVICE` / `AUDIT_SERVICE` tokens. |
+| `admin/reversals-admin.controller.ts` | `ReversalsAdminController`, `@Controller('admin/transfers')` — `POST :id/reverse`; **declared by `AdminModule`**. |
+| `admin/approvals-admin.controller.ts` | `ApprovalsAdminController`, `@Controller('admin/approvals')` — `POST :id/approve`, `POST :id/reject`; **declared by `AdminModule`**. |
+| `admin/dto/approval-request.dto.ts` | `ApprovalRequestDto` (admin wire contract). |
+| `admin/dto/reverse.schema.ts` | zod schema for the optional `{ reason? }` body. |
+| `admin/serializers/approval-request.serializer.ts` | Explicit-whitelist `serializeApprovalRequest`. |
+
+`AdminModule` now also imports `ApprovalsModule` and declares both controllers.
+
+### Endpoints
+
+All on the `/admin` surface, role-gated by the `GatewayIdentityGuard` (`X-User-Id` + the `admin`
+role, else 403). The actor id is read **only** via `@Identity()`, never the body/query.
+
+| Route | Effect |
+|---|---|
+| `POST /admin/transfers/:id/reverse` | A maker proposes reversing transaction `:id` → a PENDING `ApprovalRequest`. Optional body `{ reason? }`. **201**, `ApprovalRequestDto`. No money moves. |
+| `POST /admin/approvals/:id/approve` | A checker (≠ maker) approves approval `:id` → **executes** the reversal (money moves). **200**, the EXECUTED `ApprovalRequestDto`. |
+| `POST /admin/approvals/:id/reject` | A checker (≠ maker) rejects approval `:id`. **200**, the REJECTED `ApprovalRequestDto`. No money moves. |
+
+`ApprovalRequestDto = { id, actionType, status, makerId, checkerId, targetTransactionId, createdAt,
+decidedAt, executedAt }` — timestamps ISO-8601, `checkerId`/`decidedAt`/`executedAt` null while
+PENDING. The free-form `payload` blob is deliberately **not** serialized.
+
+### Reversible scope (locked)
+
+**Reversible** = a **POSTED internal** transfer OR a **POSTED external_inbound** credit. NOT
+external_outbound — its reversal is the [step-5c](#step-5c--external-rail-webhooks) rail-failure
+callback path (`clearing → customer`). A non-POSTED / already-REVERSED target → 409
+(`TRANSACTION_NOT_REVERSIBLE`).
+
+### The `forced` reducer flag (money keystone)
+
+`PostTransactionCommand` gains an optional `forced?: boolean`. When true, `checkAndFold` **skips both
+the frozen and the insufficient-funds checks on a customer DEBIT leg**, so the compensating movement
+always applies and the counterparty balance **may go negative** — there is no `balance >= 0` DB
+check on customer accounts, by design, so the fold still balances (**no money created or lost**). The
+currency check and every other leg are unchanged; `forced` never affects a credit leg or a system
+account (neither enters that branch), and a falsy/absent `forced` leaves the checks intact. It flows
+untouched through `postTransaction` / `postFreshInTx` / `postPendingInTx`. **`forced` is set ONLY by
+`ApprovalService.approve`'s compensating post** — it is unreachable from any customer-initiated path
+(the transfers layer never sets it), and it is authorized by four-eyes.
+
+### The two guarded gates → exactly-one-reversal under concurrency
+
+Approve runs in ONE `runInTransactionWithRetry` tx and leans on two guarded, `WHERE status = …`
+UPDATEs (the same "single guarded write is the gate" pattern as the confirm/rail paths), so a
+reversal executes **exactly once** even under concurrent checkers or a duplicate proposal:
+
+1. **`ApprovalRequest PENDING → EXECUTED`** (`transitionToExecutedInTx`, sets `checker_id`,
+   `decided_at`, `executed_at`) — the **maker-checker concurrency gate**. Two checkers approving the
+   same request simultaneously both attempt this UPDATE; exactly one affects a row (the other sees 0
+   → `ApprovalNotPendingError`, rolls back). The `checker_id` is set **in this UPDATE**; the service
+   verifies `checker <> maker` first so the DB CHECK never fires.
+2. **original `POSTED → REVERSED`** (`transitionToReversedInTx`, reused from step 5c) — the
+   **no-double-reversal gate**. Even if two *different* PENDING approvals somehow existed for one
+   target (the propose-time duplicate guard is best-effort), only the first to reach this UPDATE
+   flips the row; the second sees 0 → `TransactionNotReversibleError`, rolls back. The compensating
+   post happens ONLY when this returns true.
+
+The propose-time duplicate guard (`findByTargetTransaction` → reject if any PENDING/EXECUTED) is a
+best-effort convenience; gate #2 is the hard backstop that a target can never be reversed twice.
+
+### Approve executes atomically (the flow)
+
+In one deadlock-retried tx: gate #1 → load the target `findByIdInTx` and derive the compensating
+legs from its **current** `debitAccountId`/`creditAccountId` → (inbound only) pre-lock the customer
+→ gate #2 → `postFreshInTx` the compensating command → `recordInTx` the `reversal.executed` audit
+row → re-read + return the EXECUTED approval. If any step throws (either gate loses, a broken
+invariant), the WHOLE tx rolls back — the approval stays PENDING and no money moves.
+
+**Compensating-leg construction (mirrored):** credit the **original debit** account (`+amount`),
+debit the **original credit** account (`−amount`) — a balanced double-entry carrying
+`reverses_transaction_id = <original>`, `initiatedBy = <checker>`, `type = <original.type>`, and
+**`forced: true`**. It carries **NO `limitAccountId`** (see below). Per reversible type:
+
+- **Internal** (`customer A → customer B`): the compensating credits A (`+amount`) and debits B
+  (`−amount`). B is the FORCED debit — it may go negative even if frozen/short.
+- **External_inbound** (`clearing:rail-inbound → customer`): the compensating credits the clearing
+  account (`+amount`) and debits the **customer** (`−amount`, FORCED).
+
+**Lock ordering (source-before-clearing).** For an **external_inbound** reversal the customer is the
+original CREDIT account (now being debited) and clearing is the original DEBIT (now credited). The
+service `lockByIdForUpdate`s the **customer FIRST** — before `postFreshInTx`'s canonical (by-id)
+locking reaches the clearing account — exactly as `reverseOutboundFailure` / `creditInbound` do, so
+a reversal can never deadlock against a concurrent rail op on the same customer+clearing pair. For an
+**internal** reversal (both customers) there is **no pre-lock** — `postFreshInTx` locks both
+canonically by id (deadlock-free against every other post, which uses the same order).
+
+### Reversals don't touch spend counters
+
+The compensating command omits `limitAccountId`, so the reducer's limit path never runs: a reversal
+does **not** refund the payer's fixed-window `spent_today`/`spent_month` (consistent with the
+outbound-only limits rule and the rail-failure reversal — the fixed window holds the slot until it
+resets).
+
+### Repository additions (`IApprovalRequestRepository`)
+
+Following the tx-aware `…InTx` seam (interface/impl split):
+
+| Method | Effect |
+|---|---|
+| `createInTx(qr, data)` | Insert one approval INSIDE the caller's tx (so it commits with its `reversal.proposed` audit row). |
+| `findByIdInTx(qr, id)` | Read one approval inside the caller's tx (sees the just-applied transition). |
+| `findByTargetTransaction(targetTransactionId)` | All approvals for a target (any status) — backs the propose-time duplicate guard. |
+| `transitionToExecutedInTx(qr, id, checkerId)` | Guarded `PENDING → EXECUTED` (+ `checker_id`, `decided_at`, `executed_at`); returns `affected > 0`. |
+| `transitionToRejectedInTx(qr, id, checkerId)` | Guarded `PENDING → REJECTED` (+ `checker_id`, `decided_at`); returns `affected > 0`. |
+
+`transitionToReversedInTx` on `ITransactionRepository` (the guarded `POSTED → REVERSED` gate) is
+reused from step 5c, now **parameterized with a `reason`** (`transitionToReversedInTx(qr, id, reason
+= 'rail_settlement_failed')`). The default preserves the 5c rail-failure callback's value and
+signature (`reverseOutboundFailure` calls it unchanged), while the admin reversal passes
+`'admin_reversal'`. This matters because `failure_reason` is whitelisted onto the admin transaction
+view (`GET /admin/transactions`): without the distinct reason, an admin/auditor would see an
+admin-reversed **internal** transfer mislabeled as a rail failure. The `reversal.executed` audit row
+(with `approvalId`) and the compensating transaction's `reverses_transaction_id` remain the
+authoritative record of *why/what* reversed it.
+
+### Audit actions
+
+`AUDIT_ACTIONS` gains `reversal.proposed`, `reversal.executed`, `reversal.rejected`. Propose/execute
+target the **transaction** (`targetType: 'transaction'`, `targetId` = the target/original tx id);
+reject targets the **approval** (`targetType: 'approval'`, `targetId` = the approval id). Each
+`recordInTx` shares the same tx as its state change.
+
+### New domain errors / codes
+
+| Class | `code` | Status | Owner |
+|---|---|---|---|
+| `TransactionNotReversibleError` | `TRANSACTION_NOT_REVERSIBLE` | 409 | approvals `service/errors.ts` |
+| `ReversalAlreadyRequestedError` | `REVERSAL_ALREADY_REQUESTED` | 409 | approvals `service/errors.ts` |
+| `ApprovalNotFoundError` | `APPROVAL_NOT_FOUND` | 404 | approvals `service/errors.ts` |
+| `ApprovalNotPendingError` | `APPROVAL_NOT_PENDING` | 409 | approvals `service/errors.ts` |
+| `SelfApprovalForbiddenError` | `SELF_APPROVAL_FORBIDDEN` | 403 | approvals `service/errors.ts` |
+
+All added to `common/errors/domain-error-status.ts` (`SELF_APPROVAL_FORBIDDEN` is the first **403** in
+the table). A missing/unknown reversal **target** reuses the transfers-owned `TransferNotFoundError`
+(`TRANSFER_NOT_FOUND`, 404) — the same "transaction not found" semantics, no new code (anti-IDOR is
+moot on the role-gated admin surface).
+
+### Deferred analytics advisory (unchanged from 5c)
+
+The compensating post's outbox payload (`TransactionPostedPayload`) still **omits**
+`reverses_transaction_id` — the analytics consumer sees a fresh balanced movement but not the link
+to the original. This is the same deferred advisory noted for the [step-5c](#step-5c--external-rail-webhooks)
+rail-failure reversal, tracked via the spec (the contract of record); it does not affect balance-side
+correctness (the DB `transaction.reverses_transaction_id` FK is authoritative).
+
+## Not in this slice (later)
+
+Statement pagination beyond the first page is deferred — the read slice returns only the most recent
+`STATEMENT_PAGE_LIMIT` legs. With step 8b the balance-service domain layer is complete.

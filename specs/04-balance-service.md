@@ -254,7 +254,21 @@ whole prompt is about — correctness here is the deliverable.
   - Maker-checker (four-eyes): `POST /transfers/:id/reverse` (a maker proposes a reversal →
     `ApprovalRequest` PENDING), `POST /approvals/:id/approve` / `POST /approvals/:id/reject` (a
     DIFFERENT checker decides; approve executes the reversal — `checker_id <> maker_id` enforced in
-    the service and by the DB CHECK).
+    the service and by the DB CHECK). **Reversible** = a **POSTED internal** transfer or a **POSTED
+    external_inbound** credit (external_outbound is NOT admin-reversible — its reversal is the 5c
+    rail-failure callback path); a non-POSTED / already-REVERSED target → 409. **Approve executes
+    atomically** — in one deadlock-retried tx: guarded `ApprovalRequest PENDING → EXECUTED`
+    (the maker-checker concurrency gate, so two simultaneous checkers yield exactly one execution),
+    guarded original `POSTED → REVERSED` (the no-double-reversal gate), then a fresh **compensating**
+    movement (`reverses_transaction_id` = original; legs mirrored — credit the original debit account,
+    debit the original credit account) via the posting reducer, then one audit row. The compensating
+    debit is a **FORCED admin correction**: it **bypasses** the counterparty's overdraft + frozen
+    checks (via a guarded `forced` flag on the reducer, set ONLY by admin reversal), so it always
+    executes and the counterparty may go **negative** — still a balanced double-entry (no money
+    created/lost) and authorized by four-eyes. A reversal does **not** refund the spend counters
+    (fixed-window; consistent with the outbound-only limits rule). For an inbound reversal (a clearing
+    account is involved) the customer is locked **before** the clearing account (source-before-clearing,
+    as in 5c). Every reversal step (`propose` / `approve`→execute / `reject`) writes an audit row.
 - `/external` (third-party rail webhooks — HMAC-signed: `X-Rail-Signature: t=…,v1=…`, `v1 == HMAC-SHA256(RAILS_WEBHOOK_SIGNING_SECRET, "<t>.<rawBody>")`, ±300s replay window, 401 otherwise):
   `POST /rails/settlement-callback` (outbound completion: SUCCESS reconciles — records
   the rail `externalRef`, no new ledger post; FAILURE reverses `clearing → customer`),

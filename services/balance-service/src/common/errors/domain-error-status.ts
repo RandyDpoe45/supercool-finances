@@ -46,6 +46,16 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   INVALID_SETTLEMENT_STATE: HttpStatus.CONFLICT,
   // Admin ops (step 8a): freeze/unfreeze targeted a system/clearing account (not freezable).
   ACCOUNT_NOT_FREEZABLE: HttpStatus.CONFLICT,
+  // Admin ops (step 8b): maker-checker reversals — the target/approval conflicts with current state.
+  TRANSACTION_NOT_REVERSIBLE: HttpStatus.CONFLICT,
+  REVERSAL_ALREADY_REQUESTED: HttpStatus.CONFLICT,
+  APPROVAL_NOT_PENDING: HttpStatus.CONFLICT,
+
+  // Resource does not exist — the maker-checker approval id is unknown.
+  APPROVAL_NOT_FOUND: HttpStatus.NOT_FOUND,
+
+  // The actor is not permitted to perform the action (maker-checker: a maker cannot self-approve).
+  SELF_APPROVAL_FORBIDDEN: HttpStatus.FORBIDDEN,
 
   // The resource was valid but is no longer available (a lapsed pending transfer).
   TRANSFER_EXPIRED: HttpStatus.GONE,
