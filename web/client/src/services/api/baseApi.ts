@@ -24,8 +24,11 @@ export const baseApi = createApi({
     },
   }),
   // `Account` tags the accounts + statement reads; `PendingAuthorization` tags the single
-  // pending-transfer feed. A POSTED confirm invalidates the affected `Account` tags (so balances
-  // + statement refetch) and the pending feed; initiate/cancel invalidate the pending feed.
-  tagTypes: ['Account', 'PendingAuthorization'],
+  // pending-transfer feed; `Payee` tags the enrolled-payee list. A POSTED confirm invalidates the
+  // affected `Account` tags (so balances + statement refetch) and the pending feed. An EXTERNAL
+  // initiate places a hold, so it too invalidates `Account` (available drops) + the pending feed; an
+  // internal initiate moves nothing and invalidates only the pending feed. Enrolling a payee
+  // invalidates `Payee` so the list refetches.
+  tagTypes: ['Account', 'PendingAuthorization', 'Payee'],
   endpoints: () => ({}),
 });

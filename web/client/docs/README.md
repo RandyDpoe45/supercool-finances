@@ -3,10 +3,12 @@
 The public customer SPA for SuperCool Finances (spec 07). This document covers the
 F1 scaffold (app structure, auth + data spine, MSW stub harness, environment variables),
 the **F2 accounts experience** (accounts overview, statement/history, and the float-free
-money + edge-timezone helpers those views rely on), and the **F3 internal-transfer
+money + edge-timezone helpers those views rely on), the **F3 internal-transfer
 journey** (confirmation of payee → amount + captcha → OTP-confirm, idempotent + duplicate-
-aware, with the money-safe input parsing it depends on). External payees arrive in a later
-step and will be documented as they land.
+aware, with the money-safe input parsing it depends on), and the **F4 external payees +
+external transfers** (payee enrollment with a cooling-off gate, and the hold-backed external-
+outbound journey — including the hold → cache-invalidation asymmetry that separates it from an
+internal transfer).
 
 This app is **self-contained** (ADR-16): no imports from other folders and no shared
 component library. Any contract shared with a service (e.g. the `/api/accounts` shape)
@@ -45,13 +47,15 @@ web/client/
 │   │   ├── datetime.ts        # UTC ISO → Mexico City time via Intl (edge conversion)
 │   │   ├── apiError.ts        # RTK Query error → short human phrase
 │   │   ├── transferError.ts   # transfers domain code → UI message + flow branch
-│   │   ├── transferFlow.ts    # PURE transfer wizard state machine (reducer)
+│   │   ├── transferFlow.ts    # PURE internal transfer wizard state machine (reducer)
+│   │   ├── externalTransferFlow.ts # PURE external transfer wizard state machine (reducer)
 │   │   └── captcha.ts         # PURE demo captcha challenge/verify
 │   ├── store/                 # configureStore + typed hooks
 │   ├── services/api/
 │   │   ├── baseApi.ts         # createApi + fetchBaseQuery(prepareHeaders: bearer) + tag types
 │   │   ├── accountsApi.ts     # getAccounts + getAccountStatement queries
-│   │   ├── transfersApi.ts    # resolve/initiate/confirm/cancel + pending-authorization
+│   │   ├── transfersApi.ts    # resolve/initiate/initiateExternal/confirm/cancel + pending-auth
+│   │   ├── payeesApi.ts       # getPayees + registerPayee
 │   │   └── contracts/         # app-local copies of the /api wire contract
 │   ├── mocks/                 # MSW handlers, fixtures, in-memory transfer state, worker, server
 │   └── components/            # atomic design: atoms / molecules / organisms / templates / pages
@@ -65,18 +69,22 @@ templates → pages). Only the components actually used exist:
 - **atoms** — `Money` (renders a minor-unit string via `lib/money`), `StatusBadge`
   (account status), `Timestamp` (renders a UTC instant in Mexico City time, keeping the
   canonical UTC in the `<time dateTime>` attribute), `FieldError` (inline form/validation
-  message).
+  message), `CoolingOffStatus` (a payee's "ready to send" / "usable from …" cooling-off state).
 - **molecules** — `AccountCard` (one account: id/link, currency, kind, status, and the
   balance/held/available money fields), `StatementRow` (one ledger leg as a table row),
   `CaptchaStub` (client-only demo captcha), `PayeeConfirmation` (masked payee + confirm/deny),
-  `PendingTransferSummary` (amount / masked destination / expiry).
+  `PendingTransferSummary` (amount / masked destination or payee label / expiry), `PayeeCard`
+  (one enrolled payee: label, external ref, cooling-off status, and a "Send money" link when usable).
 - **organisms** — `AccountsList` (semantic list of account cards; empty state),
   `StatementTable` (newest-first statement table; empty state), `ResolveDestinationForm`
   (account-number lookup), `TransferAmountForm` (source + amount + captcha, gated initiate),
-  `TransferConfirmPanel` (pending summary + OTP code + cancel).
+  `TransferConfirmPanel` (pending summary + OTP code + cancel), `PayeeEnrollmentForm` (name +
+  external ref + captcha, gated enroll), `PayeeList` (semantic list of payee cards; empty state),
+  `ExternalTransferForm` (usable-payee + source + amount + captcha, gated initiate).
 - **pages** — `AccountsPage` (`/`, the overview; loading/error), `AccountStatementPage`
-  (`/accounts/:id/transactions`; loading/error), and `TransferPage` (`/transfers/new`, the
-  transfer-journey orchestrator).
+  (`/accounts/:id/transactions`; loading/error), `TransferPage` (`/transfers/new`, the
+  internal-transfer orchestrator), `PayeesPage` (`/payees`, enroll + list with cooling-off), and
+  `ExternalTransferPage` (`/transfers/external`, the external-transfer orchestrator).
 
 ## Auth spine (OIDC Authorization Code + PKCE)
 
@@ -119,20 +127,36 @@ Both are cache-tagged under the `Account` tag. Their app-local response contract
 envelopes) — the SPA's own copy per ADR-16, synced via the specs.
 
 The transfers slice (`services/api/transfersApi.ts`) adds the write surface + the pending
-feed: the `resolveDestination` / `initiateTransfer` / `confirmTransfer` / `cancelTransfer`
-mutations and the `getPendingAuthorization` query, all on `baseApi` (so the bearer is
-reused). `initiateTransfer` sends the idempotency key as the **`Idempotency-Key` header**
-(never a body field). Its contracts live in `services/api/contracts/transfers.ts`
-(`TransferDto`, `ResolveDestinationDto`, `PendingAuthorizationDto`, request bodies) — again
-the SPA's own copy per ADR-16.
+feed: the `resolveDestination` / `initiateTransfer` / `initiateExternalTransfer` /
+`confirmTransfer` / `cancelTransfer` mutations and the `getPendingAuthorization` query, all on
+`baseApi` (so the bearer is reused). Both initiate mutations send the idempotency key as the
+**`Idempotency-Key` header** (never a body field). Its contracts live in
+`services/api/contracts/transfers.ts` (`TransferDto`, `ResolveDestinationDto`,
+`PendingAuthorizationDto`, request bodies incl. `InitiateExternalTransferRequest`) — again the
+SPA's own copy per ADR-16. The payees slice (`services/api/payeesApi.ts`) adds `getPayees` +
+`registerPayee`, with contracts in `services/api/contracts/payees.ts` (`PayeeDto`, envelope,
+`RegisterPayeeRequest`).
 
-**Cache invalidation (the load-bearing correctness).** `baseApi` declares two tag types,
-`Account` and `PendingAuthorization`. A **POSTED confirm moves money**, so `confirmTransfer`
-invalidates the accounts `LIST` tag **and** the source account's per-id tag — refetching
-`getAccounts` (all balances) and any open statement for that account. `initiateTransfer`,
-`confirmTransfer` and `cancelTransfer` all invalidate `PendingAuthorization`, so the pending
-feed reflects the new lifecycle state. (An internal `cancelTransfer` moves no money — no hold
-— so it does **not** invalidate `Account`.)
+**Cache invalidation (the load-bearing correctness) and the hold asymmetry.** `baseApi` declares
+three tag types, `Account`, `PendingAuthorization`, and `Payee`. The invalidation is deliberately
+**not symmetric** between the two transfer kinds, because a **hold** moves the money boundary at a
+different time:
+
+- **Internal `initiateTransfer`** moves nothing (funds are checked at confirm), so it invalidates
+  **only** `PendingAuthorization`.
+- **External `initiateExternalTransfer`** places a **hold immediately** — the source's `available`
+  drops at once — so it **also** invalidates the accounts `LIST` **and** the source account's
+  per-id tag (using the source id from the request arg). This is a **separate mutation** from the
+  internal initiate precisely so this extra invalidation cannot leak onto the internal path.
+- **`confirmTransfer`** POSTS/settles money for **both** kinds, so it invalidates `LIST` + the
+  source tag (refetching `getAccounts` and any open statement).
+- **`cancelTransfer`** releases a hold **only for an external** transfer, so it invalidates
+  `Account` (`LIST` + source) **iff the returned `TransferDto.type` is `external_outbound`**; an
+  **internal cancel moves no money and must NOT refetch balances** (a regression here would be
+  caught by the internal-cancel test that asserts the accounts list is not re-read).
+
+All of `initiateTransfer` / `initiateExternalTransfer` / `confirmTransfer` / `cancelTransfer`
+invalidate `PendingAuthorization`. `registerPayee` invalidates `Payee` so the list refetches.
 
 ## MSW stub harness and how it maps to the real contract
 
@@ -167,10 +191,37 @@ MSW intercepts **only `/api`**; OIDC traffic to Keycloak is left alone
   `IDEMPOTENCY_KEY_REUSED` 409, `DESTINATION_NOT_CONFIRMED` 409, `TRANSFER_EXPIRED` 410,
   `INVALID_OTP` 401, `TRANSFER_NOT_PENDING` 409, `TRANSFER_NOT_FOUND` 404), exactly as the service
   maps them. Destinations are seeded in
-  `src/mocks/fixtures/destinations.ts` (masked names mirror the service's `maskName` rule). The
-  stub deliberately does **not** mutate account balances — the fixtures stay deterministic, and
-  the money-safety proof is the client's cache invalidation / refetch, not a simulated balance.
-  `resetTransferStore()` clears the state for test isolation.
+  `src/mocks/fixtures/destinations.ts` (masked names mirror the service's `maskName` rule). For an
+  **internal** transfer the stub deliberately does **not** mutate account balances — the fixtures
+  stay deterministic, and the money-safety proof is the client's cache invalidation / refetch.
+  `resetTransferStore()` clears the state (incl. the hold projection below) for test isolation.
+- It also stubs the **payees surface** — `GET /api/payees` and `POST /api/payees` — with state in
+  `src/mocks/state/payeeStore.ts`: minimal `.strict()` enrollment (`{ displayName, destinationRef }`
+  only; unknown keys → 400, so the rail/status/coolingOffUntil/ownerId cannot be smuggled), a
+  duplicate `destinationRef` → **409 `PAYEE_ALREADY_ENROLLED`** (mirroring `uq_payee`), and
+  **date-gated usability**: enrollment stamps `coolingOffUntil = now + 24h` (the service default
+  `PAYEE_COOLING_OFF_SECONDS`) and the `usable` hint is derived at read time (`now >=
+  coolingOffUntil`). Payees are seeded in `src/mocks/fixtures/payees.ts` — **one already usable**
+  (the external-transfer demo target) and **one still cooling off** (exercises the cooling-off UX).
+  `resetPayeeStore()` reseeds for test isolation.
+- It stubs the **external-outbound surface** — `POST /api/transfers/external` — sharing the
+  transfer lifecycle (confirm/cancel/pending feed) with internal transfers. It validates the
+  `.strict()` body + `Idempotency-Key`, resolves the payee (missing → **404 `PAYEE_NOT_FOUND`**,
+  still cooling → **409 `PAYEE_IN_COOLING_OFF`**, the *authoritative* gate judged on the current
+  clock, not the DTO hint), and enforces the SAME idempotency semantics as internal (replay on a
+  matching fingerprint, **409 `IDEMPOTENCY_KEY_REUSED`** on a mismatch — the external fingerprint
+  uses `payeeId`, not a destination account number, mirroring the service's `computeFingerprint`),
+  the soft-duplicate window (**409 `SUSPECTED_DUPLICATE`**), plus a funds check
+  (**422 `INSUFFICIENT_FUNDS`**), currency (**422 `CURRENCY_MISMATCH`**) and frozen
+  (**409 `ACCOUNT_FROZEN`**) checks.
+- **The hold projection (`transferStore.projectAccounts()`).** Because an external outbound must
+  reflect the hold immediately, the stub DOES move money for it — via `accountAdjustments`, a set of
+  per-account `held`/`balance` deltas folded over the fixed accounts fixture: **initiate** raises
+  `held` (available drops), **confirm** settles it (`balance -= amount`, `held -= amount`),
+  **cancel/expiry** releases it (`held -= amount`). `GET /api/accounts` returns
+  `projectAccounts()`, so the demo balances and the external cache-invalidation are coherent. With
+  no external activity (or right after a reset) `projectAccounts()` returns values **byte-identical
+  to the fixtures**, so internal-only tests are unaffected.
 - The confirm step accepts a **deterministic dev one-time code** — `VITE_DEV_OTP_CODE`
   (default `123456`). It is a mock for local dev/tests only, **not a secret** and never used
   against the real backend (the real out-of-band code comes from the otp-app).
@@ -249,6 +300,64 @@ so the flow is deterministic and independently testable. Every rendered field co
 whitelisted DTOs; no internal column (`initiatedBy`/`payeeId`/`failureReason`/…) exists in the
 app-local contracts, so none can leak to the DOM.
 
+## External payees (`/payees`)
+
+`PayeesPage` enrolls external beneficiaries and lists them with their cooling-off status.
+
+- **Enrollment** (`PayeeEnrollmentForm`): the payer supplies only a **display name** (trimmed,
+  1–120) and an **external account number** (`destinationRef`, a 6–20 digit numeric string). This
+  is a sensitive, fraud-relevant form, so it is **gated by the demo captcha** (reused from F3).
+  `registerPayee` sends **only those two fields** — the outbound **rail is a server-side constant**
+  and `status`/`coolingOffUntil`/`ownerId` are server-owned, never sent (`payeesApi` whitelists the
+  body). On success the page shows the **cooling-off window** — the instant the payee becomes usable,
+  rendered in Mexico City time — because a freshly enrolled payee **cannot receive money yet**: the
+  cooling-off delay is the anti-fraud control.
+- **Listing** (`PayeeList` → `PayeeCard` → `CoolingOffStatus`): each payee shows its label, the
+  external ref the owner supplied, and its cooling-off status. `PayeeDto.usable` (`now >=
+  coolingOffUntil`) is a **hint**: a usable payee shows a **"Send money"** link into the external
+  flow; a still-cooling payee shows *when* it becomes usable and offers no send action. The hint
+  only guides the UI — the **server stays authoritative** and re-checks the gate at send time (a
+  stale-usable payee still fails cleanly with `PAYEE_IN_COOLING_OFF`).
+- The `PayeeDto` app-local contract deliberately omits `ownerId`/`rail`/`status`/`activatedAt`, so
+  those internal columns cannot be rendered or stored.
+
+## External-transfer journey (`/transfers/external`)
+
+The **money-moving external-outbound flow**. `ExternalTransferPage` is the orchestrator: it owns a
+**pure state machine** (`lib/externalTransferFlow.ts`) — a sibling of the internal one that reuses
+the shared `PendingTransferView` and the OTP confirm/cancel panel + pending feed, but with a
+different pre-initiate journey (there is **no resolve/confirmation-token step**; the cooling-off
+delay is the anti-fraud gate). The journey (spec 04 external outbound):
+
+1. **Compose** (`ExternalTransferForm`). Pick a **usable** enrolled payee (only `usable` payees are
+   selectable; a `?payeeId=` query param — set by the payee list's "Send money" link — pre-selects
+   one), one of the payer's **own** accounts, and a human major-unit amount converted to the exact
+   minor-unit string by `parseAmountToMinor` (the transfer currency is the **source account's**
+   currency; a payee carries none). Captcha-gated, exactly like the internal amount form.
+2. **Idempotency.** A `crypto.randomUUID()` is generated **once** when the flow mounts and **reused
+   across every initiate attempt** (including the duplicate "Send anyway" re-submit), sent as the
+   **`Idempotency-Key` header** — so a retry can never double-submit.
+3. **Initiate** (`POST /api/transfers/external`). Creates a **PENDING** transfer **and places a
+   hold** — the source account's `available` drops **now** (this is the cache-invalidation
+   asymmetry: `initiateExternalTransfer` invalidates `Account`, unlike the internal initiate). A
+   soft-blocked duplicate becomes **"Send anyway"** (`confirmDuplicate: true`, same key); a
+   `PENDING_TRANSFER_CONFLICT` resumes the existing pending. Cooling-off / insufficient-funds /
+   frozen / currency errors surface as clear messages (`lib/transferError.ts`, keyed off the domain
+   **code**).
+4. **OTP confirm.** The PENDING transfer awaits a one-time code the payer gets **out of band** from
+   the otp-app — the client-app **never mints or reveals** it. `POST /api/transfers/:id/confirm` →
+   **settles** (the hold becomes a posted movement, money moves). `confirmTransfer` already
+   invalidates `Account`, which covers the external settle.
+5. **Cancel.** `POST /api/transfers/:id/cancel` **releases the hold** — so, unlike an internal
+   cancel, it invalidates `Account` (keyed off the returned `type === 'external_outbound'`).
+6. **Resume.** On mount, `GET /api/pending-authorization` reflects the caller's single active
+   pending; if one exists the flow **resumes at the confirm step** (at most once).
+
+There is **no `confirmationToken`** on the external path (external has no resolve/confirm step).
+Every rendered field again comes from the whitelisted DTOs — the external `PendingAuthorizationDto`
+carries the caller's own **payee display label** (unmasked, since the caller supplied it) and null
+destination-account fields.
+
 ## Money formatting & parsing (float-free) — `lib/money.ts`
 
 Money on the wire is a canonical **minor-unit integer string** (int64 precision). Both
@@ -303,12 +412,21 @@ proving PKCE token → RTK Query bearer → `/api/accounts` → render. Select a
 its **statement** at `/accounts/:id/transactions` (amounts formatted, timestamps in Mexico
 City time).
 
-To walk the **transfer journey**, click **Send money** (or open `/transfers/new`): enter a
+To walk the **internal transfer journey**, click **Send money** (or open `/transfers/new`): enter a
 seeded destination number (`2000000001` or `2000000002`), confirm the masked payee, pick a
 source account and an amount, solve the demo captcha, and **Send**. On the confirm step enter
 the dev one-time code (`VITE_DEV_OTP_CODE`, default `123456`) to POST it — the accounts refetch
 via cache invalidation. Try sending the same amount to the same payee twice within a minute to
 see the duplicate-confirm path.
+
+To walk the **external transfer journey**, click **Manage payees** (or open `/payees`): enroll a
+new payee (solve the captcha) and note it is placed in a **cooling-off** window (not usable yet).
+The seed already includes one **usable** payee (`Landlord`) and one still cooling off
+(`New Supplier`). Click **Send money** on the usable payee → `/transfers/external`: pick a source
+account and an amount, solve the captcha, and **Send** — a **hold** is placed and the source
+account's **available drops immediately** (visible on the accounts overview). Enter the dev
+one-time code to settle it, or **Cancel** to release the hold (available recovers). Trying to send
+to the still-cooling payee is blocked with a clear cooling-off message.
 
 Other scripts: `npm run build`, `npm run typecheck`, `npm run lint`,
 `npm run format` / `npm run format:check`, `npm test`.

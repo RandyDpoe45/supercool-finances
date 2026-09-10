@@ -23,7 +23,11 @@ export type TransferErrorCode =
   | 'TRANSFER_NOT_PENDING'
   | 'TRANSFER_EXPIRED'
   | 'INVALID_OTP'
-  | 'OTP_LOCKED_OUT';
+  | 'OTP_LOCKED_OUT'
+  // External payees + external outbound (this step).
+  | 'PAYEE_NOT_FOUND'
+  | 'PAYEE_IN_COOLING_OFF'
+  | 'PAYEE_ALREADY_ENROLLED';
 
 const MESSAGES: Record<TransferErrorCode, string> = {
   SUSPECTED_DUPLICATE:
@@ -43,6 +47,12 @@ const MESSAGES: Record<TransferErrorCode, string> = {
   TRANSFER_EXPIRED: 'This transfer expired before it was confirmed. Please start again.',
   INVALID_OTP: 'That one-time code is invalid. Check the code from your OTP app and try again.',
   OTP_LOCKED_OUT: 'Too many invalid attempts. Request a new one-time code from your OTP app.',
+  // A missing/non-owned payee collapses to a single 404 (anti-enumeration); the message never
+  // reveals whether the payee exists.
+  PAYEE_NOT_FOUND: 'That payee could not be found.',
+  PAYEE_IN_COOLING_OFF:
+    'This payee is still in its cooling-off period and cannot receive money yet.',
+  PAYEE_ALREADY_ENROLLED: 'You have already enrolled a payee for this account.',
 };
 
 /** Extract the domain `code` from an RTK Query error's envelope (`FetchBaseQueryError.data`),
