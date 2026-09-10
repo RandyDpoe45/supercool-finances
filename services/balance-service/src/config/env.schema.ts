@@ -30,6 +30,11 @@ export const EnvSchema = z.object({
   // must wait before it is a usable destination (`now() >= cooling_off_until`). The
   // anti-fraud delay; default 24h. Tests / compose override it.
   PAYEE_COOLING_OFF_SECONDS: z.coerce.number().int().positive().default(86400),
+
+  // Shared API key the external rail webhooks must present as `X-Api-Key` on the `/external`
+  // surface (settlement callback + inbound credit). A DISTINCT trust domain from the
+  // `/internal` service token and the `/api` gateway identity; min 16 chars.
+  RAILS_WEBHOOK_API_KEY: z.string().min(16),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

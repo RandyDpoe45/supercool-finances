@@ -65,11 +65,14 @@ interface AppliedLeg {
  * the `LedgerEntry` carrying the resulting `balance_after`), then exactly one outbox row —
  * all in the same tx (transactional outbox, ADR-5). Only a deadlock (`40P01`) is retried.
  *
- * Two entry points share the same shared steps (lock → per-leg check/fold → balance-then-
- * ledger → one outbox row) and differ ONLY in the header step ({@link applyPosting}'s
- * `applyHeader` callback):
+ * Three entry points share the same shared steps (lock → per-leg check/fold → balance-then-
+ * ledger → one outbox row) and differ ONLY in whether they open a transaction and in the
+ * header step ({@link applyPosting}'s `applyHeader` callback):
  * - {@link postTransaction} opens its OWN transaction and INSERTS a new POSTED header (a fresh
  *   movement, e.g. reversal / external settlement).
+ * - {@link postFreshInTx} runs INSIDE the caller's transaction and INSERTS a new POSTED header
+ *   (a fresh movement posted within an already-open, source-locked tx — the rail reversal /
+ *   inbound credit).
  * - {@link postPendingInTx} runs INSIDE the caller's transaction and TRANSITIONS an existing
  *   PENDING header to POSTED (the confirm-time half of an internal transfer).
  *
@@ -108,6 +111,24 @@ export class PostingService implements IPostingService {
       this.applyPosting(queryRunner, command, txId, lockOrder, () =>
         this.insertPostedHeader(queryRunner, command, txId),
       ),
+    );
+  }
+
+  async postFreshInTx(
+    queryRunner: QueryRunner,
+    command: PostTransactionCommand,
+  ): Promise<Transaction> {
+    this.validateCommand(command);
+
+    const txId = randomUUID();
+    const lockOrder = lockOrderFor(command);
+
+    // Runs INSIDE the caller's already-open transaction (no new tx): the SAME shared steps as
+    // postTransaction, but the header step INSERTS a fresh POSTED row rather than opening a new
+    // transaction. The caller has already acquired any lock it needs to precede the reducer's
+    // canonical order (e.g. the customer source, before the clearing account this reaches).
+    return this.applyPosting(queryRunner, command, txId, lockOrder, () =>
+      this.insertPostedHeader(queryRunner, command, txId),
     );
   }
 

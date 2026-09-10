@@ -11,6 +11,7 @@
  */
 
 import * as net from 'net';
+import { completeRawEnv } from './env.fixture';
 
 const SRC = '../../src';
 
@@ -560,6 +561,16 @@ export interface ResolvedDomainErrors {
   /** External outbound (spec 04 step 5b): the payee is still inside its cooling-off window
    *  (`now() < cooling_off_until`, DB clock) (code `PAYEE_IN_COOLING_OFF` → 409). */
   PayeeInCoolingOffError?: any;
+  /** External rail webhooks (spec 04 step 5c): the settlement callback referenced a transaction id
+   *  that does not exist (code `SETTLEMENT_TARGET_NOT_FOUND` → 404). */
+  SettlementTargetNotFoundError?: any;
+  /** External rail webhooks (step 5c): the callback conflicts with the transfer's current money
+   *  state — wrong type, or a contradictory outcome (success for a reversed transfer / failure for
+   *  a reconciled success) (code `INVALID_SETTLEMENT_STATE` → 409). */
+  InvalidSettlementStateError?: any;
+  /** External rail webhooks (step 5c): the inbound credit could not resolve its destination to a
+   *  customer account by account number (code `INBOUND_DESTINATION_NOT_FOUND` → 404). */
+  InboundDestinationNotFoundError?: any;
 }
 
 /**
@@ -590,6 +601,8 @@ export function getDomainErrors(): ResolvedDomainErrors {
     `${SRC}/modules/transfers/service/errors`,
     // Step-5: the payees feature owns its domain errors under `service/errors`.
     `${SRC}/modules/payees/service/errors`,
+    // Step-5c: the rails feature owns its domain errors under `service/errors`.
+    `${SRC}/modules/rails/service/errors`,
     `${SRC}/modules/otp/service/errors`,
     `${SRC}/modules/otp/otp.errors`,
     `${SRC}/modules/otp/errors`,
@@ -688,6 +701,20 @@ export function getDomainErrors(): ResolvedDomainErrors {
       'PayeeInCoolingOffError',
       'PayeeInCoolingOff',
       'PayeeCoolingOffError',
+    ]),
+    // Step-5c external rail webhooks (best-effort). Owned by the rails feature
+    // (rails/service/errors), already in `candidates`.
+    SettlementTargetNotFoundError: findExportAcross(candidates, [
+      'SettlementTargetNotFoundError',
+      'SettlementTargetNotFound',
+    ]),
+    InvalidSettlementStateError: findExportAcross(candidates, [
+      'InvalidSettlementStateError',
+      'InvalidSettlementState',
+    ]),
+    InboundDestinationNotFoundError: findExportAcross(candidates, [
+      'InboundDestinationNotFoundError',
+      'InboundDestinationNotFound',
     ]),
   };
 }
@@ -1148,4 +1175,53 @@ function buildConfigFromEnv(): any {
     ['loadConfig'],
   ) as () => any;
   return loadConfig();
+}
+
+// ---- Rails module (spec 04 "Mocked external rails", step 5c: `/external` webhooks) --------
+// The outbound settlement callback + inbound credit behind the `/external` surface (a distinct
+// API-key trust domain). Resolved through the same single-seam convention: the running instance
+// BY TOKEN through the app graph. The domain error classes are resolved via `getDomainErrors()`
+// above. The booted `AppModule` already wires the `/external` surface (ExternalModule) and its
+// global `ExternalApiKeyGuard` — nothing extra to import here; `getAppModule()` yields them.
+
+/** `RAILS_SERVICE` — the DI token the RailsModule binds the RailsService to (resolved by token,
+ *  never by class, per the interface/impl split). Reuses the shared service-token probe. */
+export function getRailsServiceToken(): symbol {
+  return resolveServiceToken('RAILS_SERVICE', 'rails');
+}
+
+/**
+ * The `RailsService` CLASS, for the pure unit spec (driven through a Nest TestingModule so the
+ * injection is order-independent, like the transfers/payees unit specs). Scanned with
+ * `findExportAcross`; if the implementor moves/renames it, add the path/export HERE — the single
+ * coordination point.
+ */
+export function getRailsService(): any {
+  const cls = findExportAcross(
+    [
+      `${SRC}/modules/rails/service/impl/rails.service`,
+      `${SRC}/modules/rails/impl/rails.service`,
+      `${SRC}/modules/rails/rails.service`,
+      `${SRC}/modules/rails/service/rails.service`,
+    ],
+    ['RailsService'],
+  );
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the RailsService class. If the implementor named/placed ` +
+        `it differently, add the path/export to tests/support/harness.ts:getRailsService — the ` +
+        `single coordination point.`,
+    );
+  }
+  return cls;
+}
+
+/**
+ * The `/external` rail-webhook API key the booted app validates `X-Api-Key` against — the
+ * `RAILS_WEBHOOK_API_KEY` fixture value (the SAME value the integration/e2e boot injects into the
+ * environment via `completeRawEnv()`). Returned so an e2e can send the correct key (200) and a
+ * wrong/missing key (401). If a suite boots with a different key it must pass that value instead.
+ */
+export function getRailsWebhookApiKey(): string {
+  return completeRawEnv().RAILS_WEBHOOK_API_KEY as string;
 }

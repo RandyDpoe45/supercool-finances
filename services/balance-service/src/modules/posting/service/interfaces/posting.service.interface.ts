@@ -33,4 +33,22 @@ export interface IPostingService {
     transactionId: string,
     command: PostTransactionCommand,
   ): Promise<Transaction>;
+
+  /**
+   * Post a FRESH balancing movement INSIDE the caller's transaction (no new tx) — the
+   * in-transaction sibling of {@link postTransaction}. Symmetric to {@link postPendingInTx}
+   * except the header step INSERTS a new POSTED header (a fresh `randomUUID` id) rather than
+   * transitioning an existing one. Locks the affected accounts (canonical ascending id order),
+   * runs the same per-leg checks (currency / frozen / insufficient-funds), inserts the POSTED
+   * header, folds the legs into balances + the ledger, and emits one outbox row — all against
+   * the caller's queryRunner. Returns the posted header.
+   *
+   * Used by the rail settlement/inbound webhooks to post a fresh movement (a compensating
+   * reversal, or an inbound credit) WITHIN an already-open, source-locked transaction — so the
+   * customer lock is acquired BEFORE this reducer's canonical locking reaches the clearing
+   * account (the source-before-clearing invariant, docs/domain.md). Re-run-safe under
+   * {@link runInTransactionWithRetry}: a deadlock rolls the whole tx back and retries; the
+   * caller re-generates its id-stable closure and re-runs.
+   */
+  postFreshInTx(queryRunner: QueryRunner, command: PostTransactionCommand): Promise<Transaction>;
 }

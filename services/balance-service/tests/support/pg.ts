@@ -177,6 +177,10 @@ export interface InsertTransactionOpts {
   expiresAt?: Date | null;
   createdAt?: Date;
   postedAt?: Date | null;
+  /** The `reverses_transaction_id` FK (self-reference) — set it to seed a compensating REVERSAL
+   * header (e.g. a rail-failure reversal), or to assert the step-5c reversal links to its original.
+   * Its FK parent (the original transaction) must already exist. */
+  reversesTransactionId?: string | null;
 }
 
 /**
@@ -199,6 +203,9 @@ export async function insertTransaction(q: any, opts: InsertTransactionOpts = {}
   if (opts.expiresAt !== undefined) row.expires_at = opts.expiresAt;
   if (opts.createdAt !== undefined) row.created_at = opts.createdAt;
   if (opts.postedAt !== undefined) row.posted_at = opts.postedAt;
+  if (opts.reversesTransactionId !== undefined) {
+    row.reverses_transaction_id = opts.reversesTransactionId;
+  }
   return insertRow(q, 'transaction', row);
 }
 
@@ -381,4 +388,33 @@ export async function getAccount(
     [id],
   );
   return rows.length > 0 ? rows[0] : null;
+}
+
+/**
+ * All ledger legs of one transaction, oldest-first (`created_at ASC, id ASC`), as node-postgres
+ * surfaces them (`delta` / `balance_after` are `bigint`-as-string). The proof seam for the money
+ * paths: a **reconcile-only** rail SUCCESS writes NO legs for the settlement (so the original tx
+ * keeps exactly the two legs its OTP-confirm settle wrote — none added), while a rail FAILURE
+ * reversal / an inbound credit posts EXACTLY TWO legs summing to zero on the new transaction.
+ */
+export async function findLedgerByTx(q: any, txId: string): Promise<any[]> {
+  return q.query(
+    `SELECT "id", "transaction_id", "account_id", "delta", "balance_after", "currency", "created_at"
+       FROM "ledger_entry" WHERE "transaction_id" = $1 ORDER BY "created_at" ASC, "id" ASC`,
+    [txId],
+  );
+}
+
+/**
+ * The count of outbox rows a transaction emitted, as a number. Every money movement funnels
+ * through the reducer, which writes EXACTLY ONE outbox row per posted transaction — so a
+ * reconcile-only rail SUCCESS adds none to the original tx, while a reversal / inbound credit
+ * yields `1` for its own (new) transaction id.
+ */
+export async function outboxCountForTx(q: any, txId: string): Promise<number> {
+  const rows = await q.query(
+    `SELECT COUNT(*)::int AS count FROM "outbox_event" WHERE "transaction_id" = $1`,
+    [txId],
+  );
+  return rows[0].count as number;
 }

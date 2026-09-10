@@ -36,6 +36,13 @@ per step:
   `POST /api/transfers/external` places a hold + PENDING transaction, and the SHARED confirm
   **settles** it (customer → clearing) at OTP-confirm; the `Hold` reservation ledger + `account.held`
   lifecycle around the posting keystone.
+- **Step 5c — external rail webhooks**
+  ([below](#step-5c--external-rail-webhooks)): the mocked rail's third-party callbacks on a new
+  **`/external`** surface (API-key trust domain) — the **outbound settlement callback** (SUCCESS
+  reconciles via the hold `externalRef`, no new ledger post; FAILURE reverses `clearing → customer`
+  with a customer-first lock + `POSTED → REVERSED` + `reverses_transaction_id`) and the **inbound
+  credit** (`clearing:rail-inbound → customer` by account number, not OTP-gated, idempotent by the
+  rail `externalRef`, frozen-can-be-credited); plus the `postFreshInTx` reducer seam.
 
 Limits and the outbox relay still arrive in later steps.
 
@@ -695,14 +702,16 @@ generic-message path.
 | Domain `code` | Status |
 |---|---|
 | `INVALID_POSTING_COMMAND`, `INVALID_TRANSFER` | 400 |
-| `ACCOUNT_NOT_FOUND`, `TRANSFER_NOT_FOUND` | 404 |
+| `ACCOUNT_NOT_FOUND`, `TRANSFER_NOT_FOUND`, `SETTLEMENT_TARGET_NOT_FOUND`, `INBOUND_DESTINATION_NOT_FOUND` | 404 |
 | `CURRENCY_MISMATCH`, `INSUFFICIENT_FUNDS` | 422 |
-| `ACCOUNT_FROZEN`, `TRANSFER_NOT_PENDING`, `PENDING_TRANSFER_CONFLICT`, `SUSPECTED_DUPLICATE`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `OTP_ALREADY_ACTIVE`, `DESTINATION_NOT_CONFIRMED`, `PAYEE_ALREADY_ENROLLED` | 409 |
+| `ACCOUNT_FROZEN`, `TRANSFER_NOT_PENDING`, `PENDING_TRANSFER_CONFLICT`, `SUSPECTED_DUPLICATE`, `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`, `OTP_ALREADY_ACTIVE`, `DESTINATION_NOT_CONFIRMED`, `PAYEE_ALREADY_ENROLLED`, `INVALID_SETTLEMENT_STATE` | 409 |
 | `TRANSFER_EXPIRED` | 410 |
 | `INVALID_OTP` | 401 |
 | `OTP_LOCKED_OUT` | 429 |
 
-(`TRANSFER_EXPIRED` / `PENDING_TRANSFER_CONFLICT` added by the pending-lifecycle step below.)
+(`TRANSFER_EXPIRED` / `PENDING_TRANSFER_CONFLICT` added by the pending-lifecycle step below;
+`SETTLEMENT_TARGET_NOT_FOUND` / `INBOUND_DESTINATION_NOT_FOUND` / `INVALID_SETTLEMENT_STATE` by
+step 5c.)
 
 ### zod request validation
 
@@ -1186,10 +1195,182 @@ holds analogue of `sum(ledger delta) == account.balance`. A place increments bot
 → SETTLED); a release/expiry decrements both (`held -= amount`, hold → RELEASED/EXPIRED). Clearing
 is a system account (exempt from the funds/frozen checks, may go negative — net in transit).
 
+## Step 5c — external rail webhooks
+
+The mocked external rail's **third-party callbacks**: the **outbound settlement callback** (the rail
+reports whether an external outbound completed) and the **inbound credit** (the rail pushes money
+into a customer account). Both are money-critical and both are **idempotent** — a retried webhook is
+a safe no-op. Every movement here still funnels through the single posting reducer
+(balance + ledger + outbox). Three developer decisions are LOCKED: the callbacks live on a **new
+`/external` surface** authenticated by an **external API key** (a distinct trust domain); outbound
+**SUCCESS is reconcile-only** (record the rail ref, NO new ledger post); and **both** the outbound
+callback and the inbound webhook are built in this step.
+
+### The `/external` surface + API-key guard (a distinct trust domain)
+
+`/external` is a **third distinct trust domain**, separate from `/api` (customers behind the
+gateway, `X-User-Id`) and `/internal` (our own network peers, `X-Service-Token`): the caller is an
+external rail, not a user or a peer service.
+
+- `src/common/identity/external-api-key.guard.ts` `ExternalApiKeyGuard` (implements `CanActivate`)
+  is bound **globally** (`APP_GUARD`, registered in `AppModule` alongside the gateway + service
+  guards). It **scopes itself** to the `external` prefix (`prefixSegment(request.path) !==
+  'external'` → returns true, another guard's concern) and requires `X-Api-Key ==
+  config.rails.webhookApiKey`, **constant-time compared** (`timingSafeEqual`, length-guarded — the
+  same `constantTimeEquals` helper as the service-identity guard); a missing/mismatched key →
+  **401** (`UnauthorizedException`). There is **NO health carve-out** (health lives on `/internal`).
+- `src/modules/external/external.module.ts` `ExternalModule` is the `/external` **surface registry**
+  (mirroring `ApiModule` / `InternalModule`): it **declares** `RailsExternalController` and imports
+  `RailsModule` for the `RAILS_SERVICE` the controller injects. `AppModule` imports `ExternalModule`
+  and binds `ExternalApiKeyGuard`.
+
+### Module structure
+
+`src/modules/rails/` — the rails FEATURE module (module-layout + controller-surface conventions):
+the root holds only `rails.module.ts`; business logic under `service/`; the controller in its own
+`external/` surface folder with `dto/` + `serializers/`.
+
+| File | Role |
+|---|---|
+| `rails.module.ts` | Feature module: `imports: [PersistenceModule, PostingModule, IdempotencyModule]`, binds `{ provide: RAILS_SERVICE, useClass: RailsService }`, exports the token. **No controllers of its own.** |
+| `service/interfaces/rails.service.interface.ts` | `IRailsService` + `RAILS_SERVICE` token + `OutboundSettlementParams` / `InboundCreditParams` contract types. |
+| `service/errors.ts` | Rails-owned domain errors (extend `DomainError`): `SettlementTargetNotFoundError`, `InvalidSettlementStateError`, `InboundDestinationNotFoundError`. |
+| `service/impl/rails.service.ts` | `RailsService implements IRailsService` — `settleOutbound` / `creditInbound`; injects the DataSource + `ACCOUNT_REPOSITORY` / `TRANSACTION_REPOSITORY` / `HOLD_REPOSITORY` / `POSTING_SERVICE` / `IDEMPOTENCY_SERVICE`. |
+| `external/rails-external.controller.ts` | `RailsExternalController`, `@Controller('external')` — the two webhook routes; **declared by `ExternalModule`**. |
+| `external/dto/rails.schema.ts` | zod `settlementCallbackSchema` / `inboundCreditSchema` (both `.strict()`). |
+| `external/dto/rail-ack.dto.ts` | `RailAckDto` — the minimal ack wire contract. |
+| `external/serializers/rails.serializer.ts` | Explicit-whitelist `serializeRailAck` (entity → the minimal ack; no PII/internal leak). |
+
+`src/common/rails/inbound-rail.ts` exports `INBOUND_RAIL = 'rail-inbound'` (the mirror of
+`OUTBOUND_RAIL`), naming the `clearing:rail-inbound` account the inbound credit debits.
+
+### Endpoints
+
+Both under the global `/external` prefix (the `ExternalApiKeyGuard` has required `X-Api-Key`). Bodies
+validated by the `ZodValidationPipe` (`.strict()`, malformed → 400). Both return **200** with a
+minimal `RailAckDto` `{ status: 'ok', transactionId }` (idempotent, so a retry returns the same ack).
+
+| Route | Effect |
+|---|---|
+| `POST /external/rails/settlement-callback` | Outbound completion. Body `{ transactionId (uuid), status ('success'\|'failure'), externalRef }`. SUCCESS reconciles (record the rail ref, no new ledger post); FAILURE reverses (`clearing → customer`, original → REVERSED). `transactionId` in the ack is the ORIGINAL transfer id. |
+| `POST /external/rails/inbound` | External inbound credit. Body `{ accountNumber (10-digit), amount, currency, externalRef }`. Posts a fresh `external_inbound` movement (`clearing:rail-inbound → customer`). `transactionId` in the ack is the newly-posted (or replayed) inbound id. |
+
+### `postFreshInTx` — the fresh-movement-in-tx reducer seam
+
+`PostingService` gains a third entry point beside `postTransaction` (own tx, insert POSTED header)
+and `postPendingInTx` (caller's tx, transition PENDING → POSTED): **`postFreshInTx(queryRunner,
+command)`** runs INSIDE the caller's transaction (no new tx) and **INSERTS a fresh POSTED header**
+(a `randomUUID` id), reusing the SAME shared `applyPosting` steps (lock canonically → per-leg
+`checkAndFold` → balance-then-ledger → one outbox row) with the `insertPostedHeader` callback. It
+lets the rail reversal + inbound post a fresh movement within an **already-open, source-locked**
+transaction. `postTransaction` / `postPendingInTx` behavior is unchanged, and `lockOrderFor` stays
+as-is — callers that touch a customer **and** a clearing account **explicitly lock the customer
+first** (see below), so the effective acquisition order is customer → clearing.
+
+### Outbound settlement callback (`settleOutbound`)
+
+Loads the transfer by id (missing → `SettlementTargetNotFoundError` **404**); it must be
+`external_outbound` else `InvalidSettlementStateError` **409**. Both branches then, as their
+**first in-tx step, lock the customer (source, `debitAccountId`) row `FOR UPDATE`** and read the
+state machine `(transaction.status, hold.externalRef)` **only after** that lock — so the decision
+is judged from a serialized, up-to-date view:
+
+- **SUCCESS — reconcile only.** In ONE tx: **lock the customer FIRST**, then if the settled hold's
+  `external_ref` is already set → **idempotent no-op** (return the transfer); else if the transfer is
+  already `REVERSED` → `InvalidSettlementStateError` (a failed transfer can't later succeed); else if
+  the transfer is **not `POSTED`** (a stale success on a PENDING/EXPIRED/CANCELLED external_outbound)
+  → `InvalidSettlementStateError`; else `recordExternalRefInTx(hold.id, externalRef)` (guarded
+  `external_ref IS NULL`). **NO ledger movement, NO balance/held change** — the money already moved
+  customer → `clearing:rail-outbound` at OTP-confirm; this only stamps the rail reference for
+  reconciliation, now under the customer lock. The `status = POSTED` check is symmetric with the
+  failure's `WHERE status = POSTED` transition guard.
+- **FAILURE — compensating reversal.** In ONE `runInTransactionWithRetry` tx, in this **exact
+  order**: **lock the customer (debit) account FIRST** (`lockByIdForUpdate`), then if already
+  `REVERSED` → idempotent no-op; else if the hold `external_ref` is already set (already reconciled
+  success) → `InvalidSettlementStateError`; else run the guarded **`transitionToReversedInTx(originalId)`**
+  (`POSTED → REVERSED`; **0 rows → a concurrent caller already reversed → no-op / re-read**, never a
+  second compensating post), then **`postFreshInTx`** a fresh POSTED movement crediting the customer
+  and debiting `clearing:rail-outbound` — legs `[{ clearing, −amount }, { customer, +amount }]`,
+  `reversesTransactionId = originalId`. The customer leg is a **CREDIT**, so a **frozen** customer is
+  still refunded, and `clearing` (a system account) may go negative. Returns the ORIGINAL transfer
+  (now REVERSED — the id the rail correlated on).
+
+**Success XOR failure — never both, never two of the same.** The two branches guard on **disjoint
+rows** — success on the hold's `external_ref IS NULL`, failure on the transaction's `status = POSTED`
+— so a *simultaneous* `success` + `failure` for one transfer could otherwise both commit under READ
+COMMITTED (a double-apply on a third-party trust boundary: refunded AND reconciled-as-delivered). To
+prevent that, **both branches take the customer (source) row lock as their first in-tx step and read
+the state machine only afterwards**: the second-arriving callback blocks until the first commits,
+then re-reads its committed effect and rejects (`INVALID_SETTLEMENT_STATE`) or no-ops. The
+customer-first lock also keeps the effective order **customer → clearing** for the failure's
+`postFreshInTx` (the reducer's canonical locking would otherwise pick lock order by account id), and
+the guarded `POSTED → REVERSED` transition remains the **idempotency gate** against a *retried*
+failure (0 rows → posts nothing). Success touches no clearing account; it locks the customer purely
+to serialize against a concurrent failure.
+
+### Inbound credit (`creditInbound`)
+
+Resolves the destination via `findByAccountNumber` → it must be a **customer** account (missing OR a
+system/clearing account collapses to the SAME `InboundDestinationNotFoundError` **404** — never
+reveal system accounts). Currency must match the account **and** the `clearing:rail-inbound` account
+(`CurrencyMismatchError` otherwise; a missing inbound-clearing seed is a 500-class internal fault).
+Then, **idempotent by the rail `externalRef`**:
+
+```
+idempotency.execute(
+  { ownerId: destination.ownerId, key: `rail-inbound:${externalRef}`,
+    fingerprintInput: { type: 'external_inbound', source: clearingId, destination: destination.id,
+                        amount, currency },
+    confirmDuplicate: true },
+  async (qr) => { lockByIdForUpdate(qr, destination.id); postFreshInTx(qr, command); }
+)
+```
+
+where the command's legs are `[{ clearing:rail-inbound, −amount }, { customer, +amount }]`, type
+`external_inbound`. **`confirmDuplicate: true` bypasses the 60s soft-duplicate**: the rail
+`externalRef` is the authoritative dedup, so two legitimate inbound credits with the same fingerprint
+(same account/amount/currency) within 60s must BOTH process — a **duplicate ref** (same key) returns
+the original transaction (**no double-credit**), while **distinct refs always process**. It is **NOT
+OTP-gated** (approved by the originating institution) and a **FROZEN customer may still be credited**:
+the customer leg is a CREDIT, and the reducer's `checkAndFold` only blocks customer **DEBITS**. The
+customer is locked FIRST (source-before-clearing).
+
+### New repository methods
+
+Added (interface/impl split, following the tx-aware `…InTx` seam):
+
+| Method | Effect |
+|---|---|
+| `ITransactionRepository.transitionToReversedInTx(qr, id)` | Guarded `POSTED → REVERSED` UPDATE (`WHERE id AND status = 'POSTED'`, + `failure_reason = 'rail_settlement_failed'`); returns `affected > 0`. The idempotency gate for the FAILURE callback — 0 rows means a concurrent/retried reversal, so no second compensating post. There is no `reversed_at` column; the compensating tx (its `posted_at` + `reverses_transaction_id`) is the audit record. |
+| `IHoldRepository.recordExternalRefInTx(qr, id, externalRef)` | Reconcile a SUCCESS: `SET external_ref = :externalRef WHERE id AND external_ref IS NULL`; returns `affected > 0`. The `external_ref IS NULL` predicate is the idempotency gate (a retried success never overwrites). NO balance/held/ledger change. |
+
+### New domain errors
+
+| Class | `code` | Status | Meaning |
+|---|---|---|---|
+| `SettlementTargetNotFoundError` | `SETTLEMENT_TARGET_NOT_FOUND` | 404 | The settlement callback referenced a transaction id we never issued. |
+| `InvalidSettlementStateError` | `INVALID_SETTLEMENT_STATE` | 409 | The callback conflicts with the transfer's money state (wrong type; success for a reversed transfer; failure for a reconciled success). |
+| `InboundDestinationNotFoundError` | `INBOUND_DESTINATION_NOT_FOUND` | 404 | The inbound credit could not resolve its destination to a customer account by number. |
+
+All extend `DomainError` (rails `service/errors.ts`) and are mapped in `domain-error-status.ts`. The
+reducer's `CurrencyMismatchError` is reused at its existing code (422).
+
+### Source-before-clearing, reaffirmed (the deadlock-free invariant)
+
+Step 5b established the forward rule: **every operation that touches a customer account AND a
+clearing account must lock the customer BEFORE the clearing account**. Step 5c honors it — both the
+failure reversal and the inbound credit acquire the customer's `FOR UPDATE` lock (`lockByIdForUpdate`)
+**before** calling `postFreshInTx` (whose canonical ascending-id locking then reaches the clearing
+account). So a 5c op and a concurrent 5b settle both acquire locks in the customer → clearing order
+and can never deadlock by opposite ordering; the bounded deadlock-retry (`runInTransactionWithRetry`,
+`40P01`) is the residual backstop. The materialized-holds invariants are untouched by these paths:
+outbound holds are already SETTLED from 5b, so reconcile/reverse don't change `held`, and
+`SUM(PLACED holds) == held` / `held >= 0` continue to hold. `clearing:rail-inbound` may go negative
+(a system account, exempt — net in transit).
+
 ## Not in this slice (later steps)
 
-External **inbound**, the outbox **relay worker** (SKIP LOCKED across instances), limits, and admin
-ops + maker-checker + external rails. The **step-5c** rail settlement callback that finalizes the
-outbound clearing side (success → draw down / reconcile; failure → compensating reversal) lands
-next. Statement pagination beyond the first page is likewise deferred — the read slice returns only
-the most recent `STATEMENT_PAGE_LIMIT` legs.
+The outbox **relay worker** (SKIP LOCKED across instances), limits, and admin ops + maker-checker
+(including the admin-triggered *simulated* inbound, a separate deferred admin-surface concern).
+Statement pagination beyond the first page is likewise deferred — the read slice returns only the
+most recent `STATEMENT_PAGE_LIMIT` legs.

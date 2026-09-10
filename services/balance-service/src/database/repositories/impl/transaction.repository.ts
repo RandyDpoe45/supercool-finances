@@ -204,4 +204,21 @@ export class TransactionRepository implements ITransactionRepository {
       .execute();
     return (result.affected ?? 0) > 0;
   }
+
+  async transitionToReversedInTx(queryRunner: QueryRunner, id: string): Promise<boolean> {
+    // Guarded UPDATE: the `status = POSTED` predicate is the atomic idempotency gate for the rail
+    // FAILURE callback. affected === 1 means THIS call won the reversal (the caller then posts the
+    // compensating movement); 0 means the row was already reversed / is not posted, so a retried
+    // or concurrent failure callback is a no-op — no double reversal. `failure_reason` records WHY
+    // the posted movement was reversed. There is no dedicated `reversed_at` column; the
+    // compensating transaction (with its own `posted_at` + `reverses_transaction_id`) is the audit
+    // record of when/what reversed it.
+    const result = await queryRunner.manager
+      .createQueryBuilder()
+      .update(Transaction)
+      .set({ status: TransactionStatus.Reversed, failureReason: 'rail_settlement_failed' })
+      .where('id = :id AND status = :posted', { id, posted: TransactionStatus.Posted })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
 }

@@ -31,6 +31,14 @@ export interface PayeesConfig {
   coolingOffSeconds: number;
 }
 
+export interface RailsConfig {
+  /** Shared API key the external rail webhooks (`/external` surface) must present as
+   *  `X-Api-Key`, constant-time compared. A raw secret — never composed into a URL/DSN
+   *  (discrete-credentials rule). A DISTINCT trust domain from the `/internal` service token
+   *  (`X-Service-Token`) and the `/api` gateway identity (`X-User-Id`). */
+  webhookApiKey: string;
+}
+
 export interface AppConfig {
   nodeEnv: Env['NODE_ENV'];
   port: number;
@@ -39,6 +47,7 @@ export interface AppConfig {
   internalServiceToken: string;
   otp: OtpConfig;
   payees: PayeesConfig;
+  rails: RailsConfig;
 }
 
 /**
@@ -69,6 +78,8 @@ export function buildConfig(env: Env): AppConfig {
 
   const payees: PayeesConfig = { coolingOffSeconds: env.PAYEE_COOLING_OFF_SECONDS };
 
+  const rails: RailsConfig = { webhookApiKey: env.RAILS_WEBHOOK_API_KEY };
+
   return {
     nodeEnv: env.NODE_ENV,
     port: env.PORT,
@@ -77,6 +88,7 @@ export function buildConfig(env: Env): AppConfig {
     internalServiceToken: env.INTERNAL_SERVICE_TOKEN,
     otp,
     payees,
+    rails,
   };
 }
 
