@@ -239,8 +239,22 @@ whole prompt is about — correctness here is the deliverable.
   **single** active pending transfer (or none), with the destination's masked holder name.
   `POST /payees` enrolls an external beneficiary (`{ displayName, destinationRef }` → the new
   payee with its `coolingOffUntil`); `GET /payees` lists the caller's enrolled payees.
-- `/admin`: `POST /accounts/:id/freeze`, `PUT /limits`, `POST /transfers/:id/reverse`,
-  `POST /approvals/:id/approve`, `GET /transactions`, `POST /external/inbound`.
+- `/admin` (role-gated: the gateway injects `X-User-Id` + `X-Roles`; the surface requires the
+  `admin` role, else 403). Every **mutating** admin action writes one **audit row** (actor, action,
+  target, before/after metadata) in the same transaction as the change; reads do not.
+  **Maker-checker is scoped to reversals only** — freeze/unfreeze and `PUT /limits` are single-actor
+  admin actions applied directly (each audited).
+  - Single-actor: `POST /accounts/:id/freeze`, `POST /accounts/:id/unfreeze` (flip account
+    `status`; a frozen account can still be credited, only debits are blocked); `PUT /limits`
+    (upsert the global baseline or a per-customer override — `{ scope, ownerId?, currency,
+    perTransactionMax?, dailyMax?, monthlyMax? }`, `ON CONFLICT (scope, owner_id)` upsert);
+    `GET /transactions` (view ANY transaction, not owner-scoped, with filters + pagination — a read,
+    no audit); `POST /external/inbound` (trigger a **simulated** external inbound — reuses the rail
+    inbound-credit path, idempotent by `externalRef`).
+  - Maker-checker (four-eyes): `POST /transfers/:id/reverse` (a maker proposes a reversal →
+    `ApprovalRequest` PENDING), `POST /approvals/:id/approve` / `POST /approvals/:id/reject` (a
+    DIFFERENT checker decides; approve executes the reversal — `checker_id <> maker_id` enforced in
+    the service and by the DB CHECK).
 - `/external` (third-party rail webhooks — HMAC-signed: `X-Rail-Signature: t=…,v1=…`, `v1 == HMAC-SHA256(RAILS_WEBHOOK_SIGNING_SECRET, "<t>.<rawBody>")`, ±300s replay window, 401 otherwise):
   `POST /rails/settlement-callback` (outbound completion: SUCCESS reconciles — records
   the rail `externalRef`, no new ledger post; FAILURE reverses `clearing → customer`),

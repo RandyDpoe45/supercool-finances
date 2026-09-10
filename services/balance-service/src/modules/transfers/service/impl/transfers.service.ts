@@ -71,6 +71,7 @@ import {
   InitiateExternalTransferParams,
   InitiateTransferParams,
   ITransfersService,
+  ListTransactionsQuery,
   PendingAuthorization,
   ResolveDestinationParams,
 } from '../interfaces/transfers.service.interface';
@@ -78,6 +79,12 @@ import {
 /** The partial unique index enforcing at most one PENDING transfer per initiator. A same-owner
  * concurrent initiate collides on it (SQLSTATE 23505); the service maps that to a 409. */
 const PENDING_UNIQUE_CONSTRAINT = 'uq_one_pending_per_initiator';
+
+/** Paging bounds for the admin transaction list ({@link TransfersService.listTransactions}). A
+ * missing `limit` defaults to {@link ADMIN_LIST_DEFAULT_LIMIT}; a larger request is clamped to
+ * {@link ADMIN_LIST_MAX_LIMIT}, so the whole transaction history is never scanned unbounded. */
+const ADMIN_LIST_DEFAULT_LIMIT = 50;
+const ADMIN_LIST_MAX_LIMIT = 200;
 
 /** True iff the error is (or wraps) a Postgres unique violation on {@link PENDING_UNIQUE_CONSTRAINT}
  * — the single-pending index. TypeORM surfaces the driver error as `QueryFailedError`; the
@@ -667,6 +674,30 @@ export class TransfersService implements ITransfersService {
       return null;
     }
     return this.buildPendingAuthorization(pending);
+  }
+
+  /**
+   * Admin `GET /admin/transactions` — view ANY transaction (spec 04 "Admin ops"). DELIBERATELY NOT
+   * owner-scoped: every OTHER read on this service binds `owner_id`, but the role-gated admin
+   * surface may see any owner's transactions, so this method omits the owner predicate ON PURPOSE.
+   * A pure READ (no audit). It CLAMPS the requested paging — an over-large `limit` is capped to
+   * {@link ADMIN_LIST_MAX_LIMIT} and a negative/absent `offset`/`limit` floored/defaulted — so an
+   * admin can never ask the DB for an unbounded scan, then delegates to the parameterized repo query.
+   */
+  listTransactions(query: ListTransactionsQuery): Promise<Transaction[]> {
+    const limit = Math.min(
+      Math.max(query.limit ?? ADMIN_LIST_DEFAULT_LIMIT, 1),
+      ADMIN_LIST_MAX_LIMIT,
+    );
+    const offset = Math.max(query.offset ?? 0, 0);
+    return this.transactions.query({
+      ownerId: query.ownerId,
+      accountId: query.accountId,
+      status: query.status,
+      type: query.type,
+      limit,
+      offset,
+    });
   }
 
   /** Redis key binding a confirmation token to the CALLER — another user's token cannot be

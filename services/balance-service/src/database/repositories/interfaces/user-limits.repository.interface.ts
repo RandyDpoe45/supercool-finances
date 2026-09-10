@@ -1,4 +1,5 @@
 import { DeepPartial, QueryRunner } from 'typeorm';
+import { UserLimitsScope } from '../../entities/enums';
 import { UserLimits } from '../../entities/user-limits.entity';
 
 /** DI token for {@link IUserLimitsRepository}. */
@@ -6,6 +7,17 @@ export const USER_LIMITS_REPOSITORY = Symbol('USER_LIMITS_REPOSITORY');
 
 /** The three resolved caps for an owner + currency (each `null` = uncapped for that field). */
 export interface ResolvedLimits {
+  perTransactionMax: string | null;
+  dailyMax: string | null;
+  monthlyMax: string | null;
+}
+
+/** The fully-resolved row to upsert (admin `PUT /limits`). `ownerId` is NULL for a global row.
+ * Each cap is a canonical minor-unit string or `null` (uncapped for that field). */
+export interface UpsertUserLimitsData {
+  scope: UserLimitsScope;
+  ownerId: string | null;
+  currency: string;
   perTransactionMax: string | null;
   dailyMax: string | null;
   monthlyMax: string | null;
@@ -29,4 +41,26 @@ export interface IUserLimitsRepository {
     ownerId: string,
     currency: string,
   ): Promise<ResolvedLimits | null>;
+  /**
+   * Read the EXACT row for `(scope, ownerId, currency)` inside the caller's transaction — the
+   * before-image for an admin `PUT /limits` upsert. A global row has `owner_id IS NULL`, so a
+   * `null` `ownerId` matches only the global row (never a customer override). Returns `null` when
+   * no such row exists yet (the upsert will INSERT one). Full entity (not just caps), so the audit
+   * before-image is complete.
+   */
+  findExactInTx(
+    queryRunner: QueryRunner,
+    scope: UserLimitsScope,
+    ownerId: string | null,
+    currency: string,
+  ): Promise<UserLimits | null>;
+  /**
+   * Upsert the limits row for `(scope, owner_id)` inside the caller's transaction:
+   * `INSERT ... ON CONFLICT ON CONSTRAINT "uq_user_limits_scope" DO UPDATE SET the caps, currency,
+   * updated_at = now()`. The unique constraint is `(scope, owner_id)` (NULLS NOT DISTINCT, so the
+   * single global row is enforced), so this is one row per scope/owner. Returns the inserted/updated
+   * row (`RETURNING *`). MUST run inside the caller's active transaction (the same tx as the audit
+   * row).
+   */
+  upsertInTx(queryRunner: QueryRunner, data: UpsertUserLimitsData): Promise<UserLimits>;
 }

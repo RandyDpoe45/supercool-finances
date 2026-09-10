@@ -56,8 +56,13 @@ per step:
   lazily reset the fixed window off the DB clock (UTC), reject on breach (422 `LIMIT_EXCEEDED`),
   and increment the per-account `spent_today`/`spent_month` atomically with the post. The global
   baseline is seeded by a migration.
+- **Step 8a — single-actor `/admin` surface + audit foundation**
+  ([below](#step-8a--single-actor-admin-surface--audit-foundation)): the cross-cutting audit
+  service (transactional `recordInTx` + own-tx `record`) and the single-actor admin ops that write
+  it — freeze/unfreeze, `PUT /limits`, plus the reads `GET /transactions` (view ANY transaction, no
+  audit) and a simulated `POST /external/inbound`. Maker-checker (reversals + approvals) is step 8b.
 
-Admin ops (freeze / limits config / reversals + maker-checker) still arrive in a later step.
+Maker-checker admin ops (reversals + the `ApprovalRequest` four-eyes flow) still arrive in step 8b.
 
 ## Module structure
 
@@ -1601,9 +1606,137 @@ the interface **reserved** these names for this step):
 | `pollUnpublished(qr, limit)` | Claim ≤ `limit` unpublished rows oldest-first with `FOR UPDATE SKIP LOCKED` (via `setLock('pessimistic_write')` + `setOnLocked('skip_locked')`, and `.limit()` — not `.take()` — so the lock stays on the base rows and the SQL is a plain `LIMIT`). |
 | `markPublished(qr, ids)` | `UPDATE outbox_event SET published_at = now() WHERE id IN (:...ids)` on the same qr; no-op on an empty list. |
 
-## Not in this slice (later steps)
+## Step 8a — single-actor `/admin` surface + audit foundation
 
-Admin ops + maker-checker (including the admin `PUT /limits` **configuration** surface and the
-admin-triggered *simulated* inbound, a separate deferred admin-surface concern). Statement
-pagination beyond the first page is likewise deferred — the read slice returns only the most recent
-`STATEMENT_PAGE_LIMIT` legs.
+The admin plane's **single-actor** operations plus the **audit foundation** they write through
+(spec 04 "Admin ops"). Two developer decisions are LOCKED: **maker-checker is scoped to reversals
+only** (step 8b — NOT built here), so freeze/unfreeze + `PUT /limits` are **single-actor** actions
+applied directly; and every **mutating** admin action writes **one audit row in the SAME
+transaction** as the change, while **reads write none**.
+
+### The audit foundation (`src/modules/audit/`)
+
+A cross-cutting, service-only module binding the audit writer behind the `AUDIT_SERVICE` token
+(interface/impl split). It owns no business rules — it only appends `audit_log` rows.
+
+| File | Role |
+|---|---|
+| `audit.module.ts` | Binds `{ provide: AUDIT_SERVICE, useClass: AuditService }`, exports the token; imports `PersistenceModule`. No controller. |
+| `service/interfaces/audit.service.interface.ts` | `IAuditService` + the `AUDIT_SERVICE` token + the `AuditEntry` type + the `AUDIT_ACTIONS` constants. |
+| `service/impl/audit.service.ts` | `AuditService implements IAuditService`. |
+
+Two write paths, chosen by whether the state change shares a transaction with the audit row:
+
+- **`recordInTx(queryRunner, entry)`** — the **transactional** path: insert the audit row INSIDE
+  the caller's tx (via the new `IAuditLogRepository.insertInTx`), so a freeze / unfreeze / limits
+  change and its audit row commit (or roll back) together.
+- **`record(entry)`** — an **own-tx** insert (reuses the existing `IAuditLogRepository.create`), for
+  an action whose money movement already committed in a **different** service's tx (the simulated
+  inbound: the credit commits in the rails service's tx, then the admin surface records the audit).
+
+`AuditEntry = { actorId; action; targetType?; targetId?; metadata? }`. The `action` strings are the
+locked `AUDIT_ACTIONS` constants: `account.freeze`, `account.unfreeze`, `limits.change`,
+`external.inbound.simulated`. Both repo paths INSERT only (`id`/`created_at` are DB-generated), so
+the `audit_log` append-only convention holds.
+
+### The `/admin` surface registry
+
+`AdminModule` (`src/modules/admin/admin.module.ts`) is the per-surface registry (like `ApiModule` /
+`ExternalModule`): it **imports** the feature modules `[AuditModule, AccountsModule, LimitsModule,
+TransfersModule, RailsModule]` and **declares** the controllers `[AdminController` (the spec-03
+`whoami` probe, kept)`, AccountsAdminController, LimitsAdminController, TransfersAdminController,
+RailsAdminController]`. It is role-gated by the existing `GatewayIdentityGuard` (`X-User-Id` + the
+`admin` role, else 403); the actor id is read ONLY via `@Identity()` (`identity.userId`) and
+recorded as the audit `actorId`.
+
+### Freeze / unfreeze (accounts feature)
+
+`AccountsService.setFrozen(actorId, accountId, frozen)` — ONE `runInTransactionWithRetry` tx: lock
+the account `FOR UPDATE` (`lockByIdForUpdate`, so a concurrent flip serializes and the audited
+`previousStatus` is truthful), reject a missing account (`AccountNotFoundError` → 404, reusing the
+shared `ACCOUNT_NOT_FOUND` code) or a system/clearing account (`AccountNotFreezableError` →
+`ACCOUNT_NOT_FREEZABLE` → **409** — freezing is a customer-account control only), flip `status`
+(new `IAccountRepository.updateStatusInTx`), and `auditService.recordInTx(qr, { action:
+freeze?account.freeze:account.unfreeze, targetType: 'account', targetId, metadata: { previousStatus,
+newStatus } })` — all in the same tx. The updated row is re-read AFTER commit (`findById`) so the
+returned entity carries the DB-stamped `updated_at`. A frozen account can still be **credited** — the
+reducer's `checkAndFold` only blocks customer **debits**. `AccountsModule` now imports `AuditModule`.
+
+- Controller: `AccountsAdminController` (`src/modules/accounts/admin/accounts-admin.controller.ts`,
+  `@Controller('admin/accounts')`) — `POST :id/freeze`, `POST :id/unfreeze` (`ParseUUIDPipe`, HTTP
+  200). Returns the deliberate **admin** account view `AdminAccountDto` (whitelist serializer under
+  `accounts/admin/serializers/`): admin may see `ownerId`, `status`, `balance`, `held`, `available`,
+  `accountNumber`, `kind`, `currency`, timestamps — each listed explicitly, never spread; the spend
+  counters and `systemKey` stay off the wire even for admin.
+
+### `PUT /limits` (new limits feature, `src/modules/limits/`)
+
+`LimitsModule` binds `{ provide: LIMITS_SERVICE, useClass: LimitsService }`, imports
+`PersistenceModule` + `AuditModule`. `LimitsService.upsertLimits(actorId, input)` where `input =
+{ scope: 'global'|'customer', ownerId?, currency, perTransactionMax?, dailyMax?, monthlyMax? }`
+(caps are minor-unit strings or null): validate the scope/owner invariant (**global ⇒ ownerId
+absent; customer ⇒ ownerId required**, else `InvalidLimitsError` → `INVALID_LIMITS` → **400**),
+then ONE tx: read the before-image (`findExactInTx`), `upsertInTx`, and `recordInTx(qr, { action:
+limits.change, targetType: 'user_limits', targetId: '<scope>:<ownerId|global>', metadata: { before,
+after } })` (a compact field snapshot, not the raw entity). Returns the row.
+
+- New repo methods on `IUserLimitsRepository`: **`findExactInTx(qr, scope, ownerId, currency)`** (the
+  before-image; a global row is matched with `IsNull()` on `owner_id`) and **`upsertInTx(qr, data)`**
+  (`INSERT … ON CONFLICT ON CONSTRAINT "uq_user_limits_scope" DO UPDATE SET the caps, currency,
+  updated_at = now() RETURNING *`; the conflict target is `(scope, owner_id)`, so one row per
+  scope/owner — a raw `RETURNING *` row hydrated into a `UserLimits` entity).
+- Controller: `LimitsAdminController` (`src/modules/limits/admin/limits-admin.controller.ts`,
+  `@Controller('admin/limits')`) — `PUT /` with a `ZodValidationPipe`-validated `.strict()` body
+  (shape only; the scope/owner rule is the service's). Returns `LimitsDto` (whitelist). This is the
+  **configuration** surface; the rail-side **enforcement** is step 7.
+
+### `GET /transactions` — view ANY transaction (transfers feature)
+
+The admin listing read lives on **`TransfersService.listTransactions(query)`** (behind the existing
+`TRANSFERS_SERVICE` token — the developer-locked "read method on TransfersService" option), but it
+is **DELIBERATELY NOT owner-scoped**: unlike every `/api` read on that service it omits the
+`owner_id` predicate on purpose, since the role-gated admin surface may see any owner's transactions.
+It **clamps** the requested paging (default 50, max 200, offset ≥ 0 — never an unbounded scan) and
+delegates to the new **`ITransactionRepository.query(filter)`** — a parameterized SELECT (bound
+filters: `ownerId` → `initiated_by`, `accountId` → debit OR credit leg, `status`, `type`), `ORDER BY
+created_at DESC` (id tiebreak), `LIMIT`/`OFFSET`, no `FOR UPDATE`. It is a **READ — no audit row**.
+
+- Controller: `TransfersAdminController` (`src/modules/transfers/admin/transfers-admin.controller.ts`,
+  `@Controller('admin/transactions')`) — `GET /` with a `ZodValidationPipe`-validated `.strict()`
+  query (`limit`/`offset` coerced + left unbounded so the SERVICE clamps them). Returns
+  `{ transactions: AdminTransactionDto[] }` (whitelist — admin may see both account ids,
+  `initiatedBy`, type, status, amount, `payeeId`, `reversesTransactionId`, `failureReason`,
+  timestamps).
+
+### `POST /external/inbound` — simulated inbound (rails feature)
+
+`RailsAdminController` (`src/modules/rails/admin/rails-admin.controller.ts`,
+`@Controller('admin/external')`) — `POST /inbound` with a `.strict()` zod body reusing the rail
+webhook's `inboundCreditSchema` (`{ accountNumber, amount, currency, externalRef }`). It **REUSES**
+the exact rail inbound path `IRailsService.creditInbound` (debit `clearing:rail-inbound`, credit the
+customer by account number, **idempotent by `externalRef`**), then writes the audit via
+`auditService.record(...)` (its **own tx**, `action: external.inbound.simulated`, `targetType:
+'account'`, `targetId` = the credited customer account, `metadata` = `{ accountNumber, amount,
+currency, externalRef, transactionId }`). Recording after the (already-committed, idempotent) credit
+is safe — a retry re-runs the idempotent credit and records again (an accepted minor duplicate, never
+a double credit). `AdminModule` imports `AuditModule` so this controller can inject `AUDIT_SERVICE`.
+Returns `SimulatedInboundDto` (whitelist).
+
+### New domain errors / codes
+
+| Class | `code` | Status | Owner |
+|---|---|---|---|
+| `AccountNotFreezableError` | `ACCOUNT_NOT_FREEZABLE` | 409 | accounts `service/errors.ts` |
+| `InvalidLimitsError` | `INVALID_LIMITS` | 400 | limits `service/errors.ts` |
+
+Both added to `common/errors/domain-error-status.ts`. A missing account reuses the existing
+`ACCOUNT_NOT_FOUND` (404) via an accounts-owned `AccountNotFoundError` (same shared-code pattern as
+`TRANSFER_NOT_PENDING`).
+
+## Not in this slice (step 8b + later)
+
+**Maker-checker admin ops (step 8b):** the `ApprovalRequest` four-eyes flow — `POST
+/transfers/:id/reverse` (a maker proposes a reversal → PENDING approval), `POST /approvals/:id/approve`
+| `POST /approvals/:id/reject` (a DIFFERENT checker decides; approve executes the reversal,
+`checker_id <> maker_id`). Statement pagination beyond the first page is likewise deferred — the read
+slice returns only the most recent `STATEMENT_PAGE_LIMIT` legs.

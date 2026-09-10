@@ -1309,3 +1309,56 @@ export function getRelayService(): any | undefined {
 export function getOutboxEventRepositoryToken(): symbol {
   return getRepositoryToken('OUTBOX_EVENT_REPOSITORY', 'outbox-event');
 }
+
+// ---- Admin ops (spec 04 "Admin ops (/admin)", step 8a: single-actor + audit foundation) -------
+// The `/admin` single-actor surface (freeze/unfreeze, PUT /limits, GET /transactions, simulated
+// inbound) + the audit foundation. Resolved through the same single-seam convention: services BY
+// TOKEN through the app graph (integration), the CLASS for the pure unit specs, repo tokens BY name.
+// Maker-checker (reversals / approvals) is step 8b and is intentionally NOT resolved here.
+
+/** `AUDIT_SERVICE` — the DI token the AuditModule binds the IAuditService to (`recordInTx(qr, entry)`
+ *  writes one append-only `audit_log` row in the CALLER's tx; `record(entry)` opens its own). Resolved
+ *  by token, never by class, per the interface/impl split. Reuses the shared service-token probe. */
+export function getAuditServiceToken(): symbol {
+  return resolveServiceToken('AUDIT_SERVICE', 'audit');
+}
+
+/** `AUDIT_LOG_REPOSITORY` — the DI token the persistence layer binds the audit-log repo to (append-only;
+ *  `insertInTx(qr, data)` writes one row inside the caller's tx). Reuses the multi-path repo-token
+ *  resolver so a unit spec can mock it BY token, or seed/read rows via tests/support/pg.ts. */
+export function getAuditLogRepositoryToken(): symbol {
+  return getRepositoryToken('AUDIT_LOG_REPOSITORY', 'audit-log');
+}
+
+/** `LIMITS_SERVICE` — the DI token the LimitsModule binds the LimitsService to (`upsertLimits(actorId,
+ *  input)` upserts the global baseline or a per-customer override, `ON CONFLICT (scope, owner_id)`, and
+ *  audits `limits.change` with before/after). Resolved by token, never by class. */
+export function getLimitsServiceToken(): symbol {
+  return resolveServiceToken('LIMITS_SERVICE', 'limits');
+}
+
+/**
+ * The `LimitsService` CLASS, for the pure unit spec (driven through a Nest TestingModule + useMocker
+ * so injection is order-independent, like the transfers/rails unit specs). Scanned with
+ * `findExportAcross`; if the implementor moves/renames it, add the path/export HERE — the single
+ * coordination point.
+ */
+export function getLimitsService(): any {
+  const cls = findExportAcross(
+    [
+      `${SRC}/modules/limits/service/impl/limits.service`,
+      `${SRC}/modules/limits/impl/limits.service`,
+      `${SRC}/modules/limits/limits.service`,
+      `${SRC}/modules/limits/service/limits.service`,
+    ],
+    ['LimitsService'],
+  );
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the LimitsService class. If the implementor named/placed it ` +
+        `differently, add the path/export to tests/support/harness.ts:getLimitsService — the single ` +
+        `coordination point.`,
+    );
+  }
+  return cls;
+}

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DeepPartial, Repository } from 'typeorm';
+import { DeepPartial, QueryRunner, Repository } from 'typeorm';
 import { AuditLog } from '../../entities/audit-log.entity';
 import { IAuditLogRepository } from '../interfaces/audit-log.repository.interface';
 
@@ -16,5 +16,12 @@ export class AuditLogRepository implements IAuditLogRepository {
 
   create(data: DeepPartial<AuditLog>): Promise<AuditLog> {
     return this.repo.save(this.repo.create(data));
+  }
+
+  async insertInTx(queryRunner: QueryRunner, data: DeepPartial<AuditLog>): Promise<void> {
+    // save() joins the caller's transaction via its manager; `id` (bigint identity) and
+    // `created_at` are DB-generated (not supplied), so this can only ever INSERT — the
+    // append-only invariant is preserved.
+    await queryRunner.manager.save(queryRunner.manager.create(AuditLog, data));
   }
 }

@@ -598,3 +598,125 @@ export async function setAccountSpendCounters(
   vals.push(id);
   await q.query(`UPDATE "account" SET ${sets.join(', ')} WHERE "id" = $${vals.length}`, vals);
 }
+
+// ---- Admin ops + audit foundation (spec 04 step 8a) ------------------------------------------
+
+/** Read one account's `status` (`'active'` | `'frozen'`) — the seam the freeze/unfreeze proofs use
+ * to assert the flip committed (and, on a missing-account freeze, that NOTHING changed). Returns
+ * `null` when the id does not exist. */
+export async function getAccountStatus(q: any, id: string): Promise<string | null> {
+  const rows = await q.query(`SELECT "status" FROM "account" WHERE "id" = $1`, [id]);
+  return rows.length > 0 ? (rows[0].status as string) : null;
+}
+
+/** A filter for {@link getAuditRows} / {@link countAuditRows} — any subset narrows the match. */
+export interface AuditRowFilter {
+  actorId?: string;
+  action?: string;
+  targetType?: string;
+  targetId?: string;
+}
+
+/**
+ * All `audit_log` rows matching the given filter, oldest-first (`id ASC`, the DB-generated
+ * append-only order). `metadata` is the parsed jsonb (JS object) — the seam the "before/after"
+ * proofs read to assert the recorded change. Every mutating admin action writes EXACTLY one row;
+ * a read writes none. Empty filter → every row (used only for a full-table sanity count in a test
+ * that has scoped the DB to its own actor). Money values inside `metadata` are whatever the service
+ * stored (canonical minor-unit strings); `actor_id` / `action` / `target_type` / `target_id` are the
+ * columns the whitelist proof gates on.
+ */
+export async function getAuditRows(
+  q: any,
+  filter: AuditRowFilter = {},
+): Promise<
+  Array<{
+    id: string;
+    actor_id: string;
+    action: string;
+    target_type: string | null;
+    target_id: string | null;
+    metadata: Record<string, unknown> | null;
+    created_at: Date;
+  }>
+> {
+  const where: string[] = [];
+  const vals: unknown[] = [];
+  const push = (col: string, v: unknown): void => {
+    vals.push(v);
+    where.push(`"${col}" = $${vals.length}`);
+  };
+  if (filter.actorId !== undefined) push('actor_id', filter.actorId);
+  if (filter.action !== undefined) push('action', filter.action);
+  if (filter.targetType !== undefined) push('target_type', filter.targetType);
+  if (filter.targetId !== undefined) push('target_id', filter.targetId);
+  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  return q.query(
+    `SELECT "id", "actor_id", "action", "target_type", "target_id", "metadata", "created_at"
+       FROM "audit_log" ${clause} ORDER BY "id" ASC`,
+    vals,
+  );
+}
+
+/** The count of `audit_log` rows matching the filter, as a number — the left-hand side of
+ * "exactly one row per mutating admin action" and "a read writes NONE". */
+export async function countAuditRows(q: any, filter: AuditRowFilter = {}): Promise<number> {
+  return (await getAuditRows(q, filter)).length;
+}
+
+/** Delete every `audit_log` row written by any of the given actor ids — best-effort per-test
+ * cleanup (audit_log has NO FK to account/transaction — `(target_type, target_id)` is a
+ * polymorphic pointer — so it is not swept by the account/tx cascade). */
+export async function deleteAuditRowsByActor(q: any, actorIds: string[]): Promise<void> {
+  if (!actorIds.length) return;
+  await q.query(`DELETE FROM "audit_log" WHERE "actor_id" = ANY($1)`, [actorIds]);
+}
+
+/**
+ * The single `user_limits` row for an exact `(scope, owner_id)` key (a `global` row has
+ * `owner_id` NULL — pass `ownerId: null`), or `null`. The seam the PUT /limits upsert semantics
+ * proof reads to assert an UPDATE reused the SAME row (not a duplicate insert) and to read back the
+ * caps. Caps are `bigint`-as-string (or `null` = uncapped). Because `uq_user_limits_scope
+ * (scope, owner_id)` is NULLS-NOT-DISTINCT there is at most one such row.
+ */
+export async function getUserLimitsExact(
+  q: any,
+  key: { scope: 'global' | 'customer'; ownerId?: string | null; currency?: string },
+): Promise<{
+  id: string;
+  scope: string;
+  owner_id: string | null;
+  currency: string;
+  per_transaction_max: string | null;
+  daily_max: string | null;
+  monthly_max: string | null;
+} | null> {
+  const ownerId = key.ownerId ?? null;
+  const ownerClause = ownerId === null ? `"owner_id" IS NULL` : `"owner_id" = $2`;
+  const vals: unknown[] = [key.scope];
+  if (ownerId !== null) vals.push(ownerId);
+  const rows = await q.query(
+    `SELECT "id", "scope", "owner_id", "currency",
+            "per_transaction_max", "daily_max", "monthly_max"
+       FROM "user_limits" WHERE "scope" = $1 AND ${ownerClause}`,
+    vals,
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+/** Count the `user_limits` rows for an exact `(scope, owner_id)` key — the tripwire proving a
+ * second upsert UPDATED the existing row rather than inserting a duplicate (count stays 1). */
+export async function countUserLimitsExact(
+  q: any,
+  key: { scope: 'global' | 'customer'; ownerId?: string | null },
+): Promise<number> {
+  const ownerId = key.ownerId ?? null;
+  const ownerClause = ownerId === null ? `"owner_id" IS NULL` : `"owner_id" = $2`;
+  const vals: unknown[] = [key.scope];
+  if (ownerId !== null) vals.push(ownerId);
+  const rows = await q.query(
+    `SELECT COUNT(*)::int AS count FROM "user_limits" WHERE "scope" = $1 AND ${ownerClause}`,
+    vals,
+  );
+  return rows[0].count as number;
+}

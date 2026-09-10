@@ -3,7 +3,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, QueryRunner, Repository } from 'typeorm';
 import { TransactionStatus } from '../../entities/enums';
 import { Transaction } from '../../entities/transaction.entity';
-import { ITransactionRepository } from '../interfaces/transaction.repository.interface';
+import {
+  ITransactionRepository,
+  TransactionQueryFilter,
+} from '../interfaces/transaction.repository.interface';
 
 /** TypeORM implementation of {@link ITransactionRepository}, bound to
  * `TRANSACTION_REPOSITORY` in {@link PersistenceModule}. */
@@ -220,5 +223,32 @@ export class TransactionRepository implements ITransactionRepository {
       .where('id = :id AND status = :posted', { id, posted: TransactionStatus.Posted })
       .execute();
     return (result.affected ?? 0) > 0;
+  }
+
+  query(filter: TransactionQueryFilter): Promise<Transaction[]> {
+    // A plain (no FOR UPDATE), DELIBERATELY-NOT-owner-scoped read for the role-gated admin surface.
+    // Each optional filter appends a bound predicate (never interpolated); newest-first with an id
+    // tiebreak for deterministic ordering; LIMIT/OFFSET from the already-clamped filter.
+    const qb = this.repo.createQueryBuilder('t');
+    if (filter.ownerId !== undefined) {
+      qb.andWhere('t.initiatedBy = :ownerId', { ownerId: filter.ownerId });
+    }
+    if (filter.accountId !== undefined) {
+      qb.andWhere('(t.debitAccountId = :accountId OR t.creditAccountId = :accountId)', {
+        accountId: filter.accountId,
+      });
+    }
+    if (filter.status !== undefined) {
+      qb.andWhere('t.status = :status', { status: filter.status });
+    }
+    if (filter.type !== undefined) {
+      qb.andWhere('t.type = :type', { type: filter.type });
+    }
+    return qb
+      .orderBy('t.createdAt', 'DESC')
+      .addOrderBy('t.id', 'DESC')
+      .limit(filter.limit)
+      .offset(filter.offset)
+      .getMany();
   }
 }
