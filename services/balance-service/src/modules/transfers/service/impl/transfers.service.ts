@@ -84,9 +84,9 @@ interface ConfirmationRecord {
  * then fails (insufficient funds under the lock, etc.) the code is spent and the transfer
  * stays PENDING, so a retry needs a fresh code (matching the spec's confirm-time funds check).
  *
- * The service returns enriched VIEW MODELS (human account numbers, masked destination names);
- * DTO serialization is a transport concern applied at the controller. The raw holder name (PII)
- * is masked HERE so it never crosses the service boundary.
+ * The service returns enriched VIEW MODELS (the source account id, the destination human
+ * account number + masked holder name); DTO serialization is a transport concern applied at the
+ * controller. The raw holder name (PII) is masked HERE so it never crosses the service boundary.
  */
 @Injectable()
 export class TransfersService implements ITransfersService {
@@ -319,19 +319,22 @@ export class TransfersService implements ITransfersService {
     }
   }
 
-  /** Enrich a transfer with the human account numbers the wire shows (the entity stores the
-   * account UUIDs). Per-row lookups are acceptable (prototype). */
+  /** Enrich a transfer for the wire. The SOURCE stays the account id (the caller's own —
+   * straight from `debitAccountId`, NO lookup); only the DESTINATION credit UUID is resolved
+   * to its human account number. Per-row lookups are acceptable (prototype). */
   private async toTransferView(transaction: Transaction): Promise<TransferView> {
-    const sourceAccountNumber = await this.accountNumberOf(transaction.debitAccountId);
     const destinationAccountNumber = await this.accountNumberOf(transaction.creditAccountId);
-    return { transaction, sourceAccountNumber, destinationAccountNumber };
+    return {
+      transaction,
+      sourceAccountId: transaction.debitAccountId,
+      destinationAccountNumber,
+    };
   }
 
-  /** Enrich a pending transfer for the OTP feed: human account numbers PLUS the destination
-   * holder's MASKED name (so the app shows who the payment is to). */
+  /** Enrich a pending transfer for the OTP feed: the source account id (the caller's own, no
+   * lookup) PLUS the destination's human account number and the holder's MASKED name (so the
+   * app shows who the payment is to). */
   private async toPendingView(transaction: Transaction): Promise<PendingAuthorizationView> {
-    const sourceAccountNumber = await this.accountNumberOf(transaction.debitAccountId);
-
     let destinationAccountNumber: string | null = null;
     let destinationMaskedName = '';
     if (transaction.creditAccountId) {
@@ -343,7 +346,12 @@ export class TransfersService implements ITransfersService {
       }
     }
 
-    return { transaction, sourceAccountNumber, destinationAccountNumber, destinationMaskedName };
+    return {
+      transaction,
+      sourceAccountId: transaction.debitAccountId,
+      destinationAccountNumber,
+      destinationMaskedName,
+    };
   }
 
   /** Resolve an account id to its human account number, or `null` if the id is absent/unknown. */

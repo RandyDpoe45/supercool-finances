@@ -9,6 +9,10 @@ import { Column, Entity, PrimaryColumn } from 'typeorm';
  * the three profile fields a payee-confirmation flow needs are stored: `name` (masked before
  * it leaves the service — see the transfers `maskName` helper), `phone`, and `email`. Nothing
  * else — this is deliberately minimal.
+ *
+ * `phone` and `email` are UNIQUE (enforced at the DB level by the CreateCustomerAndAccountNumber
+ * migration's `uq_customer_phone` / `uq_customer_email` indexes, not by ORM decorators — same as
+ * `account`'s constraints).
  */
 @Entity('customer')
 export class Customer {

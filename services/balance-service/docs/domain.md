@@ -742,7 +742,8 @@ the destination is *addressed* and adds a confirmation gate in front of initiate
 - **`customer` table** (`src/database/entities/customer.entity.ts`, migration
   `1789084800000-CreateCustomerAndAccountNumber`): `id varchar PRIMARY KEY` (the Keycloak `sub`
   — `varchar` to match `account.owner_id`'s existing type, so **no** `owner_id` type change and
-  **no** risky ALTER), `name` / `phone` / `email` (all `NOT NULL`), `created_at` / `updated_at`.
+  **no** risky ALTER), `name` / `phone` / `email` (all `NOT NULL`, with `phone` / `email` **UNIQUE**
+  via `uq_customer_phone` / `uq_customer_email`), `created_at` / `updated_at`.
   Nothing else. Bound behind `CUSTOMER_REPOSITORY` (`findById` / `create`) in `PersistenceModule`.
 - **`account.account_number`** (`varchar NULL`): the human destination identifier — a unique
   **10-digit numeric** string on **customer accounts only** (system/clearing accounts keep NULL).
@@ -802,21 +803,25 @@ non-length-revealing), joined by single spaces. `"Juan Perez"` → `"Jua** Per**
 `""`. It is applied **in the service** so the raw name (PII) never crosses the service boundary —
 neither the controller nor any DTO ever sees it.
 
-### Read DTOs — human account numbers + masked destination name
+### Read DTOs — source account id + destination account number & masked name
 
-The transfer entity stores debit/credit account **UUIDs**; the service **enriches** read results
-into view models (mirroring `getAccountStatement`'s `{ account, entries }`), and the controller
-whitelists them — the raw UUIDs and the PII name never reach the wire:
+The transfer entity stores debit/credit account **UUIDs**. The **source** is the caller's OWN
+account, so it stays the account **id** (`sourceAccountId` = the transaction's `debitAccountId`,
+exactly as `AccountDto.id` is exposed to its owner — no lookup); only the **destination** (credit)
+UUID is resolved to its human account **number**. The service **enriches** read results into view
+models (mirroring `getAccountStatement`'s `{ account, entries }`), and the controller whitelists
+them — the raw credit UUID and the PII name never reach the wire:
 
-- **`TransferView { transaction, sourceAccountNumber, destinationAccountNumber }`** →
-  `TransferDto { id, type, status, amount, currency, sourceAccountNumber, destinationAccountNumber,
-  createdAt, postedAt }` (the raw UUIDs are **dropped** from the wire). Returned by both
-  `initiateTransfer` and `confirmTransfer` (the posted transfer serializes the same way).
+- **`TransferView { transaction, sourceAccountId, destinationAccountNumber }`** →
+  `TransferDto { id, type, status, amount, currency, sourceAccountId, destinationAccountNumber,
+  createdAt, postedAt }` (the credit UUID is **dropped**; `sourceAccountId` comes straight from
+  `debitAccountId`, no lookup). Returned by both `initiateTransfer` and `confirmTransfer` (the
+  posted transfer serializes the same way).
 - **`PendingAuthorizationView { …, destinationMaskedName }`** → `PendingAuthorizationDto
-  { transferId, type, amount, currency, sourceAccountNumber, destinationAccountNumber,
+  { transferId, type, amount, currency, sourceAccountId, destinationAccountNumber,
   destinationMaskedName, createdAt }` — `destinationMaskedName` is `maskName` of the destination
-  account's holder, so the OTP app shows who the payment is to. Per-row account/customer lookups
-  are acceptable (prototype).
+  account's holder, so the OTP app shows who the payment is to. Only the **destination** needs a
+  per-row account/customer lookup (prototype); the source is the raw id.
 
 ### What did NOT change
 

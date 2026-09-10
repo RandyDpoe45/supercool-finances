@@ -42,6 +42,7 @@ import {
   withRollback as withRollbackOn,
   insertRow,
   insertAccount,
+  insertCustomer,
   expectPgError,
   seedTestCurrency,
   localAccountNumber,
@@ -490,6 +491,54 @@ suite('balance schema — Step 1 constraints (integration, needs Postgres)', () 
       expect(a1.id).not.toBe(a2.id);
       expect(a1.account_number).toBeNull();
       expect(a2.account_number).toBeNull();
+    });
+  });
+
+  // ---- Confirmation-of-payee migration: uq_customer_phone + uq_customer_email ----------
+  // `customer.phone` and `customer.email` are UNIQUE (indexes uq_customer_phone /
+  // uq_customer_email). The confirmation-of-payee flow keys on a caller reaching a UNIQUE
+  // destination profile, so two customers must never share a phone or an email. Each test is
+  // power-bearing: drop the matching index and the duplicate insert stops being rejected, so
+  // the "expected rejection but it succeeded" branch fires. The second row is written via a
+  // direct INSERT (insertRow, no ON CONFLICT) so the phone/email UNIQUE violation surfaces
+  // instead of being swallowed by insertCustomer's ON CONFLICT (id) clause.
+
+  it('rejects two customers sharing the same phone (uq_customer_phone UNIQUE)', async () => {
+    await withRollback(async (q) => {
+      const phone = `521${localAccountNumber()}`; // one 13-digit phone, claimed twice
+      // First customer takes the phone via an explicit override (not the derived default).
+      await insertCustomer(q, `sub-${randomUUID()}`, { phone });
+      // A DIFFERENT customer (different id, different email) reusing the SAME phone must collide
+      // on uq_customer_phone. insertRow issues a raw INSERT so the UNIQUE(phone) violation is not
+      // masked by ON CONFLICT (id).
+      await expectPgError(
+        insertRow(q, 'customer', {
+          id: `sub-${randomUUID()}`, // DIFFERENT id
+          name: 'Ana Lopez',
+          phone, // SAME phone → 23505
+          email: `dup-${randomUUID()}@example.test`, // DIFFERENT email
+        }),
+        PG.UNIQUE_VIOLATION,
+      );
+    });
+  });
+
+  it('rejects two customers sharing the same email (uq_customer_email UNIQUE)', async () => {
+    await withRollback(async (q) => {
+      const email = `dup-${randomUUID()}@example.test`; // one email, claimed twice
+      // First customer takes the email via an explicit override (not the derived default).
+      await insertCustomer(q, `sub-${randomUUID()}`, { email });
+      // A DIFFERENT customer (different id, different phone) reusing the SAME email must collide
+      // on uq_customer_email.
+      await expectPgError(
+        insertRow(q, 'customer', {
+          id: `sub-${randomUUID()}`, // DIFFERENT id
+          name: 'Ana Lopez',
+          phone: `521${localAccountNumber()}`, // DIFFERENT phone
+          email, // SAME email → 23505
+        }),
+        PG.UNIQUE_VIOLATION,
+      );
     });
   });
 });

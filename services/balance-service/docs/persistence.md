@@ -48,14 +48,16 @@ accounts — not a schema step.)
 
 | Table / change | Role |
 |---|---|
-| `customer` | Money-domain user profile Keycloak does not hold. PK `id` = the Keycloak `sub` (`varchar`, same value as `account.owner_id`); `name` / `phone` / `email` NOT NULL; timestamps. |
+| `customer` | Money-domain user profile Keycloak does not hold. PK `id` = the Keycloak `sub` (`varchar`, same value as `account.owner_id`); `name` / `phone` / `email` NOT NULL, and `phone` / `email` UNIQUE; timestamps. |
+| `uq_customer_phone` / `uq_customer_email` (add) | UNIQUE indexes on `customer.phone` and `customer.email` (both NOT NULL, so no multi-NULL concern). |
 | `account.account_number` (add) | Human destination identifier — unique 10-digit numeric on customer accounts, NULL on system accounts. |
 | `uq_account_account_number` (add) | Plain UNIQUE index on `account_number` (multiple NULLs coexist, so system accounts don't collide). |
 | `fk_account_owner` (add) | `account.owner_id → customer.id`, nullable (not checked for system accounts' NULL owner). |
 
 Each migration's `down()` drops its tables (any order for the satellites; reverse FK
 order for the spine) then removes its enum types — a clean inverse. Step 3's `down()` drops the
-FK, the index, the `account_number` column, then the `customer` table.
+FK, the `account_number` index and column, then the two `customer` unique indexes, then the
+`customer` table.
 
 ## Enumerations — native Postgres enum types
 
@@ -125,9 +127,10 @@ not a migration.
 - `id varchar` PK — the Keycloak `sub`, the same value stored in `account.owner_id` (kept
   `varchar` so `owner_id` FKs to it with no type change / no risky ALTER).
 - `name`, `phone`, `email` — `varchar NOT NULL`; `created_at` / `updated_at` `timestamptz`.
+- `phone` and `email` are **UNIQUE** — `uq_customer_phone` / `uq_customer_email` (both NOT NULL,
+  so no multi-NULL concern).
 - Keycloak keeps only auth; this table owns the profile (name masked before it leaves the
   service — see the transfers `maskName` helper).
-- `status` defaults to `active`.
 
 **`external_payee`**
 - `owner_id`, `display_name`, `rail`, `destination_ref`, `cooling_off_until` NOT NULL;

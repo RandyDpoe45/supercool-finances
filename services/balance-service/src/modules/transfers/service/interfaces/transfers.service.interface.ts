@@ -51,25 +51,27 @@ export interface ConfirmTransferParams {
 }
 
 /**
- * A transfer enriched with the HUMAN account numbers the wire shows in place of the raw
- * account UUIDs (the entity stores debit/credit UUIDs; the service resolves them). Mirrors how
+ * A transfer enriched for the wire. The SOURCE stays the account **id** (`sourceAccountId` =
+ * the transaction's `debitAccountId`, the caller's own account — no lookup); only the
+ * DESTINATION credit UUID is resolved to its HUMAN account number. Mirrors how
  * {@link IAccountsService.getAccountStatement} returns `{ account, entries }`: the raw entity
  * never reaches the wire — the controller whitelists this view.
  */
 export interface TransferView {
   transaction: Transaction;
-  sourceAccountNumber: string | null;
+  sourceAccountId: string | null;
   destinationAccountNumber: string | null;
 }
 
 /**
- * A pending transfer enriched for the OTP app's feed: the human account numbers PLUS the
- * destination holder's MASKED name (so the app shows who the payment is to). The masking is
- * applied by the service — the raw name (PII) never reaches the controller.
+ * A pending transfer enriched for the OTP app's feed: the source account **id** (the caller's
+ * own) plus the destination's HUMAN account number and the destination holder's MASKED name
+ * (so the app shows who the payment is to). The masking is applied by the service — the raw
+ * name (PII) never reaches the controller.
  */
 export interface PendingAuthorizationView {
   transaction: Transaction;
-  sourceAccountNumber: string | null;
+  sourceAccountId: string | null;
   destinationAccountNumber: string | null;
   destinationMaskedName: string;
 }

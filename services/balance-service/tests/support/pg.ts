@@ -11,7 +11,7 @@
  * Nothing here talks to the implementor's source; the DataSource is passed in by the
  * caller (resolved from the booted AppModule).
  */
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 
 /** Postgres error codes (SQLSTATE) the schema's constraints must raise. */
 export const PG = {
@@ -105,12 +105,28 @@ export async function insertAccount(q: any, overrides: Record<string, unknown> =
 }
 
 /**
+ * A deterministic, per-customer UNIQUE phone derived from the customer id, in the same
+ * 13-digit shape as the old constant (`521` + 10 digits). `customer.phone` is UNIQUE
+ * (`uq_customer_phone`), so a constant default would collide (23505) the instant a suite seeds
+ * a second customer — which the transfers suites do on every test (source + destination). The
+ * id-hash keeps DISTINCT ids → DISTINCT phones and the SAME id → the SAME phone, so a repeated
+ * `ON CONFLICT (id) DO NOTHING` seed stays stable. Callers may still pin an explicit `phone`.
+ */
+function derivePhone(id: string): string {
+  const hex = createHash('sha256').update(id).digest('hex');
+  const tail = (BigInt('0x' + hex.slice(0, 15)) % 10_000_000_000n).toString().padStart(10, '0');
+  return `521${tail}`;
+}
+
+/**
  * A `customer` row (the balance-service's own money-domain profile — PK `id` IS the Keycloak
  * `sub`, the same value stored in `account.owner_id`, which FKs to it via `fk_account_owner`).
- * All three profile columns (`name`, `phone`, `email`) are NOT NULL. Seed this BEFORE any
- * customer account referencing the owner, or the account insert fails the FK. Idempotent via
- * `ON CONFLICT (id) DO NOTHING` so several accounts can share one owner within a test.
- * `name` is settable so a suite can prove the payee-name mask against a KNOWN holder name.
+ * All three profile columns (`name`, `phone`, `email`) are NOT NULL; `phone` and `email` are
+ * UNIQUE, so their defaults are derived per-id (phone via `derivePhone`, email `${id}@example.test`)
+ * — distinct ids never collide. Seed this BEFORE any customer account referencing the owner, or
+ * the account insert fails the FK. Idempotent via `ON CONFLICT (id) DO NOTHING` so several
+ * accounts can share one owner within a test. `name` is settable so a suite can prove the
+ * payee-name mask against a KNOWN holder name; `phone`/`email` are settable to force a collision.
  */
 export async function insertCustomer(
   q: any,
@@ -118,7 +134,7 @@ export async function insertCustomer(
   overrides: { name?: string; phone?: string; email?: string } = {},
 ): Promise<{ id: string; name: string; phone: string; email: string }> {
   const name = overrides.name ?? 'Juan Perez';
-  const phone = overrides.phone ?? '5215555550100';
+  const phone = overrides.phone ?? derivePhone(id);
   const email = overrides.email ?? `${id}@example.test`;
   await q.query(
     `INSERT INTO "customer" (id, name, phone, email)

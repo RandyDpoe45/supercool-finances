@@ -6,7 +6,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * - `customer`: the money-domain profile Keycloak does not hold. PK `id` is the Keycloak `sub`
  *   — the SAME value stored in `account.owner_id`, so it stays `varchar` and `owner_id` gains
- *   an FK to it with NO type change and NO risky column ALTER.
+ *   an FK to it with NO type change and NO risky column ALTER. `phone` and `email` are UNIQUE
+ *   (indexes `uq_customer_phone` / `uq_customer_email`); both are NOT NULL, so no multi-NULL concern.
  * - `account.account_number`: the human destination identifier (a unique 10-digit numeric
  *   string), NULLable and on customer accounts only. A PLAIN unique index enforces uniqueness —
  *   Postgres allows multiple NULLs, so the system/clearing accounts (NULL number) never collide.
@@ -28,6 +29,9 @@ export class CreateCustomerAndAccountNumber1789084800000 implements MigrationInt
         "updated_at" timestamptz NOT NULL DEFAULT now()
       )
     `);
+    // phone / email are unique per customer (both NOT NULL, so no multi-NULL concern).
+    await queryRunner.query(`CREATE UNIQUE INDEX "uq_customer_phone" ON "customer" ("phone")`);
+    await queryRunner.query(`CREATE UNIQUE INDEX "uq_customer_email" ON "customer" ("email")`);
 
     await queryRunner.query(`ALTER TABLE "account" ADD COLUMN "account_number" varchar`);
     // Unique across customer account numbers; multiple NULLs (system accounts) coexist.
@@ -44,6 +48,8 @@ export class CreateCustomerAndAccountNumber1789084800000 implements MigrationInt
     await queryRunner.query(`ALTER TABLE "account" DROP CONSTRAINT "fk_account_owner"`);
     await queryRunner.query(`DROP INDEX "uq_account_account_number"`);
     await queryRunner.query(`ALTER TABLE "account" DROP COLUMN "account_number"`);
+    await queryRunner.query(`DROP INDEX "uq_customer_email"`);
+    await queryRunner.query(`DROP INDEX "uq_customer_phone"`);
     await queryRunner.query(`DROP TABLE "customer"`);
   }
 }

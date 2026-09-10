@@ -16,9 +16,11 @@
  * the resolve→initiate gate (a well-formed but unissued token → 409 DESTINATION_NOT_CONFIRMED; a
  * bad account number → 400 zod); the DomainError→HTTP mapping AT THE EDGE (the response `error.code`
  * is the DOMAIN code); object-level authorization (X-User-Id scoping; non-owned → 404, never a
- * leak); and the anti-leak whitelist DTOs — TransferDto / PendingAuthorizationDto expose HUMAN
- * account NUMBERS (never the raw account UUIDs) and never `initiatedBy`/owner. A wrong status, a
- * status-derived code, an authorization leak, a leaked owner id, or a leaked raw name FAILS a test.
+ * leak); and the anti-leak whitelist DTOs — TransferDto / PendingAuthorizationDto expose the
+ * caller's OWN `sourceAccountId` (a UUID, mirrors `AccountDto.id`, not a leak) and the DESTINATION
+ * as a human account NUMBER (never the destination's raw UUID) and never `initiatedBy`/owner. A
+ * wrong status, a status-derived code, an authorization leak, a leaked owner id, a leaked
+ * destination UUID, or a leaked raw name FAILS a test.
  *
  * Honest-SKIP: OPT-IN via BALANCE_INTEGRATION=1 (the write path hits Postgres AND Redis). beforeAll
  * TCP-probes both and fails loud if unreachable; boots AppModule (migrationsRun:true). Unique
@@ -366,9 +368,9 @@ suite(
       expect(byId.get(dst.id)).toBe('4000');
     });
 
-    // ---- TransferDto over the wire: human numbers, no UUID / initiatedBy leak -------------
+    // ---- TransferDto over the wire: caller's own source id + destination number ----------
 
-    it('the Transfer DTO exposes the ACCOUNT NUMBERS (not the raw account UUIDs) and never initiatedBy/owner', async () => {
+    it("the Transfer DTO exposes the caller's OWN sourceAccountId + the destination account NUMBER (never the destination raw UUID) and never initiatedBy/owner", async () => {
       const owner = newOwner();
       const src = await mkCustomer(owner, { balance: 10000 });
       const dst = await mkCustomer(newOwner(), { balance: 0 });
@@ -377,18 +379,20 @@ suite(
       expect(res.status).toBe(201);
 
       const t = res.body?.transfer ?? res.body?.transaction ?? res.body;
-      expect(t.sourceAccountNumber).toBe(src.account_number);
+      // Source is the caller's OWN account id (a UUID equal to the seeded source id) — mirrors
+      // AccountDto.id, not a leak. Destination stays a human NUMBER (never the internal UUID).
+      expect(t.sourceAccountId).toBe(src.id);
       expect(t.destinationAccountNumber).toBe(dst.account_number);
 
       const serialized = JSON.stringify(res.body);
-      // The raw account UUIDs and the owner sub are NEVER on the wire (serialization security).
-      expect(serialized).not.toContain(src.id);
+      // The DESTINATION's raw UUID and the owner sub are NEVER on the wire (serialization security);
+      // the caller's own source id IS expected (asserted above), so it is not checked for absence.
       expect(serialized).not.toContain(dst.id);
       expect(serialized).not.toContain(owner);
       expect(serialized.toLowerCase()).not.toContain('initiatedby');
     });
 
-    it('GET /api/pending-authorizations exposes numbers + the destination masked name, no UUID/owner leak', async () => {
+    it("GET /api/pending-authorizations exposes the caller's source account id + destination number + masked name, no destination-UUID/owner leak", async () => {
       const owner = newOwner();
       const src = await mkCustomer(owner, { balance: 10000 });
       const dst = await mkCustomer(newOwner(), { name: 'Juan Perez', balance: 0 });
@@ -400,13 +404,15 @@ suite(
       expect(res.status).toBe(200);
       const entry = pendingList(res.body).find((t) => idOf(t) === transferId);
       expect(entry).toBeTruthy();
-      expect(entry.sourceAccountNumber).toBe(src.account_number);
+      // Source is the caller's OWN account id (UUID equal to the seeded source id), not a leak.
+      expect(entry.sourceAccountId).toBe(src.id);
       expect(entry.destinationAccountNumber).toBe(dst.account_number);
       expect(entry.destinationMaskedName).toBe('Jua** Per**'); // masked, never the raw name
 
       const serialized = JSON.stringify(res.body);
+      // Destination holder PII and the destination's raw UUID never cross the wire; the owner sub
+      // is withheld. The caller's own source id IS expected (asserted above), so not checked here.
       expect(serialized).not.toContain('Juan Perez');
-      expect(serialized).not.toContain(src.id);
       expect(serialized).not.toContain(dst.id);
       expect(serialized).not.toContain(owner);
     });

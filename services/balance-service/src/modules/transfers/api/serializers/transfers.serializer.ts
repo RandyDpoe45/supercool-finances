@@ -11,11 +11,13 @@ import { TransferDto } from '../dto/transfer.dto';
  * The anti-leak transport boundary for the transfers `/api` reads/writes: pure view→DTO
  * serializers that list every output field EXPLICITLY and MUST NOT spread the entity/view —
  * internal columns (`initiatedBy`, `failureReason`, `failedAt`, `payeeId`,
- * `reversesTransactionId`, and the raw debit/credit account UUIDs) must never reach the wire.
- * Adding a field is a deliberate act.
+ * `reversesTransactionId`, and the raw CREDIT account UUID) must never reach the wire. The
+ * SOURCE (debit) account id IS exposed as `sourceAccountId` — it is the caller's own account,
+ * exactly as `AccountDto.id` is shown to its owner. Adding a field is a deliberate act.
  *
- * The service resolves the human account numbers (and the destination masked name) onto a view
- * model; these serializers whitelist that view — the raw entity/PII never crosses this boundary.
+ * The service resolves the DESTINATION human account number (and the destination masked name)
+ * onto a view model and carries the source account id straight from the transaction; these
+ * serializers whitelist that view — the raw entity/PII never crosses this boundary.
  */
 
 /** `postedAt` is `null` while PENDING; both timestamps render as ISO-8601 UTC instants. */
@@ -27,7 +29,7 @@ export function serializeTransfer(view: TransferView): TransferDto {
     status: transaction.status,
     amount: transaction.amount,
     currency: transaction.currency,
-    sourceAccountNumber: view.sourceAccountNumber,
+    sourceAccountId: transaction.debitAccountId,
     destinationAccountNumber: view.destinationAccountNumber,
     createdAt: transaction.createdAt.toISOString(),
     postedAt: transaction.postedAt ? transaction.postedAt.toISOString() : null,
@@ -43,7 +45,7 @@ export function serializePendingAuthorization(
     type: transaction.type,
     amount: transaction.amount,
     currency: transaction.currency,
-    sourceAccountNumber: view.sourceAccountNumber,
+    sourceAccountId: transaction.debitAccountId,
     destinationAccountNumber: view.destinationAccountNumber,
     destinationMaskedName: view.destinationMaskedName,
     createdAt: transaction.createdAt.toISOString(),
