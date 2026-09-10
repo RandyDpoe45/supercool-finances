@@ -5,10 +5,11 @@
 # it GROWS ONE SERVICE PER STEP as the specs are built (see specs/README.md).
 # It is NOT a final integration task — it exists from step 0 and accretes.
 #
-# Current state — Step 3 (spec 03, balance-service + analytics-server foundation skeletons):
+# Current state — Step 4 (spec 06, PUBLIC EDGE half: public-kong + public-nginx):
 #   - The five networks (§2) are declared. `data` carries the datastores; `keycloak`
-#     now also joins `app-public`, `app-internal` and `data` (spec 00 §2). The
-#     `edge-*` networks remain empty until step 4 adds the gateways/nginx.
+#     also joins `app-public`, `app-internal` and `data` (spec 00 §2). `edge-public`
+#     + `app-public` now have members (the public gateway/front door below);
+#     `edge-internal` stays empty until the internal-edge half arrives (see below).
 #     Isolation is by network MEMBERSHIP + not publishing ports — so these are
 #     plain bridge networks (no `internal: true`).
 #   - `keycloak` (spec 02): quay.io/keycloak/keycloak, pinned tag (NOT :latest — a
@@ -63,10 +64,11 @@
 #                        (ledger, transfers, limits, OTP module, outbox relay).
 #   - Step 3  (spec 05): `analytics-server`    — EXTENDED with the stream consumer,
 #                        Mongo read model + reporting API (/admin) over it.
-#   - Step 4  (spec 06): `public-kong`         — joins edge-public, app-public.
+#   - Step 4  (spec 06, INTERNAL EDGE half — separate PR): the private plane.
 #                        `internal-kong`       — joins edge-internal, app-internal.
-#                        `public-nginx`        — joins edge-public   (host-published :8080).
 #                        `internal-nginx`      — joins edge-internal (host-published :8081, demo-only).
+#                        (The PUBLIC edge half — public-kong + public-nginx — is
+#                         already wired below.)
 #
 # Startup order (spec 00 §5) is enforced as services arrive via
 #   depends_on: { <dep>: { condition: service_healthy } }
@@ -291,6 +293,11 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       # Shared secret for the /internal service-identity guard.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN}
+      # Money-domain secrets (specs 04 step 4a / 5c) the env schema REQUIRES at
+      # boot: OTP pepper (keyed HMAC for OTP codes at rest) + the external-rail
+      # webhook HMAC signing secret. Distinct trust domains; both min 16 chars.
+      OTP_HASH_SECRET: ${OTP_HASH_SECRET}
+      RAILS_WEBHOOK_SIGNING_SECRET: ${RAILS_WEBHOOK_SIGNING_SECRET}
     healthcheck:
       # Node HTTP probe (alpine ships node): fails unless readiness is UP (the
       # endpoint returns 503 when Postgres is unreachable). GET /internal/health is
@@ -365,3 +372,93 @@ services:
       # app-public, NOT edge-* (spec 00 §2). Host-unpublished.
       - app-internal
       - data
+
+  # Public API gateway (spec 06, public edge) — the PEP for the customer plane.
+  # Stock modern Kong 3.x (pinned), DB-LESS from the committed declarative kong.yml
+  # (config as code, spec 00 §4). The allowlist in that file IS the exposed surface
+  # (ADR-12): only the SERVICE-NAMESPACED /balance/api -> balance-service (ADR-17:
+  # Kong strips /balance so the upstream still gets /api), default-deny everything
+  # else (bare /api, /balance/admin, /admin all 404 — admin off this plane). On that
+  # route a `pre-function` (serverless-functions) OWNS the security-critical
+  # auth (developer ruling): it STRIPS any client-supplied identity headers,
+  # verifies the token against Keycloak's JWKS (RS256 signature + iss + aud + exp +
+  # realm role `customer`) using vetted crypto (Kong's core jwt_parser +
+  # lua-resty-openssl), and INJECTS the trusted X-User-Id (sub) / X-Roles — the
+  # exact contract the balance service's gateway guard consumes. Fails closed. All
+  # required libs ship in the image, so no custom build is needed. Joins edge-public
+  # (<- public-nginx) + app-public (-> balance-service + keycloak alias); NEVER
+  # host-published (only public-nginx is). See infra/kong-public/README.md.
+  public-kong:
+    # Pinned tag (NOT :latest) — reproducible-from-zero, same rationale as the
+    # other image pins.
+    image: kong:3.9.0
+    restart: unless-stopped
+    environment:
+      # DB-less: no Postgres; the declarative config is the whole data plane.
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      # Only the bundled plugins are used (pre-function, cors, rate-limiting).
+      KONG_PLUGINS: bundled
+      # The pre-function `require`s Kong core + crypto modules; the declarative Lua
+      # is OURS (committed + reviewed), so it runs trusted, not sandboxed.
+      KONG_UNTRUSTED_LUA: "on"
+      # HTTP-only on localhost (spec 06, TLS resolved as plain HTTP): bind just the
+      # plaintext proxy on :8000 — no :8443 ssl listener, no cert needed.
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      # DB-less needs no runtime Admin API; keep it off (nothing to administer,
+      # smaller attack surface). The healthcheck below uses the `kong` CLI, not it.
+      KONG_ADMIN_LISTEN: "off"
+    volumes:
+      # Declarative config mounted read-only (config as code). The auth logic lives
+      # inside it (the pre-function); no image build required.
+      - ./infra/kong-public/kong.yml:/kong/kong.yml:ro
+    healthcheck:
+      # `kong health` checks the local node's processes (no Admin API required).
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      # Startup chain (spec 00 §5): the upstream it fronts + the IdP it validates
+      # tokens against must be healthy before the gateway accepts traffic.
+      balance-service:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - edge-public
+      - app-public
+
+  # Public front door (spec 06, public edge) — the ONLY host-published surface of
+  # the public plane. Reverse-proxies the service-namespaced /balance/api/* ->
+  # public-kong (ADR-17: Kong strips /balance so balance-service gets /api/*) and
+  # will serve the customer + OTP SPA bundles at / in spec 08 (placeholder root
+  # until then). Stock nginx image
+  # with a read-only mounted conf (config as code); no custom image needed. Plain
+  # HTTP on localhost — TLS is NOT terminated here for this demo (spec 06, open
+  # question resolved). Joins edge-public ONLY (it never reaches services
+  # directly). See infra/nginx-public/README.md.
+  public-nginx:
+    # Pinned tag (NOT :latest) — reproducible-from-zero, same rationale as the
+    # other image pins.
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./infra/nginx-public/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      # busybox wget (ships in the alpine image) against the nginx-local /healthz.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      # The gateway it fronts must be healthy first (otherwise /balance/api -> 502).
+      public-kong:
+        condition: service_healthy
+    networks:
+      - edge-public
+    ports:
+      # The public HTTP edge (macro host-port contract, .env.example): 8080 -> 80.
+      - "${PUBLIC_HTTP_PORT}:80"

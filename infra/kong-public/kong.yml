@@ -1,0 +1,261 @@
+# =============================================================================
+# public-kong — DB-less declarative config (spec 06, public edge).
+#
+# THE ALLOWLIST *IS* THE EXPOSED SURFACE (ADR-12): the only route declared here
+# is `/balance/api` -> balance-service (SERVICE-NAMESPACED, ADR-17: Kong strips the
+# `/balance` service segment so the upstream still gets its built `/api` surface).
+# There is NO catch-all, so anything else — bare `/api`, `/balance/admin`, `/admin`
+# — is a 404 at the gateway (default-deny; admin stays unreachable on this plane).
+# Adding a public endpoint means adding a route here — explicit and auditable.
+#
+# Auth model: modern OSS Kong 3.x with JWKS verification implemented in a
+# `pre-function` (serverless-functions) using vetted crypto — Kong's core
+# `jwt_parser` for parsing and `lua-resty-openssl` for JWK -> RSA key + RS256
+# verify. We deliberately OWN this security-critical Lua at the money boundary
+# (developer ruling), rather than depend on the abandoned `jwt-keycloak` rock.
+#
+# Plugin chain on the /balance/api route (by Kong access-phase priority, high -> low):
+#   pre-function (1000000) — strip inbound identity, JWKS-verify, inject identity
+#   cors (2000)            — CORS + preflight for the SPA origin
+#   rate-limiting (901)    — per-IP fixed-window cap (429 on burst)
+#
+# The pre-function runs FIRST and FAILS CLOSED: no request reaches the upstream
+# without a fully verified customer token, and a client-supplied
+# X-User-Id/X-Roles is stripped before anything else. See kong-public/README.md.
+# =============================================================================
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: balance-service-api
+    # In-network upstream on app-public (spec 00 §2). Plain HTTP on localhost.
+    # The service PATH is `/api`: Kong prepends it to the stripped request path,
+    # so a route match on `/balance/api` still delivers the built `/api/...`
+    # surface to balance-service (its controllers + the guard's first-segment
+    # check are unchanged). See docs/DECISIONS.md (ADR-17) + kong-public/README.md.
+    url: http://balance-service:3000/api
+    routes:
+      - name: balance-api
+        # Service-namespaced external path (ADR-17). `strip_path: true` removes
+        # the matched `/balance/api` prefix; the service path `/api` is then
+        # prepended, so `/balance/api/whoami` -> upstream `/api/whoami`. The strip
+        # is SECURITY-LOAD-BEARING: the balance guard only enforces the admin-role
+        # check when the first path segment is `admin`, so `/balance/admin` must
+        # NEVER reach it un-namespaced — and here only `/balance/api` is routed.
+        paths:
+          - /balance/api
+        strip_path: true
+        plugins:
+          # --- Identity gate: strip -> JWKS-verify -> inject (see README). ----
+          - name: pre-function
+            config:
+              access:
+                - |
+                  -- Public-edge identity gate (spec 06). Access phase, runs BEFORE
+                  -- every other plugin (pre-function PRIORITY 1000000). FAIL CLOSED:
+                  -- any failure rejects and never forwards upstream / injects.
+                  local http       = require "resty.http"
+                  local pkey       = require "resty.openssl.pkey"
+                  local jwt_parser = require "kong.plugins.jwt.jwt_parser"
+                  local cjson      = require "cjson.safe"
+
+                  -- Fixed, non-secret config (see infra/kong-public/README.md).
+                  -- DB-less config cannot interpolate env, so the issuer is literal;
+                  -- keep it in sync with KC_HOSTNAME / KEYCLOAK_PORT.
+                  local ISSUER           = "http://keycloak.localtest.me:8082/realms/supercool"
+                  local JWKS_URI         = ISSUER .. "/protocol/openid-connect/certs"
+                  local EXPECTED_AUD     = "supercool-api"
+                  local REQUIRED_ROLE    = "customer"
+                  local CLOCK_SKEW       = 60      -- seconds tolerated on exp/nbf
+                  local JWKS_TTL         = 300     -- positive JWKS cache (seconds)
+                  local REFETCH_THROTTLE = 30      -- min seconds between forced refetches
+                  local HTTP_TIMEOUT_MS  = 3000
+                  local CACHE_KEY        = "supercool:public-jwks"
+                  local THROTTLE_KEY     = "supercool:public-jwks:refetch"
+                  local DICT             = ngx.shared.kong   -- node-local JWKS cache + throttle
+
+                  -- (1) ANTI-SPOOF: strip client-supplied identity FIRST, before any
+                  -- early return, so a spoofed X-User-Id/X-Roles never survives.
+                  kong.service.request.clear_header("X-User-Id")
+                  kong.service.request.clear_header("X-Roles")
+
+                  -- Genuine CORS preflight carries no credentials; defer to `cors`.
+                  if kong.request.get_method() == "OPTIONS"
+                     and kong.request.get_header("access-control-request-method") then
+                    return
+                  end
+
+                  local function deny(status)
+                    return kong.response.exit(status,
+                      { message = status == 403 and "Forbidden" or "Unauthorized" })
+                  end
+
+                  -- (2) Bearer token from the Authorization header ONLY. The auth
+                  -- scheme is case-insensitive (RFC 7235), so match it case-blind.
+                  local auth = kong.request.get_header("authorization")
+                  local scheme, token
+                  if auth then scheme, token = auth:match("^(%a+)%s+(%S+)%s*$") end
+                  if not scheme or scheme:lower() ~= "bearer" or not token then
+                    return deny(401)
+                  end
+
+                  -- Parse with Kong's vetted core parser (base64url + structure).
+                  local jwt, perr = jwt_parser:new(token)
+                  if perr or not jwt then return deny(401) end
+
+                  -- (4) Algorithm pin: RS256 ONLY — reject alg:none / HS* / others
+                  -- BEFORE any verification (algorithm-confusion defense).
+                  if not jwt.header or jwt.header.alg ~= "RS256" then return deny(401) end
+                  local kid = jwt.header.kid
+                  if type(kid) ~= "string" or kid == "" then return deny(401) end
+
+                  -- (3) JWKS fetch (cached) + select by kid.
+                  local function fetch_jwks()
+                    local httpc = http.new()
+                    httpc:set_timeout(HTTP_TIMEOUT_MS)
+                    local res, err = httpc:request_uri(JWKS_URI, { method = "GET" })
+                    if not res then return nil, "jwks fetch: " .. tostring(err) end
+                    if res.status ~= 200 then return nil, "jwks status " .. tostring(res.status) end
+                    local body = cjson.decode(res.body)
+                    if type(body) ~= "table" or type(body.keys) ~= "table" then
+                      return nil, "jwks malformed"
+                    end
+                    local by_kid = {}
+                    for _, k in ipairs(body.keys) do
+                      -- RSA signing keys only; keep just the params openssl needs.
+                      if type(k) == "table" and k.kty == "RSA" and type(k.kid) == "string"
+                         and (k.use == nil or k.use == "sig")
+                         and (k.alg == nil or k.alg == "RS256") then
+                        by_kid[k.kid] = cjson.encode({ kty = "RSA", n = k.n, e = k.e })
+                      end
+                    end
+                    return by_kid
+                  end
+
+                  -- The JWKS positive cache lives in the `kong` shared dict directly.
+                  -- (kong.cache is avoided on purpose: its plugin-facing object has no
+                  -- working write/invalidate that composes with its get — safe_set and
+                  -- get use different key namespaces — so a forced refetch could never
+                  -- persist. Owning get/set here makes rotation actually stick.)
+                  local function cached_jwks()
+                    if not DICT then return nil end
+                    local raw = DICT:get(CACHE_KEY)
+                    if not raw then return nil end
+                    local map = cjson.decode(raw)
+                    return type(map) == "table" and map or nil
+                  end
+
+                  local function refresh_jwks()
+                    -- Fetch fresh + persist as JSON with a TTL. Persisting is best-effort
+                    -- (the cache is an optimization; verification still works on a miss),
+                    -- and errors return (nil, err) so a fail stays closed downstream.
+                    local map, err = fetch_jwks()
+                    if type(map) ~= "table" then return nil, err end
+                    if DICT then DICT:set(CACHE_KEY, cjson.encode(map), JWKS_TTL) end
+                    return map
+                  end
+
+                  local jwks = cached_jwks() or refresh_jwks()
+                  if type(jwks) ~= "table" then return deny(401) end
+
+                  local jwk_json = jwks[kid]
+                  if not jwk_json then
+                    -- Unknown kid (rotation OR attacker): allow ONE forced refetch per
+                    -- REFETCH_THROTTLE window (atomic shared-dict add) so a bad kid
+                    -- cannot hammer Keycloak. A success repopulates the cache (via
+                    -- refresh_jwks), so a rotated key sticks for subsequent requests.
+                    if DICT and DICT:add(THROTTLE_KEY, 1, REFETCH_THROTTLE) then
+                      local fresh = refresh_jwks()
+                      jwk_json = type(fresh) == "table" and fresh[kid] or nil
+                    end
+                    if not jwk_json then return deny(401) end
+                  end
+
+                  -- Build the RSA public key from the JWK params (vetted; no
+                  -- hand-rolled base64url/bignum).
+                  local pub = pkey.new(jwk_json, { format = "JWK" })
+                  if not pub then return deny(401) end
+
+                  -- Verify RS256: RSA key + SHA-256 over the EXACT signing input. The
+                  -- method is fixed (not read from the token header) -> cannot be
+                  -- tricked into HMAC.
+                  local signing_input = jwt.header_64 .. "." .. jwt.claims_64
+                  if pub:verify(jwt.signature, signing_input, "sha256") ~= true then
+                    return deny(401)
+                  end
+
+                  -- (5) Claims.
+                  local claims = jwt.claims or {}
+                  if claims.iss ~= ISSUER then return deny(401) end   -- exact issuer
+
+                  local aud, aud_ok = claims.aud, false               -- string OR array
+                  if type(aud) == "table" then
+                    for _, v in ipairs(aud) do
+                      if v == EXPECTED_AUD then aud_ok = true break end
+                    end
+                  else
+                    aud_ok = (aud == EXPECTED_AUD)
+                  end
+                  if not aud_ok then return deny(401) end
+
+                  local now = ngx.now()
+                  local exp = tonumber(claims.exp)
+                  if not exp or now - CLOCK_SKEW >= exp then return deny(401) end
+                  local nbf = tonumber(claims.nbf)
+                  if nbf and now + CLOCK_SKEW < nbf then return deny(401) end
+
+                  -- (6) Role gate: realm_access.roles must include `customer` (403);
+                  -- a missing/invalid token is 401 (matches gateway-identity.guard.ts).
+                  local sub = claims.sub
+                  if type(sub) ~= "string" or sub == "" then return deny(401) end
+                  local raw_roles = (type(claims.realm_access) == "table"
+                                     and type(claims.realm_access.roles) == "table")
+                                    and claims.realm_access.roles or {}
+                  -- X-Roles is a comma-delimited list the guard splits on ",", so a role
+                  -- string containing a comma would smuggle extra roles downstream. Drop
+                  -- any such role (and non-strings) before the gate AND the header.
+                  local roles = {}
+                  for _, r in ipairs(raw_roles) do
+                    if type(r) == "string" and not r:find(",", 1, true) then
+                      roles[#roles + 1] = r
+                    end
+                  end
+                  local has_role = false
+                  for _, r in ipairs(roles) do
+                    if r == REQUIRED_ROLE then has_role = true break end
+                  end
+                  if not has_role then return deny(403) end
+
+                  -- (7) Inject the trusted identity (set_header overwrites; inbound
+                  -- already stripped at step 1).
+                  kong.service.request.set_header("X-User-Id", sub)
+                  kong.service.request.set_header("X-Roles", table.concat(roles, ","))
+
+          # --- CORS: only the SPA origin; credentials allowed (so no `*`). ----
+          - name: cors
+            config:
+              origins:
+                - http://localhost:8080
+              methods:
+                - GET
+                - POST
+                - PUT
+                - PATCH
+                - DELETE
+                - OPTIONS
+              headers:
+                - Authorization
+                - Content-Type
+              credentials: true
+              max_age: 3600
+              preflight_continue: false
+
+          # --- Rate limit: per-IP fixed window; local counter (DB-less). ------
+          # A burst above the cap returns 429 (DoD). Tune the cap in one place.
+          - name: rate-limiting
+            config:
+              minute: 60
+              policy: local
+              limit_by: ip
+              fault_tolerant: true
+              hide_client_headers: false
