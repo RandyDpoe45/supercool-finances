@@ -1,9 +1,11 @@
 import { baseApi } from './baseApi';
-import type { AccountDto, AccountsResponse } from './contracts/accounts';
+import type { AccountDto, AccountsResponse, StatementResponse } from './contracts/accounts';
 
 /**
- * The `/api/accounts` read endpoint — the one authenticated smoke call for F1. It
- * unwraps the `{ accounts }` envelope so consumers get the array directly.
+ * The `/api/accounts` read endpoints. `getAccounts` unwraps the `{ accounts }` envelope so
+ * consumers get the array directly; `getAccountStatement` keeps its `{ accountId, entries }`
+ * envelope (the caller reads `.entries`, which arrive newest-first from the server). Both
+ * reuse `baseApi`'s bearer wiring.
  */
 export const accountsApi = baseApi.injectEndpoints({
   endpoints: (build) => ({
@@ -18,7 +20,11 @@ export const accountsApi = baseApi.injectEndpoints({
             ]
           : [{ type: 'Account' as const, id: 'LIST' }],
     }),
+    getAccountStatement: build.query<StatementResponse, string>({
+      query: (accountId) => `accounts/${encodeURIComponent(accountId)}/transactions`,
+      providesTags: (_result, _error, accountId) => [{ type: 'Account' as const, id: accountId }],
+    }),
   }),
 });
 
-export const { useGetAccountsQuery } = accountsApi;
+export const { useGetAccountsQuery, useGetAccountStatementQuery } = accountsApi;

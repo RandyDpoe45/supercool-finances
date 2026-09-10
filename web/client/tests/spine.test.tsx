@@ -32,6 +32,15 @@ vi.mock('react-oidc-context', () => ({
   AuthProvider: ({ children }: { children?: unknown }) => children,
 }));
 
+// Hand-computed formatted `available` per fixture account (minor units → grouped major,
+// MXN exponent 2). Derived by hand — NOT from lib/money — so this spine proof also catches
+// a formatter that leaked raw minor units to the DOM. Account 1: '1500000' -> '15,000.00';
+// account 2: '245075' -> '2,450.75'.
+const EXPECTED_FORMATTED_AVAILABLE: Record<string, string> = {
+  '11111111-1111-4111-8111-111111111111': '15,000.00',
+  '22222222-2222-4222-8222-222222222222': '2,450.75',
+};
+
 function makeUser(expiresAt: number): User {
   return new User({
     access_token: 'spine-access-token',
@@ -76,14 +85,17 @@ describe('client-app spine', () => {
     const items = within(list).getAllByRole('listitem');
     expect(items).toHaveLength(fixtureAccounts.length);
 
-    // Every stub account reaches the DOM with its identifier, derived available, and
+    // Every stub account reaches the DOM with its identifier, its FORMATTED available, and
     // currency — proving token → bearer → /api/accounts → transform → render end to end.
+    // F2 formats money at the edge, so the DOM shows the grouped human amount, and the raw
+    // minor-unit string must NOT be present (raw units must never be visible/SR text).
     for (const account of fixtureAccounts) {
       const line = items.find((item) =>
         item.textContent?.includes(account.accountNumber ?? account.id),
       );
       expect(line, `account ${account.id} should be rendered`).toBeDefined();
-      expect(line?.textContent).toContain(account.available);
+      expect(line?.textContent).toContain(EXPECTED_FORMATTED_AVAILABLE[account.id]);
+      expect(line?.textContent).not.toContain(account.available);
       expect(line?.textContent).toContain(account.currency);
     }
 
