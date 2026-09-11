@@ -1,4 +1,5 @@
 import { QueryRunner } from 'typeorm';
+import { AuditLog } from '../../../../database/entities/audit-log.entity';
 
 /** DI token for {@link IAuditService}. Consumers depend on the interface via this token, never
  * the concrete class. */
@@ -34,6 +35,18 @@ export interface AuditEntry {
   metadata?: Record<string, unknown> | null;
 }
 
+/** The admin audit-log query ({@link IAuditService.listAudit}, `GET /admin/audit`). Every field is
+ * optional; each present filter is an EXACT-match predicate. `limit` / `offset` are the caller's
+ * requested paging and are CLAMPED by the service (default 50, max 200, offset ≥ 0). */
+export interface ListAuditQuery {
+  actorId?: string;
+  action?: string;
+  targetType?: string;
+  targetId?: string;
+  limit?: number;
+  offset?: number;
+}
+
 /**
  * The cross-cutting audit service (spec 04 "Admin ops": every mutating admin action writes the
  * audit log). Two write paths, chosen by whether the money/state change shares a transaction with
@@ -52,4 +65,14 @@ export interface IAuditService {
   recordInTx(queryRunner: QueryRunner, entry: AuditEntry): Promise<void>;
   /** Insert one audit row in its own auto-commit transaction. */
   record(entry: AuditEntry): Promise<void>;
+  /**
+   * Admin `GET /admin/audit` — browse the audit log (spec 04 "Admin ops"). The READ companion to the
+   * write paths above: it is DELIBERATELY NOT owner-scoped (the audit log records privileged admin
+   * actions, which have no customer owner — the role-gated admin surface sees them all). Applies each
+   * present filter as an exact match, CLAMPS the requested paging (default 50, max 200, offset ≥ 0 —
+   * never an unbounded scan), and delegates to the parameterized repository query. A pure READ — it
+   * writes NO audit row and opens NO transaction. Returns entities newest-first; the controller
+   * serializes them.
+   */
+  listAudit(query: ListAuditQuery): Promise<AuditLog[]>;
 }

@@ -5,6 +5,7 @@ import { ApprovalsModule } from '../approvals/approvals.module';
 import { ApprovalsAdminController } from '../approvals/admin/approvals-admin.controller';
 import { ReversalsAdminController } from '../approvals/admin/reversals-admin.controller';
 import { AuditModule } from '../audit/audit.module';
+import { AuditAdminController } from '../audit/admin/audit-admin.controller';
 import { LimitsModule } from '../limits/limits.module';
 import { LimitsAdminController } from '../limits/admin/limits-admin.controller';
 import { RailsModule } from '../rails/rails.module';
@@ -28,9 +29,12 @@ import { AdminController } from './admin.controller';
  *   deliberately NOT owner-scoped.
  * - `RailsAdminController` — trigger a simulated external inbound, injecting `RAILS_SERVICE`
  *   ({@link RailsModule}) and `AUDIT_SERVICE` ({@link AuditModule}).
+ * - `AuditAdminController` — `GET /admin/audit` (browse the audit log — a NON-owner-scoped read,
+ *   writes NO audit row, opens NO transaction), injecting `AUDIT_SERVICE` ({@link AuditModule}).
  *
- * {@link AuditModule} is imported directly so `RailsAdminController` can inject `AUDIT_SERVICE`
- * (the accounts/limits services import it themselves for their in-tx audit). Step 8b adds the
+ * {@link AuditModule} is imported directly so `RailsAdminController` and `AuditAdminController` can
+ * inject `AUDIT_SERVICE` (the accounts/limits services import it themselves for their in-tx audit).
+ * Step 8b adds the
  * maker-checker reversals: {@link ApprovalsModule} provides `APPROVAL_SERVICE` for the two
  * controllers this registry now also declares — `ReversalsAdminController` (the maker's
  * `POST /admin/transfers/:id/reverse`) and `ApprovalsAdminController` (the checker's
@@ -53,6 +57,7 @@ import { AdminController } from './admin.controller';
     RailsAdminController,
     ReversalsAdminController,
     ApprovalsAdminController,
+    AuditAdminController,
   ],
 })
 export class AdminModule {}

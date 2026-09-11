@@ -1378,6 +1378,79 @@ export function getAuditLogRepositoryToken(): symbol {
   return getRepositoryToken('AUDIT_LOG_REPOSITORY', 'audit-log');
 }
 
+/**
+ * The `AuditService` CLASS, for the pure unit spec that drives the admin `GET /admin/audit`
+ * read (`listAudit(query)`) through a Nest TestingModule + useMocker (so injection is
+ * order-independent, like the accounts/limits unit specs). The clamp/delegation logic under test is
+ * the service's own; the `AUDIT_LOG_REPOSITORY` collaborator is mocked BY token. Scanned with
+ * `findExportAcross`; if the implementor moves/renames it, add the path/export HERE — the single
+ * coordination point.
+ */
+export function getAuditService(): any {
+  const cls = findExportAcross(
+    [
+      `${SRC}/modules/audit/service/impl/audit.service`,
+      `${SRC}/modules/audit/impl/audit.service`,
+      `${SRC}/modules/audit/audit.service`,
+      `${SRC}/modules/audit/service/audit.service`,
+    ],
+    ['AuditService'],
+  );
+  if (cls === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the AuditService class. If the implementor named/placed it ` +
+        `differently, add the path/export to tests/support/harness.ts:getAuditService — the single ` +
+        `coordination point.`,
+    );
+  }
+  return cls;
+}
+
+/**
+ * The wire-validation Zod schema for the admin `GET /admin/audit` query string
+ * (`listAuditQuerySchema`): a `.strict()` object with optional exact-match string filters
+ * (`actorId`/`action`/`targetType`/`targetId`) and coerced non-negative-integer `limit`/`offset`.
+ * Resolved as the SUT of the schema unit spec. If the implementor moves/renames it, add the
+ * path/export HERE — the single coordination point.
+ */
+export function getListAuditQuerySchema(): any {
+  return resolveOrThrow(
+    'the listAuditQuerySchema (GET /admin/audit query validation)',
+    [
+      `${SRC}/modules/audit/admin/dto/audit-query.schema`,
+      `${SRC}/modules/audit/admin/dto/audit.query.schema`,
+      `${SRC}/modules/audit/admin/dto/list-audit-query.schema`,
+    ],
+    ['listAuditQuerySchema', 'auditQuerySchema', 'listAuditQuery'],
+  );
+}
+
+/**
+ * The controller-boundary audit serializer `serializeAuditLog(entity) => AuditLogDto` — an explicit
+ * whitelist to `{ id, actorId, action, targetType, targetId, metadata, createdAt }` (the admin view
+ * DELIBERATELY surfaces the free-form `metadata` blob; `createdAt` rendered ISO-8601 UTC). Resolved as
+ * the SUT of the serializer unit spec. If the implementor moves/renames it, add the path/export HERE —
+ * the single coordination point.
+ */
+export function getAuditLogSerializer(): (row: any) => any {
+  const fn = findExportAcross(
+    [
+      `${SRC}/modules/audit/admin/serializers/audit-log.serializer`,
+      `${SRC}/modules/audit/admin/serializers/audit.serializer`,
+      `${SRC}/modules/audit/admin/serializers`,
+    ],
+    ['serializeAuditLog', 'toAuditLogDto', 'auditLogToDto'],
+  );
+  if (fn === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the audit serializer (serializeAuditLog). If the implementor ` +
+        `put it elsewhere, add the path/export to tests/support/harness.ts:getAuditLogSerializer — the ` +
+        `single coordination point.`,
+    );
+  }
+  return fn as (row: any) => any;
+}
+
 /** `LIMITS_SERVICE` — the DI token the LimitsModule binds the LimitsService to (`upsertLimits(actorId,
  *  input)` upserts the global baseline or a per-customer override, `ON CONFLICT (scope, owner_id)`, and
  *  audits `limits.change` with before/after). Resolved by token, never by class. */
