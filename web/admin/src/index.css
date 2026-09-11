@@ -112,3 +112,103 @@ main {
   background: rgba(26, 86, 219, 0.12);
   border-color: #1a56db;
 }
+
+/* Status badge ------------------------------------------------------------ */
+.badge {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.75rem;
+  border: 1px solid currentColor;
+}
+
+.badge--active {
+  color: #15803d;
+}
+
+.badge--frozen {
+  color: #b45309;
+}
+
+/* Data tables (accounts / limits) ----------------------------------------- */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+}
+
+.data-table th,
+.data-table td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  vertical-align: middle;
+}
+
+.data-table__amount {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.data-table__ref {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+}
+
+.data-table__muted {
+  opacity: 0.7;
+  font-size: 0.85em;
+}
+
+/* Filter bar + forms ------------------------------------------------------ */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.75rem 0;
+}
+
+.filter-bar input {
+  padding: 0.4rem 0.5rem;
+  font: inherit;
+}
+
+.limits-form {
+  display: grid;
+  gap: 0.4rem;
+  max-width: 26rem;
+}
+
+.limits-form label {
+  font-weight: 600;
+}
+
+.limits-form input,
+.limits-form select {
+  padding: 0.4rem 0.5rem;
+  font: inherit;
+}
+
+.cap-preview {
+  margin: 0.1rem 0 0;
+  font-size: 0.85rem;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
+.field-error {
+  color: #b91c1c;
+  margin: 0.1rem 0 0;
+  font-size: 0.9rem;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  align-items: center;
+}

@@ -17,10 +17,17 @@ matches `*.{test,spec}.{ts,tsx}` and these are `*.e2e.ts` under `tests/e2e/`.
   `GET /balance/admin/whoami` renders the gateway-resolved admin identity. Asserts the call
   carried a `Bearer` token, returned `200`, that the resolved identity carries the `admin`
   role, and that the resolved `userId` and role render on the Home page.
+- **`accounts.e2e.ts`** (Step A2) — the account-management and limits SCREENS are reachable on
+  the internal plane and their reads (`GET /balance/admin/accounts`, `GET /balance/admin/limits`)
+  traverse the gateway with an admin bearer (`200`) and render as tables. This is a **read smoke
+  on purpose**: the freeze/unfreeze and PUT-limits MUTATION flow is **deferred to spec 08** (when
+  seed data + the full stack exist) — mutating a shared seeded account/limit from a smoke test
+  would risk interfering with the transfer-with-OTP e2e that spec 08 enables, and asserting a
+  mutation without seed would be hollow.
 
-The account-management (freeze / limits), reversal **maker-checker** approval, audit, and
-analytics-dashboard flows are **later steps** and get their own e2e specs as those screens land;
-this file covers only the Step-1 auth shell.
+The reversal **maker-checker** approval, audit, and analytics-dashboard flows — and the
+account/limits **mutation** flow — are **later work** and get their own e2e specs as those
+screens/seeds land; these files cover the Step-1 auth shell and the Step-A2 read surface.
 
 ## Enabling them (spec 08)
 

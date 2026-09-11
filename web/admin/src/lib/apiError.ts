@@ -36,6 +36,26 @@ export function parseApiError(error: unknown): ParsedApiError {
   return parsed;
 }
 
+/**
+ * Map an RTK Query error into a short human phrase for a page's error state. Reads the normalized
+ * `{ status, code, message }` and never leaks the raw error envelope into the UI. `401` reads as a
+ * signed-out session (the fail-closed gate should catch this first); a `code` from the service
+ * envelope is preferred when present, otherwise the HTTP status.
+ */
+export function describeApiError(error: unknown): string {
+  const parsed = parseApiError(error);
+  if (parsed.status === 401) {
+    return 'not signed in';
+  }
+  if (parsed.code) {
+    return parsed.code;
+  }
+  if (parsed.status !== undefined) {
+    return `HTTP ${parsed.status}`;
+  }
+  return 'unknown error';
+}
+
 function isErrorResponse(value: unknown): value is ErrorResponse {
   if (value === null || typeof value !== 'object' || !('error' in value)) {
     return false;

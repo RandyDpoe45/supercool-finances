@@ -3,10 +3,11 @@
 The internal-plane admin dashboard for SuperCool Finances (spec 07). It logs in with its
 **own Keycloak client** and, once authenticated, calls the balance-service admin surface's
 **`whoami`** endpoint to render the signed-in admin identity — the auth-shell proof that a
-bearer round-trips through the gateway. The account-management (freeze / limits), reversal
-**maker-checker** approval, audit, and analytics-dashboard screens are **later steps**; this
-document covers the scaffold, the auth + data spine, the MSW stub harness, the root-served
-`:8081` serving topology, and the environment variables.
+bearer round-trips through the gateway. **Account management (freeze / unfreeze + view / edit
+limits) is built (Step A2)** — see "Account management" below. The reversal **maker-checker**
+approval, audit, and analytics-dashboard screens are **later steps**; this document covers the
+scaffold, the auth + data spine, the account-management screens, the MSW stub harness, the
+root-served `:8081` serving topology, and the environment variables.
 
 This app is **self-contained** (ADR-16): **no imports from other folders** and no shared
 component library. It is a SEPARATE project from `web/client` and `web/otp` — it does not, and
@@ -42,32 +43,42 @@ web/admin/
 ├── src/
 │   ├── main.tsx               # bootstrap: start MSW (dev) → render <App/>
 │   ├── App.tsx                # AuthProvider → Provider(store) → Router → AuthGate
-│   ├── app/routes.tsx         # authenticated routes (/ home, /analytics placeholder)
+│   ├── app/routes.tsx         # authenticated routes (/ home, /accounts, /limits, /analytics placeholder)
 │   ├── auth/
 │   │   ├── userManager.ts     # OIDC settings (admin-app client) + shared UserManager + getAccessToken()
 │   │   └── AuthGate.tsx       # protected-route gate (login redirect / callback / error)
 │   ├── store/                 # configureStore + typed hooks
 │   ├── lib/
-│   │   └── apiError.ts        # normalize an RTK Query error -> { status, code, message }
+│   │   ├── apiError.ts        # normalize an RTK Query error + describeApiError (short phrase)
+│   │   ├── money.ts           # float-free minor-unit formatting (BigInt/string) — app-local copy
+│   │   └── datetime.ts        # UTC -> America/Mexico_City rendering at the edge — app-local copy
 │   ├── services/api/
 │   │   ├── baseApi.ts         # createApi + fetchBaseQuery(prepareHeaders: bearer)
 │   │   ├── identityApi.ts     # getWhoami query (GET /balance/admin/whoami -> WhoamiDto)
-│   │   └── contracts/         # app-local copies of the /balance/admin wire contract (identity, error)
-│   ├── mocks/                 # MSW handlers, fixtures, browser worker, node server
+│   │   ├── accountsApi.ts     # getAccounts + freeze/unfreeze mutations (/admin/accounts)
+│   │   ├── limitsApi.ts       # getLimits + upsertLimits (/admin/limits)
+│   │   └── contracts/         # app-local copies of the /balance/admin wire contract (identity, error, account, limits)
+│   ├── mocks/                 # MSW handlers, fixtures, state (adminState), browser worker, node server
 │   └── components/            # atomic design: atoms / molecules / organisms / templates / pages
 └── tests/                     # test suite (segregated; owned by the test writer)
 ```
 
 The `components/` tree follows **atomic design** (atoms → molecules → organisms → templates →
-pages). Step 1 populates:
+pages). It currently holds:
 
-- **atoms** — `Alert` (role=alert/status).
+- **atoms** — `Alert` (role=alert/status), `Money` (float-free minor-unit rendering),
+  `StatusBadge` (account status pill), `Timestamp` (ISO UTC → Mexico City), `FieldError`
+  (inline form/server error).
+- **organisms** — `AccountsTable` (accounts list + per-row freeze/unfreeze),
+  `LimitsTable` (current baseline + overrides), `LimitsForm` (the `PUT /admin/limits` editor).
 - **templates** — `AppShell` (the authenticated frame: title + primary nav + sign-out).
-- **pages** — `HomePage` (the whoami identity landing / auth-shell proof), `AnalyticsPage`
-  (placeholder pending the analytics server).
+- **pages** — `HomePage` (the whoami identity landing / auth-shell proof), `AccountsPage`
+  (`/accounts`), `LimitsPage` (`/limits`), `AnalyticsPage` (placeholder pending the analytics
+  server).
 
-`molecules/` and `organisms/` are present but empty (`.gitkeep`); they fill in as the
-account-management, reversal, and audit screens land in later steps.
+`molecules/` is present but empty (`.gitkeep`); the reversal and audit screens land in later
+steps. `Money`, `StatusBadge`, `Timestamp`, and the `money.ts` / `datetime.ts` libs are
+**app-local copies** mirroring `web/client` (ADR-16 — no cross-folder imports).
 
 ## Serving topology (root-served on its own internal origin)
 
@@ -120,9 +131,25 @@ so they compose onto `/balance/admin` unchanged):
 - **`getWhoami`** (query, `GET /balance/admin/whoami` → `WhoamiDto`) — echoes the caller's
   gateway-resolved admin identity (`{ userId, roles }`). The response is the identity object
   directly (no envelope to unwrap). This is the Step-1 authenticated smoke call.
+- **`getAccounts`** (query, `GET /admin/accounts` → `AdminAccountDto[]`, `accountsApi.ts`) —
+  unwraps the `{ accounts }` envelope; takes an optional `{ ownerId }` filter (paging is
+  server-defaulted). `providesTags` a per-id tag + a LIST tag on `'Account'`.
+- **`freezeAccount` / `unfreezeAccount`** (mutations, `POST /admin/accounts/:id/freeze` |
+  `…/unfreeze` → `AdminAccountDto`) — no body; return the updated account and `invalidatesTags`
+  the account id + the `'Account'` LIST so the table reflects the new status.
+- **`getLimits`** (query, `GET /admin/limits` → `LimitsDto[]`, `limitsApi.ts`) — unwraps the
+  `{ limits }` envelope; optional `{ scope, ownerId }` filter. `providesTags` per-id + a LIST on
+  `'Limits'`.
+- **`upsertLimits`** (mutation, `PUT /admin/limits` → `LimitsDto`) — body `UpsertLimitsBody`;
+  `invalidatesTags` the `'Limits'` LIST.
 
-`tagTypes` are declared up front — `['Account', 'Transaction', 'Approval', 'Limits']` — for the
-account-management / reversals / limits screens that later steps add; `whoami` provides none.
+These reads (`GET /admin/accounts`, `GET /admin/limits`) are an **agreed contract stubbed in
+MSW pending the balance-side read endpoints** — the writes (`freeze`/`unfreeze`, `PUT
+/admin/limits`) mirror the real admin controllers.
+
+`tagTypes` are declared up front — `['Account', 'Transaction', 'Approval', 'Limits']` — on
+`baseApi`; account management uses `'Account'` and `'Limits'`, the reversals screen will use
+`'Transaction'` / `'Approval'`.
 
 **Two gateway namespaces (decision).** The admin app talks to **two** backend surfaces over
 the internal edge: the balance-service admin surface at `/balance/admin` (this `baseApi`) and
@@ -144,11 +171,28 @@ out of `vite build`), and the node server is imported solely by the test setup.
   contract: with a bearer it returns `200 { userId, roles }` (the `fixtureWhoami` identity);
   without a bearer it mirrors the admin gateway guard and returns **401** with the service-wide
   `{ error: { code, message, requestId } }` envelope (`requestId` via `crypto.randomUUID()`).
-- **Path note:** MSW intercepts the ORIGIN-ROOT path `/balance/admin/whoami` — that is the
+- It also implements the **account-management surface** (all bearer-gated → 401 otherwise):
+  - `GET /balance/admin/accounts` → `{ accounts }`; optional `ownerId` filter + `limit`/`offset`
+    paging (`limit` clamped ≤ 200, default 50; offset default 0).
+  - `POST /balance/admin/accounts/:id/freeze` | `…/unfreeze` → the updated `AdminAccountDto`;
+    a malformed (non-UUID) id is **400**, an unknown id **404**.
+  - `GET /balance/admin/limits` → `{ limits }`; optional `scope` / `ownerId` filter.
+  - `PUT /balance/admin/limits` → the upserted `LimitsDto`. A `.strict()` body (unknown key →
+    400); the **scope⇒ownerId rule** is enforced (`global` + an ownerId, or `customer` without
+    one → **400 `INVALID_LIMITS`**); caps must be unsigned minor-unit integer strings or null.
+- **Path note:** MSW intercepts the ORIGIN-ROOT path `/balance/admin/…` — that is the
   service-namespaced API path (ADR-17), NOT a SPA URL prefix. The admin SPA is root-served on
   its dedicated `:8081` origin, so this is simply the same-origin API path.
-- `src/mocks/fixtures/identity.ts` holds the seed identity (`admin-user-1`, roles `['admin']`).
-  A single read needs no mutable state module.
+- `src/mocks/fixtures/identity.ts` holds the seed identity (`admin-user-1`, roles `['admin']`);
+  `fixtures/accounts.ts` seeds the accounts (a mix of active/frozen, an owner with two accounts,
+  a null-owner system account) and `fixtures/limits.ts` the global baseline + one customer
+  override.
+- `src/mocks/state/adminState.ts` is the **mutable** stub state (freeze/unfreeze flip an
+  account's `status` + bump `updatedAt`; `upsertLimits` inserts/updates by (scope, ownerId,
+  currency)). It lives at **module scope**, so it **survives `server.resetHandlers()`** — tests
+  that mutate it must call the exported **`resetAdminState()`** to return to the pristine
+  fixtures (mirroring how `web/client` keeps `mocks/state/` separate from the handlers). Money
+  values (balances, caps) are minor-unit strings throughout — never parsed to a float.
 - `src/mocks/browser.ts` (dev worker) and `src/mocks/node.ts` (test server) share the same
   handlers. The node `server` is imported and driven by the test setup (`tests/`, owned by the
   test writer). Because the app is root-served, the worker claims root scope natively — no
@@ -173,16 +217,43 @@ analytics screens (a second RTK Query slice) in a later step.
 
 ## Admin features / UX
 
-Step 1 delivers the scaffold and the auth-shell proof only:
-
 - **Home** (`/`) — renders the `whoami` identity (`userId` + `roles`) once authenticated, with
   explicit loading and error (`role="alert"`) states. This is the concrete proof that the OIDC
   bearer reaches the admin surface through the gateway.
 - **Analytics** (`/analytics`) — a placeholder page stating the dashboard is pending the
   analytics server (spec 05).
 
-The remaining admin screens are **later steps**: account management (freeze / limits),
-reversals with the **maker-checker** approval UI, the audit view, and the analytics dashboard.
+### Account management (A2)
+
+Two screens, both under the fail-closed `AuthGate`, driven by the `/admin` contract above.
+
+- **Accounts** (`/accounts`, `AccountsPage` → `AccountsTable`) — a table of admin-visible
+  accounts showing owner id, account number + kind, a **status badge**, the three money fields
+  (balance / held / available), and when each was last updated. Each row has a **Freeze** or
+  **Unfreeze** action (whichever the current status allows); only the acting row's button
+  disables while its mutation is in flight, and a failed action surfaces via the `Alert` atom.
+  An optional **owner-id filter** narrows the list to one customer (server-side filter). The
+  page owns the read query's loading (`Loading…`) / error (`role="alert"`) states and the
+  mutation hooks; the table owns the empty state and per-row rendering.
+- **Limits** (`/limits`, `LimitsPage` → `LimitsTable` + `LimitsForm`) — shows the current
+  **global baseline + per-customer overrides** (`LimitsTable`, caps rendered float-free, an
+  uncapped cap reads "uncapped") and an edit form (`LimitsForm`) that `PUT`s `/admin/limits`.
+  The form's **scope** select toggles between `global` and `customer`; the **owner id** field
+  appears (and is required) only for `customer`. The **scope⇒ownerId rule is enforced before
+  submit** — `global` sends `ownerId: null`, `customer` requires a non-empty owner — and the
+  server's `INVALID_LIMITS` 400 renders inline via `FieldError`.
+
+**Money & date handling (money-adjacent surface).** All money-valued fields — account balances
+and the three limit caps — are handled **float-free**: they are minor-unit integer **strings**
+formatted for display via `lib/money.ts` (BigInt/string math, never `Number`/`parseFloat`). The
+limit-cap inputs are entered as **unsigned minor-unit integer strings** (empty = uncapped /
+`null`); the form validates each with the float-free `isUnsignedMinorUnits` and shows a live
+major-unit preview (`150000` → `= 1,500.00 MXN`). Server timestamps are UTC ISO-8601 and are
+converted to **`America/Mexico_City`** only at display, via `lib/datetime.ts` (`Intl` + the IANA
+zone at the edge — never a hardcoded offset).
+
+The remaining admin screens are **later steps**: reversals with the **maker-checker** approval
+UI, the audit view, and the analytics dashboard.
 
 ## Running it
 
