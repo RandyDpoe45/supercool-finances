@@ -236,11 +236,15 @@ export class PostingService implements IPostingService {
       );
     }
 
-    // g. Exactly one outbox row, same tx (transactional outbox, ADR-5).
+    // g. Exactly one outbox row, same tx (transactional outbox, ADR-5). The payload is the
+    //    enriched, self-contained read-model event: the header entity supplies id / type /
+    //    status / amount / currency / initiatedBy / reverses / timestamps; the LOCKED accounts
+    //    supply each leg's owner / kind / systemKey / currency; the command supplies the payee
+    //    snapshot (external_outbound only). No extra reads — every source is already in hand.
     await this.outbox.insertInTx(queryRunner, {
       transactionId: txId,
       eventType: TRANSACTION_POSTED_EVENT,
-      payload: buildPostedPayload(txId, command, appliedLegs),
+      payload: buildPostedPayload(transaction, command, appliedLegs, locked),
     });
 
     return transaction;
@@ -257,6 +261,11 @@ export class PostingService implements IPostingService {
     txId: string,
   ): Promise<Transaction> {
     const { debitAccountId, creditAccountId } = deriveDebitCredit(command.legs);
+    // A freshly-posted movement is created AND posted in one act: stamp both timestamps from
+    // the SAME app-clock instant. `postedAt` was already app-clock; setting `createdAt`
+    // explicitly (rather than leaning on the DB `now()` default) guarantees the returned entity
+    // carries it, so the emitted transaction event can report `createdAt` without an extra read.
+    const now = new Date();
     return this.transactions.insertInTx(queryRunner, {
       id: txId,
       type: command.type,
@@ -268,7 +277,8 @@ export class PostingService implements IPostingService {
       initiatedBy: command.initiatedBy,
       payeeId: command.payeeId ?? null,
       reversesTransactionId: command.reversesTransactionId ?? null,
-      postedAt: new Date(),
+      createdAt: now,
+      postedAt: now,
     });
   }
 
@@ -512,23 +522,56 @@ function deriveDebitCredit(legs: PostingLeg[]): {
   return { debitAccountId: debit.accountId, creditAccountId: credit.accountId };
 }
 
-/** Build the provisional transaction-event payload (balance-service copy; see transaction-event.ts). */
+/**
+ * Build the enriched, self-contained transaction-event payload (balance-service copy; see
+ * transaction-event.ts). Everything is already in hand — no extra DB read:
+ * - the `transaction` HEADER entity gives id / type / status (POSTED) / amount / currency /
+ *   initiatedBy / reversesTransactionId / createdAt / postedAt (authoritative, as persisted);
+ * - each leg's `owner` / `kind` / `systemKey` / `currency` come from the LOCKED `Account`
+ *   already read under the `FOR UPDATE` lock for the fold;
+ * - the external-payee snapshot is copied verbatim from `command.payee` (external_outbound
+ *   only; null otherwise) — the reducer never reaches into a payee repository (layering).
+ *
+ * Money stays int64-as-string end to end (`amount`, `delta`, `balanceAfter`); the legs still
+ * sum to zero (they are the same appliedLegs the ledger folds).
+ */
 function buildPostedPayload(
-  txId: string,
+  transaction: Transaction,
   command: PostTransactionCommand,
   appliedLegs: AppliedLeg[],
+  locked: Map<string, Account>,
 ): TransactionPostedPayload {
-  const legs: TransactionEventLeg[] = appliedLegs.map((leg) => ({
-    accountId: leg.accountId,
-    delta: leg.delta,
-    balanceAfter: leg.balanceAfter,
-  }));
+  const legs: TransactionEventLeg[] = appliedLegs.map((leg) => {
+    const account = locked.get(leg.accountId);
+    if (!account) {
+      // Unreachable: every applied leg's account was locked into `locked` in applyPosting.
+      throw new AccountNotFoundError(leg.accountId);
+    }
+    return {
+      accountId: leg.accountId,
+      ownerId: account.ownerId,
+      accountKind: account.kind,
+      systemKey: account.systemKey,
+      delta: leg.delta,
+      balanceAfter: leg.balanceAfter,
+      currency: account.currency,
+    };
+  });
   return {
-    txId,
-    type: command.type,
-    currency: command.currency,
-    amount: command.amount,
-    legs,
+    schemaVersion: 1,
     occurredAt: new Date().toISOString(),
+    transaction: {
+      id: transaction.id,
+      type: transaction.type,
+      status: transaction.status,
+      amount: transaction.amount,
+      currency: transaction.currency,
+      initiatedBy: transaction.initiatedBy,
+      reversesTransactionId: transaction.reversesTransactionId,
+      payee: command.payee ?? null,
+      createdAt: transaction.createdAt.toISOString(),
+      postedAt: transaction.postedAt ? transaction.postedAt.toISOString() : null,
+    },
+    legs,
   };
 }

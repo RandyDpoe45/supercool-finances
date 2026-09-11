@@ -296,7 +296,7 @@ OutboxEvent:
       description: "FK -> transaction.id. The aggregate this event describes. NOT NULL."
     event_type:
       type: varchar
-      description: "e.g. 'transaction.posted' | 'transaction.reversed' | 'transaction.failed'. NOT NULL."
+      description: "'transaction.posted' | 'transaction.failed'. NOT NULL. Only 'transaction.posted' is emitted today; 'transaction.failed' is reserved for a later FAILED-persistence step. A reversal is link-only — a compensating 'transaction.posted' carrying reverses_transaction_id — NOT a separate 'transaction.reversed' event."
     payload:
       type: jsonb
       description: "The full, self-contained event contract (see DATA-MODEL Part 2). NOT NULL."

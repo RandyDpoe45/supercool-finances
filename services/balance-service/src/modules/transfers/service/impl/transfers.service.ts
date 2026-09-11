@@ -51,6 +51,7 @@ import {
   IPostingService,
   POSTING_SERVICE,
 } from '../../../posting/service/interfaces/posting.service.interface';
+import { TransactionEventPayee } from '../../../posting/service/interfaces/transaction-event';
 import {
   DestinationNotConfirmedError,
   InvalidOtpError,
@@ -535,6 +536,14 @@ export class TransfersService implements ITransfersService {
     // 6. Branch on the transaction TYPE. Both post the SAME signed double-entry through the
     //    reducer's confirm-time seam (debit source −amount, credit destination +amount), inside
     //    ONE deadlock-retried transaction with the funds check under the account lock.
+    //
+    //    The emitted event carries the external-payee SNAPSHOT (id + display name + rail) so the
+    //    analytics read model is self-contained (never joins back to external_payee, ADR-11).
+    //    Only an external_outbound has a payee; the internal path passes null.
+    const payee =
+      current.type === TransactionType.ExternalOutbound
+        ? await this.loadPayeeSnapshot(current.payeeId)
+        : null;
     const command: PostTransactionCommand = {
       type: current.type,
       currency: current.currency,
@@ -549,6 +558,7 @@ export class TransfersService implements ITransfersService {
       // fixed-window spend counts against the resolved caps inside the reducer's lock. Inbound
       // credits / reversals go through postFreshInTx WITHOUT this, so they never count.
       limitAccountId: debitAccountId,
+      payee,
     };
 
     if (current.type === TransactionType.ExternalOutbound) {
@@ -727,6 +737,22 @@ export class TransfersService implements ITransfersService {
     if (record.destinationAccountId !== destinationAccountId) {
       throw new DestinationNotConfirmedError();
     }
+  }
+
+  /** The external-payee snapshot (id + display name + rail) copied onto an external_outbound
+   * transaction event so the analytics read model stays self-contained (no join back to
+   * external_payee, ADR-11). The confirmed header carries the enrolled `payeeId`; a missing id
+   * or a payee that can no longer be loaded yields `null` — the snapshot is an analytics
+   * convenience, never a settlement gate, so its absence must not fail the (money-moving) post. */
+  private async loadPayeeSnapshot(payeeId: string | null): Promise<TransactionEventPayee | null> {
+    if (!payeeId) {
+      return null;
+    }
+    const payee = await this.externalPayees.findById(payeeId);
+    if (!payee) {
+      return null;
+    }
+    return { id: payee.id, displayName: payee.displayName, rail: payee.rail };
   }
 
   /** Project a pending transfer for the OTP feed, branching on type so the app can show WHAT the

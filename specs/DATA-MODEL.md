@@ -366,47 +366,65 @@ erDiagram
 
 ### The transaction event contract (contract of record)
 
-One outbox row → one Redis Stream entry → one event. `event_id` **is**
-`outbox_event.id`, and it is the dedup key end-to-end. The event is self-contained
-and **double-entry-preserving** (legs sum to zero), so analytics can even re-assert
-the invariant on the read side.
+One outbox row → one Redis Stream entry → one event. **`event_id` and `event_type`
+are STREAM fields** the relay `XADD`s alongside the payload — they are **not** inside
+the payload object. `event_id` **is** `outbox_event.id`, the dedup key end-to-end. The
+`payload` (an `outbox_event.payload` jsonb blob) is self-contained and
+**double-entry-preserving** (legs sum to zero), so analytics can even re-assert the
+invariant on the read side.
+
+Wire conventions:
+
+- **Field names are `camelCase`** (matching the balance-service producer and the
+  analytics stored document below) — NOT snake_case.
+- **Money is `bigint` minor units carried as a `string`** (`amount`, leg `delta` /
+  `balanceAfter`) — never a JS `number`: a value past 2^53 must survive verbatim.
+- **Reversal is link-only:** a reversal is itself a compensating `transaction.posted`
+  event carrying `reversesTransactionId`; there is **no** separate `transaction.reversed`
+  event. **FAILED** persistence and a `transaction.failed` event are a **subsequent
+  step** — `event_type` reserves `transaction.failed` for forward-compat, but only
+  `transaction.posted` is emitted today.
 
 ```jsonc
+// STREAM fields (relay-emitted, NOT in the payload):
+//   event_id   = outbox_event.id — dedup key (unique)
+//   event_type = "transaction.posted"   (| "transaction.failed" — later step)
+// payload (the jsonb object below):
 {
-  "event_id":       "uuid",              // = outbox_event.id — dedup key (unique)
-  "event_type":     "transaction.posted | transaction.reversed | transaction.failed",
-  "schema_version": 1,                    // bump on any contract change
-  "occurred_at":    "2026-09-08T12:00:00Z",
+  "schemaVersion": 1,                       // bump on any contract change
+  "occurredAt":    "2026-09-08T12:00:00Z",  // ISO-8601 Z
   "transaction": {
-    "id":                      "uuid",
-    "type":                    "internal | external_outbound | external_inbound",
-    "status":                  "POSTED | REVERSED | FAILED",
-    "amount":                  50000,     // positive magnitude, minor units
-    "currency":                "MXN",
-    "initiated_by":            "sub-or-admin",
-    "reverses_transaction_id": "uuid | null",
-    "payee":  { "id": "uuid", "display_name": "ACME", "rail": "rail-outbound" }, // or null
-    "created_at":              "2026-09-08T12:00:00Z",
-    "posted_at":               "2026-09-08T12:00:01Z"   // or null
+    "id":                     "uuid",
+    "type":                   "internal | external_outbound | external_inbound",
+    "status":                 "POSTED",                 // POSTED for this event
+    "amount":                 "50000",                  // positive magnitude, minor units (int64 STRING)
+    "currency":               "MXN",
+    "initiatedBy":            "sub-or-admin",
+    "reversesTransactionId":  "uuid | null",            // set on a reversal's compensating post
+    "payee": { "id": "uuid", "displayName": "ACME", "rail": "rail-outbound" }, // or null (external_outbound only)
+    "createdAt":              "2026-09-08T12:00:00Z",
+    "postedAt":               "2026-09-08T12:00:01Z"    // or null
   },
-  "legs": [                               // the ledger entries; SUM(delta) == 0
-    { "account_id": "uuid", "owner_id": "sub",  "account_kind": "customer",
-      "system_key": null,                    "delta": -50000, "balance_after": 150000, "currency": "MXN" },
-    { "account_id": "uuid", "owner_id": null,  "account_kind": "system",
-      "system_key": "clearing:rail-outbound", "delta":  50000, "balance_after": 900000, "currency": "MXN" }
+  "legs": [                                 // the ledger entries; SUM(delta) == 0
+    { "accountId": "uuid", "ownerId": "sub",  "accountKind": "customer",
+      "systemKey": null,                    "delta": "-50000", "balanceAfter": "150000", "currency": "MXN" },
+    { "accountId": "uuid", "ownerId": null,  "accountKind": "system",
+      "systemKey": "clearing:rail-outbound", "delta":  "50000", "balanceAfter": "900000", "currency": "MXN" }
   ]
 }
 ```
 
 | Field | Why analytics needs it |
 |---|---|
-| `event_id` | Idempotent upsert / stream dedup ([ADR-5](../docs/DECISIONS.md#adr-5--transactional-outbox-postgres--redis-streams-transport)). |
-| `event_type` / `transaction.status` | Distinguish posted vs. reversed vs. failed in the history and rollups. |
-| `schema_version` | Consumer can evolve without a shared package (ADR-16). |
-| `legs[].owner_id` | **Per-customer** aggregation without a Postgres join — the whole reason it's on the event. |
-| `legs[].account_kind` / `system_key` | Separate customer volume from clearing (in-transit) movement. |
-| `legs[].balance_after` | Lets `accountSummaries` show a balance view without reading Postgres. |
-| `amount` / `currency` | Volume/total aggregates; carried as minor units. |
+| `event_id` (stream) | Idempotent upsert / stream dedup ([ADR-5](../docs/DECISIONS.md#adr-5--transactional-outbox-postgres--redis-streams-transport)). |
+| `event_type` (stream) / `transaction.status` | Distinguish posted from failed in the history and rollups. A **reversal** is a posted event linked via `reversesTransactionId` (no separate `reversed` event); `transaction.failed` is a later step. |
+| `transaction.reversesTransactionId` | Ties a reversal's compensating posted event to the original it offsets — the **link-only** reversal record on the read side. |
+| `schemaVersion` | Consumer can evolve without a shared package (ADR-16). |
+| `legs[].ownerId` | **Per-customer** aggregation without a Postgres join — the whole reason it's on the event. |
+| `legs[].accountKind` / `systemKey` | Separate customer volume from clearing (in-transit) movement. |
+| `legs[].balanceAfter` | Lets `accountSummaries` show a balance view without reading Postgres. |
+| `transaction.payee` | Per-payee reporting on external outbound without joining `external_payee`. |
+| `amount` / `currency` | Volume/total aggregates; minor units carried as an int64 **string**. |
 
 ### Consumer idempotency & ordering
 
@@ -448,23 +466,23 @@ reversal are two documents — a faithful money history).
   "eventType":      "transaction.posted",
   "type":           "external_outbound",
   "status":         "POSTED",
-  "amount":         50000,
+  "amount":         "50000",              // int64 minor units, stored as-in-the-event (STRING)
   "currency":       "MXN",
   "initiatedBy":    "sub",
   "reversesTransactionId": null,
   "payee":          { "id": "uuid", "displayName": "ACME", "rail": "rail-outbound" },
-  "legs":           [ /* as in the event */ ],
+  "legs":           [ /* as in the event — camelCase, string money */ ],
   "owners":         ["sub"],              // distinct customer owner_ids across legs (filter helper)
   "occurredAt":     ISODate("2026-09-08T12:00:00Z")
 }
 ```
 Indexes: **unique `{ _id }`** (event dedup, spec 05) · `{ transactionId: 1 }` ·
 `{ occurredAt: -1 }` (time series / recent) · `{ owners: 1, occurredAt: -1 }`
-(per-customer history) · `{ type: 1, occurredAt: -1 }` · `{ "legs.account_id": 1 }`
+(per-customer history) · `{ type: 1, occurredAt: -1 }` · `{ "legs.accountId": 1 }`
 (multikey — per-account `$group`).
 
 **`accountSummaries`** (VIEW — pipeline output, not stored) — per-account activity +
-latest known balance, produced by `$group` on `legs.account_id`. Shape returned:
+latest known balance, produced by `$group` on `legs.accountId`. Shape returned:
 
 ```jsonc
 {
@@ -518,8 +536,8 @@ prototype):
   later behind the same reporting DTO without touching the ingest path.
 
 To keep the pipelines fast, `transactions` carries the indexes listed above
-(`occurredAt`, `owners`, `type`, and the `legs.account_id` multikey below). Add
-`{ "legs.account_id": 1 }` (multikey) for the per-account `$group`.
+(`occurredAt`, `owners`, `type`, and the `legs.accountId` multikey below). Add
+`{ "legs.accountId": 1 }` (multikey) for the per-account `$group`.
 
 ### Open questions (carry with spec 07)
 
