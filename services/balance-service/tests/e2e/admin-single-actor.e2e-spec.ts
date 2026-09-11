@@ -387,7 +387,8 @@ suite(
       // UNFREEZE, then a debit succeeds again. Use a DIFFERENT amount (3000, not the blocked 4000)
       // so it is a fresh fingerprint — the blocked attempt left a same-fingerprint idempotency record
       // within the 60s soft-duplicate window, and a repeat 4000 would (correctly) be SUSPECTED_DUPLICATE.
-      // The new initiate auto-supersedes the stuck PENDING from the frozen attempt.
+      // Under terminal-FAILED semantics the frozen confirm marked the 4000 attempt a terminal FAILED
+      // record (no stuck PENDING to supersede), so the new initiate simply creates a fresh pending.
       const unfrozen = await asAdmin(admin).post(`/admin/accounts/${src.id}/unfreeze`).send({});
       expect(unfrozen.status).toBe(200);
       expect(await getAccountStatus(ds, src.id)).toBe('active');

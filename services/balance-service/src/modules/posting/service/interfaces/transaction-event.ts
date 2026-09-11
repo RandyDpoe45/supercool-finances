@@ -3,6 +3,7 @@ import {
   TransactionStatus,
   TransactionType,
 } from '../../../../database/entities/enums';
+import { Transaction } from '../../../../database/entities/transaction.entity';
 
 /**
  * The transaction-event contract as the balance service emits it — the `payload` written
@@ -30,9 +31,13 @@ import {
  *
  * Reversal is **link-only**: a reversal is itself a compensating `transaction.posted` event
  * carrying `reversesTransactionId` — there is no separate `transaction.reversed` event.
- * FAILED-transaction persistence and the `transaction.failed` event are a SUBSEQUENT step;
- * the `event_type` union below reserves `transaction.failed` for forward-compat, but this
- * step emits only `transaction.posted`.
+ * A **confirm-time BUSINESS failure** (insufficient funds / frozen / limit / payee cooling-off,
+ * discovered under the account lock when a user transfer is OTP-confirmed) is persisted as a
+ * terminal FAILED transaction and emitted as a single `transaction.failed` event: the same
+ * enriched header envelope with `status: 'FAILED'`, a non-null `failureReason` (the domain
+ * error's `code`), `postedAt: null`, and an EMPTY `legs` array — NO money moved, so the
+ * double-entry sum-zero invariant holds trivially. `failureReason` is carried on the header of
+ * BOTH event kinds (null on a `transaction.posted`) so the two share one shape.
  *
  * Declared as `type` aliases (not interfaces) so the payload is assignable to the entity's
  * `Record<string, unknown>` jsonb column without an explicit index signature.
@@ -60,30 +65,86 @@ export type TransactionEventLeg = {
   currency: string;
 };
 
+/** The transaction header carried on BOTH the `transaction.posted` and `transaction.failed`
+ * events — one uniform, self-contained shape. `status` distinguishes the two (POSTED vs FAILED);
+ * `failureReason` is the domain error's `code` on a failure, `null` on a post; `postedAt` is the
+ * post instant on a POSTED event, `null` on a FAILED event (no money moved). */
+export type TransactionEventHeader = {
+  id: string;
+  type: TransactionType;
+  status: TransactionStatus;
+  amount: string;
+  currency: string;
+  initiatedBy: string;
+  reversesTransactionId: string | null;
+  payee: TransactionEventPayee | null;
+  createdAt: string;
+  postedAt: string | null;
+  failureReason: string | null;
+};
+
 /** The `outbox_event.payload` for a posted transaction — the enriched, self-contained
- * read-model contract. */
+ * read-model contract. `legs` sum to zero (double-entry); `failureReason` is null. */
 export type TransactionPostedPayload = {
   schemaVersion: 1;
   occurredAt: string;
-  transaction: {
-    id: string;
-    type: TransactionType;
-    status: TransactionStatus;
-    amount: string;
-    currency: string;
-    initiatedBy: string;
-    reversesTransactionId: string | null;
-    payee: TransactionEventPayee | null;
-    createdAt: string;
-    postedAt: string | null;
-  };
+  transaction: TransactionEventHeader;
   legs: TransactionEventLeg[];
 };
 
-/** The `outbox_event.event_type` (a stream field) for a transaction event. Only
- * `transaction.posted` is emitted in this step; `transaction.failed` is reserved for the
- * subsequent FAILED-persistence step. */
+/** The `outbox_event.payload` for a FAILED transaction — a confirm-time business rejection of a
+ * well-formed user transfer. Same envelope as {@link TransactionPostedPayload}, but `legs` is
+ * ALWAYS empty (no money moved) and the header carries `status: FAILED` + a non-null
+ * `failureReason`. */
+export type TransactionFailedPayload = {
+  schemaVersion: 1;
+  occurredAt: string;
+  transaction: TransactionEventHeader;
+  legs: TransactionEventLeg[];
+};
+
+/** The `outbox_event.event_type` (a stream field) for a transaction event: `transaction.posted`
+ * for a money movement, `transaction.failed` for a persisted confirm-time business failure. */
 export type TransactionEventType = 'transaction.posted' | 'transaction.failed';
 
 /** `outbox_event.event_type` for a posted-transaction event. */
 export const TRANSACTION_POSTED_EVENT: TransactionEventType = 'transaction.posted';
+
+/** `outbox_event.event_type` for a failed-transaction event (confirm-time business failure). */
+export const TRANSACTION_FAILED_EVENT: TransactionEventType = 'transaction.failed';
+
+/**
+ * Build the `transaction.failed` payload from the (now-FAILED) transaction header. EXPORTED and
+ * pure, kept beside the contract types (not in posting `impl/`, where the POSTED builder is
+ * private) so the several FAILED-emit call sites in the reducer — the confirm-time
+ * `recordFailedInTx` and a later fresh-FAILED-header case — reuse ONE builder while the reducer
+ * stays the sole emitter of transaction events. Inputs: the header entity, the payee snapshot
+ * (external_outbound only, `null` otherwise), the failure `reason` (the domain error's `code`),
+ * and the `occurredAt` instant. `legs` is empty — a FAILED transaction moves no money — so the
+ * double-entry sum-zero invariant holds trivially. `createdAt` comes from the existing header;
+ * `postedAt` is `null`; `status` is forced to FAILED regardless of the passed entity's momentary
+ * state.
+ */
+export function buildFailedPayload(
+  transaction: Transaction,
+  options: { reason: string; payee: TransactionEventPayee | null; occurredAt: string },
+): TransactionFailedPayload {
+  return {
+    schemaVersion: 1,
+    occurredAt: options.occurredAt,
+    transaction: {
+      id: transaction.id,
+      type: transaction.type,
+      status: TransactionStatus.Failed,
+      amount: transaction.amount,
+      currency: transaction.currency,
+      initiatedBy: transaction.initiatedBy,
+      reversesTransactionId: transaction.reversesTransactionId,
+      payee: options.payee,
+      createdAt: transaction.createdAt.toISOString(),
+      postedAt: null,
+      failureReason: options.reason,
+    },
+    legs: [],
+  };
+}

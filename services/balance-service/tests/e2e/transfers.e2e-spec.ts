@@ -608,8 +608,15 @@ suite(
 
       const after = await ds.query(`SELECT balance FROM account WHERE id = $1`, [src.id]);
       expect(after[0].balance).toBe('1000');
-      const st = await ds.query(`SELECT status FROM "transaction" WHERE id = $1`, [transferId]);
-      expect(st[0].status).toBe('PENDING');
+      // A confirm-time BUSINESS failure is now TERMINAL: the transfer is FAILED (reason + failed_at
+      // stamped), not left PENDING; no money moved.
+      const st = await ds.query(
+        `SELECT status, failure_reason, failed_at FROM "transaction" WHERE id = $1`,
+        [transferId],
+      );
+      expect(st[0].status).toBe('FAILED');
+      expect((st[0].failure_reason ?? '').length).toBeGreaterThan(0);
+      expect(st[0].failed_at).not.toBeNull();
     });
 
     it('confirm with a WRONG OTP → 401 with error.code INVALID_OTP', async () => {

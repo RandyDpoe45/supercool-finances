@@ -38,8 +38,11 @@ import {
   TransactionNotPendingError,
 } from '../errors';
 import {
+  buildFailedPayload,
+  TRANSACTION_FAILED_EVENT,
   TRANSACTION_POSTED_EVENT,
   TransactionEventLeg,
+  TransactionEventPayee,
   TransactionPostedPayload,
 } from '../interfaces/transaction-event';
 import { IPostingService } from '../interfaces/posting.service.interface';
@@ -169,6 +172,57 @@ export class PostingService implements IPostingService {
     return this.applyPosting(queryRunner, command, transactionId, lockOrder, () =>
       this.transitionExistingHeader(queryRunner, transactionId),
     );
+  }
+
+  async recordFailedInTx(
+    queryRunner: QueryRunner,
+    transactionId: string,
+    reason: string,
+    payee?: TransactionEventPayee | null,
+  ): Promise<boolean> {
+    // The single balance-service emitter of transaction events also owns the FAILED case: a guarded
+    // PENDING→FAILED header write PLUS the single `transaction.failed` outbox row, atomically in the
+    // caller's tx, moving NO money. A 0-row transition (already expired/cancelled) is a guarded no-op:
+    // return false and emit nothing, so the caller releases no hold.
+    const failed = await this.transactions.transitionToFailedInTx(
+      queryRunner,
+      transactionId,
+      reason,
+    );
+    if (!failed) {
+      return false;
+    }
+    // Re-read the now-FAILED header WITHIN this tx so the event carries the persisted state.
+    const header = await this.transactions.findByIdInTx(queryRunner, transactionId);
+    if (!header) {
+      // Unreachable: the row was just transitioned under this same transaction.
+      throw new Error(`Transaction ${transactionId} vanished after its FAILED transition`);
+    }
+    await this.emitTransactionFailed(queryRunner, header, reason, payee ?? null);
+    return true;
+  }
+
+  /**
+   * Emit the SINGLE `transaction.failed` outbox row for a FAILED header, in the caller's tx (the
+   * FK parent already exists). Factored out so a fresh-FAILED-header case (a later step) can reuse
+   * the SAME emit — keeping the reducer the sole emitter of transaction events. Empty legs: a FAILED
+   * transaction moves no money, so the double-entry sum-zero invariant holds trivially.
+   */
+  private async emitTransactionFailed(
+    queryRunner: QueryRunner,
+    transaction: Transaction,
+    reason: string,
+    payee: TransactionEventPayee | null,
+  ): Promise<void> {
+    await this.outbox.insertInTx(queryRunner, {
+      transactionId: transaction.id,
+      eventType: TRANSACTION_FAILED_EVENT,
+      payload: buildFailedPayload(transaction, {
+        reason,
+        payee,
+        occurredAt: new Date().toISOString(),
+      }),
+    });
   }
 
   /**
@@ -571,6 +625,8 @@ function buildPostedPayload(
       payee: command.payee ?? null,
       createdAt: transaction.createdAt.toISOString(),
       postedAt: transaction.postedAt ? transaction.postedAt.toISOString() : null,
+      // Always null on a POSTED event — carried for shape uniformity with `transaction.failed`.
+      failureReason: transaction.failureReason ?? null,
     },
     legs,
   };

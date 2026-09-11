@@ -367,23 +367,28 @@ doc); money (`amount`, leg `delta` / `balanceAfter`) is **`bigint` minor units c
 `OutboxEvent.id`, the consumer's dedup key) and `event_type` are **stream fields** the relay
 emits alongside the payload — they are **not** inside it. The `jsonb` `payload` is:
 
+Both `transaction.posted` and `transaction.failed` share ONE header envelope
+(`TransactionEventHeader`); `TransactionPostedPayload` / `TransactionFailedPayload` differ only in
+`status`, whether `legs` is populated, and whether `failureReason` / `postedAt` are set:
+
 ```
-TransactionPostedPayload {
+TransactionPostedPayload | TransactionFailedPayload {
   schemaVersion: 1;
   occurredAt: string;                 // ISO-8601 UTC
-  transaction: {
+  transaction: {                      // TransactionEventHeader (shared shape)
     id: string;
     type: TransactionType;            // internal | external_outbound | external_inbound
-    status: TransactionStatus;        // POSTED for this event
+    status: TransactionStatus;        // POSTED (transaction.posted) | FAILED (transaction.failed)
     amount: string;                   // positive magnitude, minor units (int64 string)
     currency: string;
     initiatedBy: string;
     reversesTransactionId: string | null;   // set on a reversal's compensating post
     payee: { id: string; displayName: string; rail: string } | null;  // external_outbound only
     createdAt: string;                // ISO-8601 UTC
-    postedAt: string | null;          // ISO-8601 UTC (non-null for a POSTED movement)
+    postedAt: string | null;          // ISO-8601 UTC (non-null for POSTED; null on FAILED)
+    failureReason: string | null;     // domain error code on FAILED; null on POSTED
   };
-  legs: {
+  legs: {                             // POSTED: the ledger entries · FAILED: [] (no money moved)
     accountId: string;
     ownerId: string | null;           // customer sub; null for system/clearing
     accountKind: 'customer' | 'system';
@@ -391,7 +396,7 @@ TransactionPostedPayload {
     delta: string;                    // signed minor units (int64 string)
     balanceAfter: string;             // resulting balance (int64 string)
     currency: string;
-  }[];                                // SUM(delta) == 0 (double-entry preserved)
+  }[];                                // POSTED: SUM(delta) == 0 · FAILED: empty (sum-zero trivially)
 }
 ```
 
@@ -408,9 +413,17 @@ the returned entity reliably carries it without an extra read; for a confirm-tim
 
 **Reversal is link-only.** A reversal is itself a compensating `transaction.posted` event
 carrying `reversesTransactionId` — there is **no** separate `transaction.reversed` event.
-**FAILED** persistence and a `transaction.failed` event are a **subsequent step**; the
-`event_type` union reserves `transaction.failed` for forward-compat, but only
-`transaction.posted` is emitted here.
+
+**`transaction.failed` (confirm-time business failure).** When a user transfer is OTP-confirmed
+but the business rejects it under the account lock, the transfer is persisted **PENDING → FAILED**
+and a single `transaction.failed` event is emitted (`status: FAILED`, `failureReason` = the domain
+error's `code`, `postedAt: null`, **empty legs**). **The posting reducer is the SOLE emitter of
+transaction events**, so this FAILED write + event is owned by `IPostingService.recordFailedInTx`
+(the transfers layer delegates to it — it never emits an event itself). The **exported pure builder**
+`buildFailedPayload` lives in `service/interfaces/transaction-event.ts` (beside the contract types,
+NOT in posting `impl/` where `buildPostedPayload` is private) so the reducer's several FAILED-emit
+call sites reuse ONE builder — see
+[Confirm-time FAILED persistence](#confirm-time-failed-persistence-business-vs-validation) below.
 
 The payload types are declared as `type` aliases (not interfaces) so they satisfy the entity's
 `Record<string, unknown>` column without an explicit index signature.
@@ -720,9 +733,45 @@ timestamps ISO-8601, `postedAt` null while PENDING. Internal columns (`initiated
    posting.postPendingInTx(qr, transferId, command))`.
 
 The OTP is consumed **before** the post transaction: the single-use `GETDEL` is the
-authorization gate, so if the post then throws (insufficient funds under the lock, etc.) the
-code is spent and the transfer stays PENDING — a retry needs a **fresh** code. This matches the
-spec's confirm-time funds check.
+authorization gate, so if the post then throws it is spent and cannot be replayed — a retry needs
+a **fresh** code. This matches the spec's confirm-time funds check.
+
+### Confirm-time FAILED persistence (business vs validation)
+
+A confirm-time **BUSINESS** failure raised by the reducer (funds dropped below the amount between
+initiate and confirm, the source froze, a spend limit tripped, or — external — the payee is not
+active / still cooling off) rolls the WHOLE money tx back, so the transfer is **still PENDING** and,
+for `external_outbound`, the hold is **still PLACED** (`held` elevated). `confirmTransfer` catches
+the error and, when `isBusinessFailure(error)` (the centralized taxonomy in
+`common/errors/failure-classification.ts`), calls `persistConfirmFailure` which — **in a NEW
+committed tx** — does:
+
+1. lock the SOURCE `FOR UPDATE` (external only) FIRST — the single **source → transaction → hold**
+   order every hold-mutating path uses, so the FAILED write can never deadlock against a concurrent
+   settle/expire/cancel on the same transfer;
+2. delegate the FAILED header write + event to `posting.recordFailedInTx(qr, id, code, payee)` — the
+   reducer (the **sole emitter** of transaction events) runs the guarded `transitionToFailedInTx`
+   (`UPDATE transaction SET status = FAILED, failure_reason = :code, failed_at = now() WHERE id = :id
+   AND status = 'PENDING'`) and, on a 1-row flip, emits the SINGLE `transaction.failed` outbox row
+   (`buildFailedPayload` → **empty legs**, FK-bound to the now-FAILED header). It returns `false` on
+   **0 rows** (a concurrent expiry/cancel already moved it off PENDING) — a guarded no-op: nothing
+   emitted;
+3. for `external_outbound`, and **only when the reducer returned `true`**, RELEASE the hold via the
+   shared `releaseHoldForTransactionInTx` (guarded `PLACED → RELEASED`, `held -= amount`) — **no
+   ledger entry** (releasing returns the reservation, it moves no money);
+
+then **rethrow the ORIGINAL domain error**, so the controller returns the SAME 4xx as before. The
+transfer is now **TERMINAL** — a re-confirm hits `TRANSFER_NOT_PENDING`. Because the reducer owns
+BOTH the header write and the event, `transfers` no longer emits any transaction event.
+
+The **taxonomy is explicit and centralized** (one predicate, keyed by the domain `code`):
+**BUSINESS → persist FAILED** = `INSUFFICIENT_FUNDS`, `ACCOUNT_FROZEN`, `LIMIT_EXCEEDED`,
+`PAYEE_IN_COOLING_OFF`; **VALIDATION/STRUCTURAL → propagate, no FAILED row** =
+`INVALID_POSTING_COMMAND`, `ACCOUNT_NOT_FOUND`, `CURRENCY_MISMATCH`, `TRANSFER_NOT_PENDING`.
+Anything unlisted (or a raw non-`DomainError` fault) is treated as non-business — the conservative
+default persists **only** an explicitly-classified business failure. A **rail-settlement failure**
+is unaffected: that transfer already POSTED, so its FAILURE callback **reverses** it (`POSTED →
+REVERSED`), never a `transaction.failed`.
 
 ### The `postPendingInTx` posting seam
 

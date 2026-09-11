@@ -1019,6 +1019,26 @@ export function getDomainErrorBase(): any {
   );
 }
 
+/**
+ * The PURE confirm-time failure-classification predicate `isBusinessFailure(error) => boolean` —
+ * the money-safety gate deciding which confirm-time errors become a PERSISTED terminal FAILED
+ * transaction (+ a `transaction.failed` event) vs. a validation/structural error that propagates
+ * WITHOUT a FAILED row. Classifies by `instanceof DomainError` AND a code allowlist. Resolved as a
+ * REQUIRED export (the SUT of its unit spec) — this is the single coordination point if the
+ * implementor moves/renames it.
+ */
+export function getIsBusinessFailure(): (error: unknown) => boolean {
+  return resolveOrThrow(
+    'the isBusinessFailure classification predicate',
+    [
+      `${SRC}/common/errors/failure-classification`,
+      `${SRC}/common/errors/failure-classification.util`,
+      `${SRC}/common/errors/confirm-failure-classification`,
+    ],
+    ['isBusinessFailure'],
+  );
+}
+
 // ---- Confirmation-of-payee follow-up (spec 04, step 4b follow-up) -------------------------
 // A `customer` representation, human 10-digit account numbers, and the resolve→confirm→initiate
 // gate. Resolved through the same single-seam convention: repo tokens BY name, pure helpers

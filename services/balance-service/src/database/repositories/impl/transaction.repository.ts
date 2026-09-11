@@ -106,6 +106,25 @@ export class TransactionRepository implements ITransactionRepository {
     return (result.affected ?? 0) > 0;
   }
 
+  async transitionToFailedInTx(
+    queryRunner: QueryRunner,
+    id: string,
+    reason: string,
+  ): Promise<boolean> {
+    // Guarded confirm-time failure: PENDING → FAILED, stamping the domain error `code` as
+    // `failure_reason` and `failed_at = now()` (DB clock). The `status = PENDING` predicate is the
+    // atomic gate — affected === 1 means THIS call flipped it (the money tx just rolled back);
+    // 0 means a concurrent expiry/cancel already moved the row off PENDING, so the FAILED write
+    // is a NO-OP and the caller emits no event / releases no hold. Terminal, like the other flips.
+    const result = await queryRunner.manager
+      .createQueryBuilder()
+      .update(Transaction)
+      .set({ status: TransactionStatus.Failed, failureReason: reason, failedAt: () => 'now()' })
+      .where('id = :id AND status = :pending', { id, pending: TransactionStatus.Pending })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
   async expireOverduePendingByInitiator(
     queryRunner: QueryRunner,
     initiatedBy: string,

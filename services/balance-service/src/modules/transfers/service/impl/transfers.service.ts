@@ -1,9 +1,11 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { Redis } from 'ioredis';
 import { DataSource, QueryRunner } from 'typeorm';
 import { runInTransactionWithRetry } from '../../../../common/db/run-in-transaction';
+import { DomainError } from '../../../../common/errors/domain-error';
+import { isBusinessFailure } from '../../../../common/errors/failure-classification';
 import { addMinor, availableMinor } from '../../../../common/money/money';
 import { OUTBOUND_RAIL } from '../../../../common/rails/outbound-rail';
 import {
@@ -168,6 +170,8 @@ interface ConfirmationRecord {
  */
 @Injectable()
 export class TransfersService implements ITransfersService {
+  private readonly logger = new Logger(TransfersService.name);
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     @Inject(ACCOUNT_REPOSITORY) private readonly accounts: IAccountRepository,
@@ -561,18 +565,99 @@ export class TransfersService implements ITransfersService {
       payee,
     };
 
-    if (current.type === TransactionType.ExternalOutbound) {
-      // EXTERNAL → SETTLE: the funds are already reserved as `held`, so release the held BEFORE
-      // the reducer's debit (so its `available = balance − held` check passes), post the
-      // customer → clearing movement, then mark the hold SETTLED — all in one locked tx.
-      return this.settleExternalTransfer(transferId, debitAccountId, command);
+    // 7. Post (internal) or settle (external) through the reducer. A confirm-time BUSINESS failure
+    //    (funds dropped below the amount, the source was frozen, a limit tripped) rolls the WHOLE
+    //    money tx back — so the transfer is STILL PENDING and, for external, the hold is STILL
+    //    PLACED (`held` elevated). We PERSIST that as a terminal FAILED in a NEW committed tx (see
+    //    persistConfirmFailure) and rethrow the SAME error, so the client gets the same 4xx. A
+    //    VALIDATION/STRUCTURAL error (malformed command / missing account / currency mismatch / not
+    //    pending) is NOT a business failure — it propagates unchanged, persisting nothing. The
+    //    `return await` is deliberate so the branch's rejection is caught HERE, not by the caller.
+    try {
+      if (current.type === TransactionType.ExternalOutbound) {
+        // EXTERNAL → SETTLE: the funds are already reserved as `held`, so release the held BEFORE
+        // the reducer's debit (so its `available = balance − held` check passes), post the
+        // customer → clearing movement, then mark the hold SETTLED — all in one locked tx.
+        return await this.settleExternalTransfer(transferId, debitAccountId, command);
+      }
+      // INTERNAL → POST: the existing guarded PENDING → POSTED path (no hold).
+      return await runInTransactionWithRetry(this.dataSource, (queryRunner) =>
+        this.posting.postPendingInTx(queryRunner, transferId, command),
+      );
+    } catch (error) {
+      if (isBusinessFailure(error)) {
+        return this.persistConfirmFailure(current, command, error);
+      }
+      throw error;
     }
+  }
 
-    // INTERNAL → POST: the existing guarded PENDING → POSTED path (no hold).
-    const posted = await runInTransactionWithRetry(this.dataSource, (queryRunner) =>
-      this.posting.postPendingInTx(queryRunner, transferId, command),
-    );
-    return posted;
+  /**
+   * Persist a confirm-time BUSINESS failure, then rethrow — in a NEW committed transaction. The
+   * money tx already rolled back (the transfer is STILL PENDING; for external the hold is STILL
+   * PLACED and `held` elevated), so this:
+   *
+   * 1. locks the SOURCE `FOR UPDATE` (external only) FIRST — the single source→transaction→hold
+   *    order every hold-mutating path uses, so the FAILED write can never deadlock against a
+   *    concurrent settle/expire/cancel on the same transfer;
+   * 2. delegates the FAILED HEADER WRITE + the SINGLE `transaction.failed` EVENT to the posting
+   *    reducer (`recordFailedInTx`) — the reducer is the sole emitter of transaction events, so the
+   *    guarded `PENDING → FAILED` transition and the outbox row are owned there, atomically in this
+   *    tx and moving no money. It returns `false` on a 0-row transition (a concurrent expiry/cancel
+   *    already moved the row off PENDING): a guarded no-op — nothing emitted, no hold released;
+   * 3. for external_outbound, and ONLY when the reducer actually recorded the failure, RELEASES the
+   *    hold (guarded PLACED → RELEASED, `held -= amount`) via the shared primitive — returning the
+   *    reservation exactly once, NO ledger entry (no money moves).
+   *
+   * Then it rethrows the ORIGINAL domain error, so the controller returns the SAME 4xx (the client
+   * sees the failure reason). The transfer is now TERMINAL — a re-confirm hits `TRANSFER_NOT_PENDING`.
+   *
+   * The FAILED persistence is BEST-EFFORT: it must NEVER make the request worse than pre-P2a. If this
+   * new committed tx itself fails (a DB/Redis blip, deadlock-retry exhaustion, or the defensive
+   * post-transition invariant), the persistence error is SWALLOWED + logged and the ORIGINAL business
+   * error is STILL rethrown — so the controller returns the correct business 4xx (never a spurious
+   * 500) and the transfer falls back to the money-safe PENDING → lazy-expiry path (which releases any
+   * hold on the next access), exactly as before this step existed.
+   */
+  private async persistConfirmFailure(
+    transfer: Transaction,
+    command: PostTransactionCommand,
+    error: DomainError,
+  ): Promise<never> {
+    const isExternal = transfer.type === TransactionType.ExternalOutbound;
+    const sourceId = transfer.debitAccountId;
+    try {
+      await runInTransactionWithRetry(this.dataSource, async (queryRunner) => {
+        if (isExternal && sourceId) {
+          await this.accounts.lockByIdForUpdate(queryRunner, sourceId);
+        }
+        // The posting reducer owns the FAILED header write AND the single `transaction.failed` event
+        // (sole emitter). `false` = guarded no-op (already expired/cancelled) → release no hold.
+        const recorded = await this.posting.recordFailedInTx(
+          queryRunner,
+          transfer.id,
+          error.code,
+          command.payee ?? null,
+        );
+        if (recorded && isExternal && sourceId) {
+          await this.releaseHoldForTransactionInTx(
+            queryRunner,
+            sourceId,
+            transfer.id,
+            HoldStatus.Released,
+          );
+        }
+      });
+    } catch (persistError) {
+      // Best-effort: swallow the persistence failure so the ORIGINAL business error (rethrown below)
+      // reaches the client unchanged, and the transfer stays PENDING for money-safe lazy expiry.
+      const cause = persistError instanceof Error ? persistError.message : String(persistError);
+      this.logger.error(
+        `Failed to persist confirm-time FAILED for transfer ${transfer.id} ` +
+          `(original error ${error.code}); left PENDING for lazy expiry: ${cause}`,
+      );
+    }
+    throw error;
   }
 
   /**
