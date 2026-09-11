@@ -41,7 +41,7 @@ import {
   SelfApprovalForbiddenError,
   TransactionNotReversibleError,
 } from '../errors';
-import { IApprovalService } from '../interfaces/approval.service.interface';
+import { IApprovalService, ListApprovalsQuery } from '../interfaces/approval.service.interface';
 
 /**
  * Maker-checker (four-eyes) reversals (spec 04 "Admin ops", step 8b). A maker proposes a reversal
@@ -297,5 +297,16 @@ export class ApprovalService implements IApprovalService {
       }
       return after;
     });
+  }
+
+  /**
+   * Admin `GET /admin/approvals` — list approval requests by status. The DEFAULT is `PENDING` (the
+   * checker's queue — the checker discovers pending reversals to decide here), applied HERE in the
+   * service (not the wire schema) so an absent query resolves to the pending queue. A pure READ (no
+   * audit, no tx). Returns entities; the controller serializes them.
+   */
+  listApprovals(query: ListApprovalsQuery): Promise<ApprovalRequest[]> {
+    const status = query.status ?? ApprovalStatus.Pending;
+    return this.approvals.listByStatus(status);
   }
 }

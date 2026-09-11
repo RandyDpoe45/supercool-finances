@@ -24,11 +24,18 @@ import {
   IAuditService,
 } from '../../../audit/service/interfaces/audit.service.interface';
 import { AccountNotFoundError, AccountNotFreezableError } from '../errors';
-import { IAccountsService } from '../interfaces/accounts.service.interface';
+import { IAccountsService, ListAccountsQuery } from '../interfaces/accounts.service.interface';
 
 /** Upper bound on ledger legs returned by one statement read. The underlying query
  * MUST stay bounded — an account's history is unbounded, so it is never scanned whole. */
 export const STATEMENT_PAGE_LIMIT = 100;
+
+/** Paging bounds for the admin account list ({@link AccountsService.listAccounts}), mirroring the
+ * transfers admin list: a missing `limit` defaults to {@link ADMIN_LIST_DEFAULT_LIMIT}; a larger
+ * request is clamped to {@link ADMIN_LIST_MAX_LIMIT}, so the account table is never scanned
+ * unbounded. */
+const ADMIN_LIST_DEFAULT_LIMIT = 50;
+const ADMIN_LIST_MAX_LIMIT = 200;
 
 /**
  * Fail-closed guard on the owner scope. An empty `ownerId` would let TypeORM drop the
@@ -65,6 +72,24 @@ export class AccountsService implements IAccountsService {
   async listOwnedAccounts(ownerId: string): Promise<Account[]> {
     assertOwnerScope(ownerId);
     return this.accounts.findByOwner(ownerId);
+  }
+
+  /**
+   * Admin `GET /admin/accounts` — view ANY account (spec 04 "Admin ops"). DELIBERATELY NOT
+   * owner-scoped: every OTHER account read binds `owner_id`, but the role-gated admin surface may
+   * see any owner's accounts (and system/clearing accounts), so this method omits the owner
+   * predicate ON PURPOSE and applies NO `assertOwnerScope`. A pure READ (no audit). It CLAMPS the
+   * requested paging — an over-large `limit` is capped to {@link ADMIN_LIST_MAX_LIMIT} and a
+   * negative/absent `offset`/`limit` floored/defaulted — so an admin can never ask the DB for an
+   * unbounded scan, then delegates to the parameterized repo query.
+   */
+  listAccounts(query: ListAccountsQuery): Promise<Account[]> {
+    const limit = Math.min(
+      Math.max(query.limit ?? ADMIN_LIST_DEFAULT_LIMIT, 1),
+      ADMIN_LIST_MAX_LIMIT,
+    );
+    const offset = Math.max(query.offset ?? 0, 0);
+    return this.accounts.queryAccounts({ ownerId: query.ownerId, limit, offset });
   }
 
   /**

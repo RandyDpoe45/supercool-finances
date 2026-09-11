@@ -6,6 +6,15 @@ import { AccountStatus } from '../../entities/enums';
  * concrete TypeORM implementation (ADR: depend on interfaces/tokens). */
 export const ACCOUNT_REPOSITORY = Symbol('ACCOUNT_REPOSITORY');
 
+/** Filter for the admin account query ({@link IAccountRepository.queryAccounts}). `ownerId` is
+ * optional (absent → any owner, including system accounts); the already-clamped `limit`/`offset`
+ * (the service bounds them) are required. */
+export interface AccountQueryFilter {
+  ownerId?: string;
+  limit: number;
+  offset: number;
+}
+
 /** Persistence port for {@link Account}. Minimal surface for this step; domain-driven
  * queries (reconstruction, spend-window logic, etc.) arrive with their callers. */
 export interface IAccountRepository {
@@ -13,6 +22,12 @@ export interface IAccountRepository {
   create(data: DeepPartial<Account>): Promise<Account>;
   /** All accounts owned by a customer (`owner_id`); a customer may have several. */
   findByOwner(ownerId: string): Promise<Account[]>;
+  /** Admin-scoped account query (spec 04 "Admin ops" — `GET /accounts`, view ANY account). A
+   * parameterized SELECT with the optional `ownerId` filter bound, `ORDER BY created_at DESC` (id
+   * tiebreak for determinism), `LIMIT`/`OFFSET` from the (already-clamped) filter. This is a plain
+   * read (no `FOR UPDATE`) and is DELIBERATELY NOT owner-scoped — it returns any account (customer
+   * OR system) for the role-gated admin surface. */
+  queryAccounts(filter: AccountQueryFilter): Promise<Account[]>;
   /** Single account scoped to its owner — ownership is enforced INSIDE the query
    * (`WHERE id = :id AND owner_id = :sub`); a non-owned or missing row resolves `null`
    * so the caller returns 404, never 403 (anti-IDOR / BOLA, ADR-3). System accounts

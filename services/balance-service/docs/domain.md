@@ -67,6 +67,12 @@ per step:
   a PENDING `ApprovalRequest`), a DIFFERENT checker `POST /admin/approvals/:id/approve` (executes
   atomically) or `/reject`s it. Approve runs two guarded gates (approval `PENDING → EXECUTED` +
   original `POSTED → REVERSED`) then a FORCED compensating post through the reducer, all in one tx.
+- **Admin read surface — list endpoints**
+  ([below](#admin-read-surface--list-endpoints)): three companion `/admin` LIST reads —
+  `GET /admin/accounts`, `GET /admin/limits`, `GET /admin/approvals` — mirroring the existing
+  `GET /admin/transactions`. Each is a NON-owner-scoped, role-gated read that writes NO audit row
+  and uses NO transaction: a `.strict()` zod query → a delegating service method (clamp/default
+  here) → a parameterized repo query.
 
 ## Module structure
 
@@ -2065,7 +2071,56 @@ compensating `transaction.posted` event (no separate `transaction.reversed`). Th
 BOTH reversal paths — the 5c rail-failure reversal and the 8b maker-checker reversal — since both
 post through the same reducer with `reversesTransactionId` set on the command.
 
+## Admin read surface — list endpoints
+
+Three companion `/admin` **LIST reads**, added alongside the single-item admin ops so an admin/auditor
+can browse the plane, not just act on one id at a time. Each **mirrors the existing
+[`GET /admin/transactions`](#get-transactions--view-any-transaction-transfers-feature) read exactly**:
+role-gated by the `GatewayIdentityGuard` (`X-User-Id` + the `admin` role, else 403), **DELIBERATELY NOT
+owner-scoped** (unlike every `/api` read, they omit the `owner_id` predicate — the role-gated admin
+surface may see any owner's rows), a pure **READ that writes NO audit row and opens NO transaction**,
+and the flow is always the same three hops:
+
+1. a **`.strict()` zod query schema** at the controller boundary (`new ZodValidationPipe(schema)` in
+   `@Query(...)`) — shape-checks the untrusted params and rejects unknown keys (a security control);
+2. a **delegating service method** (interface + impl behind the existing `*_SERVICE` token) that
+   applies any **clamp/default in the SERVICE, not the schema**, then delegates;
+3. a **parameterized repository query** (interface + impl behind the existing `*_REPOSITORY` token)
+   that appends a **bound** predicate per optional filter (never string interpolation) and orders
+   `created_at DESC, id DESC` (deterministic tiebreak).
+
+The controller returns the **named-array envelope** built from the **reused, unchanged** whitelist
+serializer for that entity (the anti-leak boundary — internal columns like `systemKey`, the spend
+counters, and the approval `payload` blob stay off the wire). No `admin.module.ts` change — all three
+controllers were already declared on the `/admin` surface registry.
+
+| Route | Query (`.strict()`) | Envelope | Service | Repo |
+|---|---|---|---|---|
+| `GET /admin/accounts` | `{ ownerId?, limit?, offset? }` (limit/offset coerced non-neg ints, unbounded) | `{ accounts: AdminAccountDto[] }` | `IAccountsService.listAccounts` | `IAccountRepository.queryAccounts` |
+| `GET /admin/limits` | `{ scope? ('global'\|'customer'), ownerId? }` (no paging) | `{ limits: LimitsDto[] }` | `ILimitsService.listLimits` | `IUserLimitsRepository.list` |
+| `GET /admin/approvals` | `{ status? (ApprovalStatus) }` (no paging) | `{ approvals: ApprovalRequestDto[] }` | `IApprovalService.listApprovals` | `IApprovalRequestRepository.listByStatus` |
+
+**`GET /admin/accounts`** — clamps the requested paging in the service (default 50, max 200, offset ≥ 0,
+mirroring the transfers admin list) so the account table is never scanned unbounded, then delegates to
+`queryAccounts` (`createQueryBuilder('a')`, optional bound `a.ownerId = :ownerId`, `ORDER BY
+a.createdAt DESC, a.id DESC`, `LIMIT`/`OFFSET`). An absent `ownerId` returns **any** account, including
+system/clearing accounts. Reuses the step-8a `serializeAdminAccount` (whitelist) unchanged.
+
+**`GET /admin/limits`** — the service maps the optional wire `scope` string to the `UserLimitsScope`
+enum, then delegates to `list` (`createQueryBuilder('l')`, optional bound `l.scope` / `l.ownerId`,
+`ORDER BY l.createdAt DESC, l.id DESC`). No paging — limits rows are few (one global baseline plus
+per-customer overrides). Reuses `serializeLimits` unchanged. This is the read companion to the step-8a
+`PUT /admin/limits` configuration surface.
+
+**`GET /admin/approvals`** — the **default status is applied in the SERVICE** (`query.status ??
+ApprovalStatus.Pending`), so an absent query returns the **PENDING queue** — the checker's view for
+discovering pending reversals to decide (the natural companion to
+[`POST /admin/approvals/:id/approve|reject`](#endpoints-1)). Delegates to `listByStatus`
+(`find({ where: { status }, order: { createdAt: 'DESC', id: 'DESC' } })`). No paging — approval rows
+are few. Reuses `serializeApprovalRequest` unchanged (the free-form `payload` blob is not surfaced).
+
 ## Not in this slice (later)
 
 Statement pagination beyond the first page is deferred — the read slice returns only the most recent
-`STATEMENT_PAGE_LIMIT` legs. With step 8b the balance-service domain layer is complete.
+`STATEMENT_PAGE_LIMIT` legs. With step 8b the balance-service domain layer is complete; the admin read
+surface above adds browse-list companions to the single-item admin ops (no new money-moving behavior).

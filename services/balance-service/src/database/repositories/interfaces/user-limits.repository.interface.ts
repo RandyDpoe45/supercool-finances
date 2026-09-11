@@ -5,6 +5,13 @@ import { UserLimits } from '../../entities/user-limits.entity';
 /** DI token for {@link IUserLimitsRepository}. */
 export const USER_LIMITS_REPOSITORY = Symbol('USER_LIMITS_REPOSITORY');
 
+/** Filter for the admin limits query ({@link IUserLimitsRepository.list}). Both fields optional
+ * (absent → no predicate on that column). No paging — limits rows are few. */
+export interface UserLimitsListFilter {
+  scope?: UserLimitsScope;
+  ownerId?: string;
+}
+
 /** The three resolved caps for an owner + currency (each `null` = uncapped for that field). */
 export interface ResolvedLimits {
   perTransactionMax: string | null;
@@ -30,6 +37,11 @@ export interface IUserLimitsRepository {
   create(data: DeepPartial<UserLimits>): Promise<UserLimits>;
   /** Customer-scope limit rows for a customer (`owner_id`); global rows have `owner_id` NULL. */
   findByOwner(ownerId: string): Promise<UserLimits[]>;
+  /** Admin-scoped limits query (spec 04 "Admin ops" — `GET /limits`, view ANY limits row). A
+   * parameterized SELECT with the optional `scope` / `ownerId` filters bound, `ORDER BY created_at
+   * DESC` (id tiebreak for determinism). No `FOR UPDATE`, no paging (limits rows are few). This is
+   * a plain read for the role-gated admin surface. */
+  list(filter: UserLimitsListFilter): Promise<UserLimits[]>;
   /**
    * Resolve the caps that apply to an owner + currency, inside the caller's transaction (joined
    * to the reducer's account-lock critical section). Row-level, customer-wins resolution: the

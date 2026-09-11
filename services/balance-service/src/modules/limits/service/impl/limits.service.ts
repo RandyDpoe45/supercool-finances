@@ -14,7 +14,11 @@ import {
   IAuditService,
 } from '../../../audit/service/interfaces/audit.service.interface';
 import { InvalidLimitsError } from '../errors';
-import { ILimitsService, UpsertLimitsInput } from '../interfaces/limits.service.interface';
+import {
+  ILimitsService,
+  ListLimitsQuery,
+  UpsertLimitsInput,
+} from '../interfaces/limits.service.interface';
 
 /** A compact before/after snapshot of the limits row for the audit metadata — the fields that
  * meaningfully change, not the whole entity (drops `id`/timestamps noise). `null` before-image
@@ -87,5 +91,20 @@ export class LimitsService implements ILimitsService {
       });
       return after;
     });
+  }
+
+  /**
+   * Admin `GET /admin/limits` — view ANY limits row (spec 04 "Admin ops"). Maps the optional wire
+   * `scope` string to the {@link UserLimitsScope} enum, then delegates to the repository's
+   * parameterized query. A pure READ (no audit, no tx). Returns entities; the controller serializes.
+   */
+  listLimits(query: ListLimitsQuery): Promise<UserLimits[]> {
+    const scope =
+      query.scope === undefined
+        ? undefined
+        : query.scope === 'global'
+          ? UserLimitsScope.Global
+          : UserLimitsScope.Customer;
+    return this.limits.list({ scope, ownerId: query.ownerId });
   }
 }

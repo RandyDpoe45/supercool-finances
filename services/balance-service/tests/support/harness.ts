@@ -893,6 +893,34 @@ export function getTransactionStatus(): Record<string, string> {
 }
 
 /**
+ * The `ApprovalStatus` enum (native-Postgres-enum mirror: `PENDING`/`APPROVED`/`REJECTED`/`EXECUTED`)
+ * — so the `/admin/approvals` read suites can assert the DEFAULT status the service applies (PENDING,
+ * the checker's queue) and a pass-through status without hard-coding string labels. Resolved from the
+ * entities barrel; the single coordination point if the implementor moves it.
+ */
+export function getApprovalStatus(): Record<string, string> {
+  return resolveOrThrow(
+    'the ApprovalStatus enum',
+    [`${SRC}/database/entities/enums`],
+    ['ApprovalStatus'],
+  );
+}
+
+/**
+ * The `UserLimitsScope` enum (native-Postgres-enum mirror: `global`/`customer`) — so the
+ * `/admin/limits` read suites can assert the service maps the wire `scope` string to the ENUM member
+ * before delegating to the repo, without hard-coding the label. Resolved from the entities barrel; the
+ * single coordination point if the implementor moves it.
+ */
+export function getUserLimitsScope(): Record<string, string> {
+  return resolveOrThrow(
+    'the UserLimitsScope enum',
+    [`${SRC}/database/entities/enums`],
+    ['UserLimitsScope'],
+  );
+}
+
+/**
  * The `TransfersService` CLASS, for the pure unit spec (driven through a Nest TestingModule so the
  * injection is order-independent — see tests/unit/transfers.service.spec.ts). Scanned with
  * `findExportAcross`; if the implementor moves/renames it, add the path/export HERE — the single

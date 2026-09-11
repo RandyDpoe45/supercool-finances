@@ -1,5 +1,6 @@
 import { DeepPartial, QueryRunner } from 'typeorm';
 import { ApprovalRequest } from '../../entities/approval-request.entity';
+import { ApprovalStatus } from '../../entities/enums';
 
 /** DI token for {@link IApprovalRequestRepository}. */
 export const APPROVAL_REQUEST_REPOSITORY = Symbol('APPROVAL_REQUEST_REPOSITORY');
@@ -27,6 +28,11 @@ export interface IApprovalRequestRepository {
   /** Every approval request targeting a given transaction (any status). Backs the propose-time
    * duplicate guard (reject a new proposal when a PENDING or EXECUTED one already exists). */
   findByTargetTransaction(targetTransactionId: string): Promise<ApprovalRequest[]>;
+  /** Admin-scoped approvals query (spec 04 "Admin ops" — `GET /approvals`, the checker's queue). All
+   * approvals in the given `status`, `ORDER BY created_at DESC` (id tiebreak for determinism). No
+   * `FOR UPDATE`, no paging (approval rows are few). The service applies the default status (PENDING)
+   * before calling this — the checker's queue is the default view. */
+  listByStatus(status: ApprovalStatus): Promise<ApprovalRequest[]>;
   /** Guarded `PENDING → EXECUTED` transition inside the caller's transaction:
    * `UPDATE approval_request SET status = 'EXECUTED', checker_id = :checkerId, decided_at = now(),
    * executed_at = now() WHERE id = :id AND status = 'PENDING'`. Returns `true` iff exactly one row

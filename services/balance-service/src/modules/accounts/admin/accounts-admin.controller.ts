@@ -1,18 +1,22 @@
 import {
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Inject,
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
 } from '@nestjs/common';
 import { Identity } from '../../../common/identity/identity.decorator';
 import { RequestIdentity } from '../../../common/identity/request-identity';
+import { ZodValidationPipe } from '../../../common/validation/zod-validation.pipe';
 import {
   ACCOUNTS_SERVICE,
   IAccountsService,
 } from '../service/interfaces/accounts.service.interface';
+import { ListAccountsQueryParams, listAccountsQuerySchema } from './dto/accounts-query.schema';
 import { AdminAccountDto } from './dto/admin-account.dto';
 import { serializeAdminAccount } from './serializers/accounts-admin.serializer';
 
@@ -32,6 +36,21 @@ import { serializeAdminAccount } from './serializers/accounts-admin.serializer';
 @Controller('admin/accounts')
 export class AccountsAdminController {
   constructor(@Inject(ACCOUNTS_SERVICE) private readonly accounts: IAccountsService) {}
+
+  /** List accounts with an optional `ownerId` filter + paging (limit clamped to ≤200, default 50;
+   * offset ≥0). A NON-owner-scoped READ (any owner, incl. system accounts) — writes NO audit row.
+   * 200, `{ accounts: AdminAccountDto[] }`. */
+  @Get()
+  async listAccounts(
+    @Query(new ZodValidationPipe(listAccountsQuerySchema)) query: ListAccountsQueryParams,
+  ): Promise<{ accounts: AdminAccountDto[] }> {
+    const accounts = await this.accounts.listAccounts({
+      ownerId: query.ownerId,
+      limit: query.limit,
+      offset: query.offset,
+    });
+    return { accounts: accounts.map(serializeAdminAccount) };
+  }
 
   /** Freeze a customer account (blocks its future debits; credits still land). 200, admin view. */
   @Post(':id/freeze')

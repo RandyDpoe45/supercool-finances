@@ -20,6 +20,14 @@ export interface UpsertLimitsInput {
   monthlyMax?: string | null;
 }
 
+/** The admin limits-list query ({@link ILimitsService.listLimits}, `GET /admin/limits`). Both
+ * filters optional (absent → all rows); `scope` is the wire string the service maps to the
+ * `UserLimitsScope` enum before delegating. */
+export interface ListLimitsQuery {
+  scope?: 'global' | 'customer';
+  ownerId?: string;
+}
+
 /**
  * Admin limits configuration (spec 04 "Admin ops" — `PUT /limits`, a single-actor action). Upserts
  * the global baseline or a per-customer override and writes ONE audit row (before/after image) in
@@ -33,4 +41,12 @@ export interface ILimitsService {
    * absent; customer ⇒ ownerId present). `actorId` is the admin's trusted gateway identity.
    */
   upsertLimits(actorId: string, input: UpsertLimitsInput): Promise<UserLimits>;
+
+  /**
+   * Admin `GET /admin/limits` — view ANY limits row (spec 04 "Admin ops"). Maps the optional wire
+   * `scope` string to the {@link UserLimitsScope} enum, then delegates to the repository's
+   * parameterized query. A pure READ — it writes NO audit row. Returns entities; the controller
+   * serializes them.
+   */
+  listLimits(query: ListLimitsQuery): Promise<UserLimits[]>;
 }

@@ -1,8 +1,15 @@
 import { ApprovalRequest } from '../../../../database/entities/approval-request.entity';
+import { ApprovalStatus } from '../../../../database/entities/enums';
 
 /** DI token for {@link IApprovalService}. Consumers depend on the interface via this token, never
  * the concrete class. */
 export const APPROVAL_SERVICE = Symbol('APPROVAL_SERVICE');
+
+/** The admin approvals-list query ({@link IApprovalService.listApprovals}, `GET /admin/approvals`).
+ * `status` is optional at the wire — the service DEFAULTS it to `PENDING` (the checker's queue). */
+export interface ListApprovalsQuery {
+  status?: ApprovalStatus;
+}
 
 /**
  * The maker-checker (four-eyes) reversal service (spec 04 "Admin ops" — reversals). A maker
@@ -41,4 +48,12 @@ export interface IApprovalService {
    * REJECTED approval.
    */
   reject(actorId: string, approvalId: string): Promise<ApprovalRequest>;
+
+  /**
+   * Admin `GET /admin/approvals` — list approval requests by status (spec 04 "Admin ops"). DEFAULTS
+   * to `PENDING` (the checker's queue — where a checker discovers pending reversals to decide) when
+   * the caller supplies no status, then delegates to the repository. A pure READ — it writes NO
+   * audit row. Returns entities; the controller serializes them.
+   */
+  listApprovals(query: ListApprovalsQuery): Promise<ApprovalRequest[]>;
 }

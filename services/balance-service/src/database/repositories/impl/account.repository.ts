@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, QueryRunner, Repository } from 'typeorm';
 import { Account } from '../../entities/account.entity';
 import { AccountStatus } from '../../entities/enums';
-import { IAccountRepository } from '../interfaces/account.repository.interface';
+import { AccountQueryFilter, IAccountRepository } from '../interfaces/account.repository.interface';
 
 /** TypeORM implementation of {@link IAccountRepository}, bound to `ACCOUNT_REPOSITORY` in
  * {@link PersistenceModule}. No domain logic — persistence primitives only. */
@@ -21,6 +21,22 @@ export class AccountRepository implements IAccountRepository {
 
   findByOwner(ownerId: string): Promise<Account[]> {
     return this.repo.find({ where: { ownerId } });
+  }
+
+  queryAccounts(filter: AccountQueryFilter): Promise<Account[]> {
+    // A plain (no FOR UPDATE), DELIBERATELY-NOT-owner-scoped read for the role-gated admin surface.
+    // The optional `ownerId` appends a bound predicate (never interpolated); newest-first with an id
+    // tiebreak for deterministic ordering; LIMIT/OFFSET from the already-clamped filter.
+    const qb = this.repo.createQueryBuilder('a');
+    if (filter.ownerId !== undefined) {
+      qb.andWhere('a.ownerId = :ownerId', { ownerId: filter.ownerId });
+    }
+    return qb
+      .orderBy('a.createdAt', 'DESC')
+      .addOrderBy('a.id', 'DESC')
+      .limit(filter.limit)
+      .offset(filter.offset)
+      .getMany();
   }
 
   findByIdAndOwner(id: string, ownerId: string): Promise<Account | null> {
