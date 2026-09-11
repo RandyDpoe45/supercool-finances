@@ -13,9 +13,10 @@
  *                                               destinationAccountNumber/destinationMaskedName null
  *
  * It proves at the HTTP edge: initiate 201 PENDING with the time-box on the wire and NO destination
- * leak (no external account ref, no clearing UUID); the DomainError→HTTP mapping (cooling-off payee
- * → 409 PAYEE_IN_COOLING_OFF; a non-owned payee → 404 with no ownership leak; zod-invalid body →
- * 400); OTP-confirm → 200 POSTED; the shared pending feed rendering an external authorization with
+ * leak (no external account ref, no clearing UUID); the DomainError→HTTP mapping (a cooling-off payee
+ * is a P2b BUSINESS failure at initiate → 201 with status "FAILED" + a persisted terminal FAILED and
+ * one transaction.failed event, NOT a 409; a non-owned payee → 404 with no ownership leak; zod-invalid
+ * body → 400); OTP-confirm → 200 POSTED; the shared pending feed rendering an external authorization with
  * type + payeeDisplayName; cancel → 200 with the backing hold RELEASED (verified at the DB); and the
  * single-pending rule spanning external (a second initiate supersedes the first).
  *
@@ -301,22 +302,92 @@ suite(
       expect(serialized).not.toContain(owner); // owner sub withheld
     });
 
-    // ---- cooling-off payee → 409 --------------------------------------------------------------
+    // ---- cooling-off payee → 201-FAILED (P2b business failure at initiate) ---------------------
+    // P2b (spec 05 producer side, DATA-MODEL Part 2): a cooling-off payee is a BUSINESS failure at
+    // initiate — no longer a bare 409. The service persists a TERMINAL FAILED external_outbound and
+    // RETURNS it (201 with status "FAILED"), completes the idempotency key linked to it, and emits
+    // exactly one `transaction.failed` event. Money-safety is unchanged (no hold, no ledger, balances
+    // untouched) and the anti-leak wire contract still holds (no failureReason / destination_ref /
+    // rail / owner sub). This is the HTTP-edge mirror of the integration-level cooling-off proof.
 
-    it('POST /api/transfers/external to a payee still in cooling-off → 409 PAYEE_IN_COOLING_OFF; no transfer created', async () => {
+    it('POST /api/transfers/external to a payee still in cooling-off → 201 with status "FAILED" (P2b): a terminal FAILED external_outbound is persisted (reason PAYEE_IN_COOLING_OFF), one transaction.failed event, NO money moved / NO hold, and no anti-leak regression', async () => {
       const owner = newOwner();
+      const AMOUNT = 1000;
       const src = await mkCustomer(owner, { balance: 10000 });
       const payee = await mkPayee(owner, { coolingOffUntil: new Date(Date.now() + 3_600_000) });
 
-      const res = await postExternal(owner, src.id, payee.id, 1000);
-      expect(res.status).toBe(409);
-      expectErrorDto(res.body, 'PAYEE_IN_COOLING_OFF');
+      const res = await postExternal(owner, src.id, payee.id, AMOUNT);
 
-      const n = await ds.query(
-        `SELECT count(*)::int AS n FROM "transaction" WHERE initiated_by = $1`,
+      // 201-FAILED (RETURNED, not a 4xx) — the initiate-time inversion vs. confirm.
+      expect(res.status).toBe(201);
+      expect(statusOf(res.body)).toBe('FAILED');
+      const transferId = idOf(res.body);
+
+      // EXACTLY ONE transaction for the owner, a terminal FAILED external_outbound with the full shape.
+      const rows = await ds.query(
+        `SELECT id, status, type, failure_reason, failed_at, posted_at, expires_at,
+                debit_account_id, credit_account_id, payee_id
+           FROM "transaction" WHERE initiated_by = $1`,
         [owner],
       );
-      expect(n[0].n).toBe(0);
+      expect(rows).toHaveLength(1);
+      const row = rows[0];
+      expect(row.id).toBe(transferId);
+      expect(row.status).toBe('FAILED');
+      expect(row.type).toBe('external_outbound');
+      expect(row.failure_reason).toBe('PAYEE_IN_COOLING_OFF');
+      expect(row.failed_at).not.toBeNull();
+      expect(row.posted_at).toBeNull();
+      expect(row.expires_at).toBeNull(); // never became a live PENDING → no TTL
+      expect(row.debit_account_id).toBe(src.id);
+      expect(row.payee_id).toBe(payee.id);
+
+      // MONEY-SAFETY: source balance unchanged, held zero, NO hold row at all, NO ledger legs for it.
+      const acc = await ds.query(`SELECT balance, held FROM account WHERE id = $1`, [src.id]);
+      expect(acc[0].balance).toBe('10000');
+      expect(acc[0].held).toBe('0');
+      const holds = await ds.query(`SELECT status FROM hold WHERE account_id = $1`, [src.id]);
+      expect(holds).toHaveLength(0);
+      const legs = await ds.query(`SELECT id FROM ledger_entry WHERE transaction_id = $1`, [
+        transferId,
+      ]);
+      expect(legs).toHaveLength(0);
+
+      // EXACTLY ONE outbox row for it, the enriched transaction.failed event: empty legs, payee
+      // snapshot present, amount as an int64 STRING, failureReason carried ON the event (analytics
+      // needs the code) — distinct from the customer-facing wire body below.
+      const events = await ds.query(
+        `SELECT event_type, payload FROM outbox_event WHERE transaction_id = $1`,
+        [transferId],
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0].event_type).toBe('transaction.failed');
+      const payload = events[0].payload;
+      expect(payload.transaction.id).toBe(transferId);
+      expect(payload.transaction.status).toBe('FAILED');
+      expect(payload.transaction.postedAt ?? null).toBeNull();
+      expect(Array.isArray(payload.legs)).toBe(true);
+      expect(payload.legs).toHaveLength(0);
+      expect(typeof payload.transaction.amount).toBe('string');
+      expect(payload.transaction.amount).toBe(String(AMOUNT));
+      expect(payload.transaction.failureReason ?? payload.failureReason).toBe(
+        'PAYEE_IN_COOLING_OFF',
+      );
+      const snap = payload.transaction.payee ?? payload.payee;
+      expect(snap).toBeTruthy();
+      expect(snap.id).toBe(payee.id);
+      expect(snap.displayName ?? snap.display_name).toBe('Acme Payments');
+      expect(snap.rail).toBe(outboundRail);
+
+      // ANTI-LEAK on the customer-facing wire body: failureReason is an internal column and MUST NOT
+      // cross (neither key nor value), and the destination ref / rail / owner sub are still withheld.
+      const t = res.body?.transfer ?? res.body?.transaction ?? res.body;
+      expect('failureReason' in t).toBe(false);
+      const serialized = JSON.stringify(res.body);
+      expect(serialized).not.toContain('PAYEE_IN_COOLING_OFF');
+      expect(serialized).not.toContain(payee.destination_ref);
+      expect(serialized).not.toContain(outboundRail);
+      expect(serialized).not.toContain(owner);
     });
 
     // ---- non-owned payee → 404 (anti-IDOR, no leak) -------------------------------------------

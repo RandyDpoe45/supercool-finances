@@ -115,6 +115,30 @@ suite('serializeTransfer — entity -> TransferDto whitelist (pure, no DB)', () 
     expect(dto.postedAt).toBeNull();
     expect(dto.expiresAt).toBeNull();
   });
+
+  // P2b (spec 05 producer side): a business-failed external initiate returns a TERMINAL FAILED
+  // transaction; the controller answers 201 with a body whose `status` is "FAILED". The wire body
+  // renders `status` and null `postedAt`/`expiresAt`, and — as with any transfer — MUST NOT carry
+  // `failureReason` (an internal column): the client sees only that it FAILED, never the domain code.
+  it('renders a FAILED transaction as status "FAILED" with null postedAt/expiresAt and does NOT leak failureReason', () => {
+    const dto = toDto(
+      fullTransaction({
+        type: 'external_outbound',
+        status: 'FAILED',
+        failureReason: 'INSUFFICIENT_FUNDS',
+        failedAt: new Date('2026-04-04T04:04:04.000Z'),
+        postedAt: null,
+        expiresAt: null,
+      }),
+    );
+    expect(dto.status).toBe('FAILED');
+    expect(dto.postedAt).toBeNull();
+    expect(dto.expiresAt).toBeNull();
+    // failureReason is an internal column — never on the wire (neither as a key nor as a value).
+    expect('failureReason' in dto).toBe(false);
+    expect('failedAt' in dto).toBe(false);
+    expect(JSON.stringify(dto)).not.toContain('INSUFFICIENT_FUNDS');
+  });
 });
 
 suite('serializePendingAuthorization — read model -> PendingAuthorizationDto (pure, no DB)', () => {

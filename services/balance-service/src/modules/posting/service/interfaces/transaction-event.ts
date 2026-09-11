@@ -103,6 +103,22 @@ export type TransactionFailedPayload = {
   legs: TransactionEventLeg[];
 };
 
+/** The "intended movement" a FRESH terminal FAILED transaction records — the input to
+ * {@link IPostingService.recordFreshFailedInTx}. Unlike the confirm-time FAILED path (which
+ * transitions an EXISTING pending header), the initiate-time external-outbound business-failure
+ * path has NO header yet, so the reducer INSERTS a new FAILED header from this spec. It captures
+ * the debit (source) / credit (clearing) the movement WOULD have made — but no money moves, so the
+ * emitted event carries empty `legs`. Money stays int64 minor units as a string. */
+export interface FreshFailedTransaction {
+  type: TransactionType;
+  amount: string;
+  currency: string;
+  debitAccountId: string;
+  creditAccountId: string;
+  payeeId: string | null;
+  initiatedBy: string;
+}
+
 /** The `outbox_event.event_type` (a stream field) for a transaction event: `transaction.posted`
  * for a money movement, `transaction.failed` for a persisted confirm-time business failure. */
 export type TransactionEventType = 'transaction.posted' | 'transaction.failed';
