@@ -6,7 +6,7 @@ import { Link } from 'react-router-dom';
  * The authenticated admin frame: a header (title + primary nav + sign-out) wrapping the
  * routed content. Navigation uses router `<Link>`s (the app is root-served). Nav covers Home,
  * account management (Accounts), Limits, maker-checker Reversals, the read-only Audit log, and the
- * Analytics placeholder.
+ * Analytics dashboard.
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const auth = useAuth();

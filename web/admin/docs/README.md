@@ -5,12 +5,13 @@ The internal-plane admin dashboard for SuperCool Finances (spec 07). It logs in 
 **`whoami`** endpoint to render the signed-in admin identity — the auth-shell proof that a
 bearer round-trips through the gateway. **Account management (freeze / unfreeze + view / edit
 limits) is built (Step A2)** — see "Account management" below — the **maker-checker
-reversals** screen is built (Step A3) — see "Reversals (maker-checker)" below — and the
-**read-only audit view** is built (Step A4) — see "Audit view" below. The
-analytics-dashboard screen is a **later step**; this document covers the scaffold, the auth +
-data spine, the account-management + reversals + audit screens, the MSW stub harness, the
-root-served `:8081` serving topology, the **production image** (multi-stage, served by
-internal-nginx at `/`), and the environment variables.
+reversals** screen is built (Step A3) — see "Reversals (maker-checker)" below — the
+**read-only audit view** is built (Step A4) — see "Audit view" below — and the **analytics
+dashboard** is built (Step A5), consuming the analytics server (spec 05) over its own
+`/analytics/admin` gateway namespace — see "Analytics dashboard" below. This document covers
+the scaffold, the auth + data spine, the account-management + reversals + audit + analytics
+screens, the MSW stub harness, the root-served `:8081` serving topology, the **production
+image** (multi-stage, served by internal-nginx at `/`), and the environment variables.
 
 This app is **self-contained** (ADR-16): **no imports from other folders** and no shared
 component library. It is a SEPARATE project from `web/client` and `web/otp` — it does not, and
@@ -46,7 +47,7 @@ web/admin/
 ├── src/
 │   ├── main.tsx               # bootstrap: start MSW (dev) → render <App/>
 │   ├── App.tsx                # AuthProvider → Provider(store) → Router → AuthGate
-│   ├── app/routes.tsx         # authenticated routes (/ home, /accounts, /limits, /reversals, /audit, /analytics placeholder)
+│   ├── app/routes.tsx         # authenticated routes (/ home, /accounts, /limits, /reversals, /audit, /analytics)
 │   ├── auth/
 │   │   ├── userManager.ts     # OIDC settings (admin-app client) + shared UserManager + getAccessToken()
 │   │   └── AuthGate.tsx       # protected-route gate (login redirect / callback / error)
@@ -56,14 +57,15 @@ web/admin/
 │   │   ├── money.ts           # float-free minor-unit formatting (BigInt/string) — app-local copy
 │   │   └── datetime.ts        # UTC -> America/Mexico_City rendering at the edge — app-local copy
 │   ├── services/api/
-│   │   ├── baseApi.ts         # createApi + fetchBaseQuery(prepareHeaders: bearer)
+│   │   ├── baseApi.ts         # createApi + fetchBaseQuery(prepareHeaders: bearer) — /balance/admin
+│   │   ├── analyticsApi.ts    # SECOND createApi (reducerPath analyticsApi) — /analytics/admin reporting reads
 │   │   ├── identityApi.ts     # getWhoami query (GET /balance/admin/whoami -> WhoamiDto)
 │   │   ├── accountsApi.ts     # getAccounts + freeze/unfreeze mutations (/admin/accounts)
 │   │   ├── limitsApi.ts       # getLimits + upsertLimits (/admin/limits)
 │   │   ├── transactionsApi.ts # getTransactions query (/admin/transactions)
 │   │   ├── approvalsApi.ts    # getApprovals + proposeReversal/approveReversal/rejectReversal (/admin reversals)
 │   │   ├── auditApi.ts        # getAudit query (/admin/audit, read-only)
-│   │   └── contracts/         # app-local copies of the /balance/admin wire contract (identity, error, account, limits, transaction, approval, audit)
+│   │   └── contracts/         # app-local copies of the wire contracts (identity, error, account, limits, transaction, approval, audit; analytics for /analytics/admin)
 │   ├── mocks/                 # MSW handlers, fixtures, state (adminState), browser worker, node server
 │   └── components/            # atomic design: atoms / molecules / organisms / templates / pages
 └── tests/                     # test suite (segregated; owned by the test writer)
@@ -79,11 +81,13 @@ pages). It currently holds:
   `LimitsTable` (current baseline + overrides), `LimitsForm` (the `PUT /admin/limits` editor),
   `TransactionsTable` (admin transactions + per-row Reverse, exports the pure `isReversible`
   predicate), `ApprovalsQueue` (the checker's pending queue + per-row Approve / Reject),
-  `AuditTable` (read-only audit-log rows + collapsible `metadata`).
+  `AuditTable` (read-only audit-log rows + collapsible `metadata`), `DailyAggregatesTable`
+  (per-day × currency × type volume, float-free `Money`), `AccountSummariesTable` (per-account
+  activity + latest balance, float-free `Money`).
 - **templates** — `AppShell` (the authenticated frame: title + primary nav + sign-out).
 - **pages** — `HomePage` (the whoami identity landing / auth-shell proof), `AccountsPage`
   (`/accounts`), `LimitsPage` (`/limits`), `ReversalsPage` (`/reversals`), `AuditPage`
-  (`/audit`), `AnalyticsPage` (placeholder pending the analytics server).
+  (`/audit`), `AnalyticsPage` (`/analytics` — the analytics dashboard, two report sections).
 
 `molecules/` is present but empty (`.gitkeep`). `Money`,
 `StatusBadge`, `Timestamp`, and the `money.ts` / `datetime.ts` libs are **app-local copies**
@@ -187,14 +191,28 @@ as `/admin/accounts` was before balance PR #50 added it server-side).
 the internal edge: the balance-service admin surface at `/balance/admin` (this `baseApi`) and
 the analytics server's reporting surface at `/analytics/admin` (ADR-17). Because they are
 distinct origins-of-record with distinct contracts and tag spaces, the analytics dashboard is
-served by a **second `createApi` slice** (its own `reducerPath` and `baseUrl` of
-`/analytics/admin`) rather than being folded into `baseApi`. That second slice arrives with the
-analytics screens in a later step; Step 1 wires only `baseApi`.
+served by a **second `createApi` slice** (`analyticsApi.ts` — its own `reducerPath: 'analyticsApi'`
+and `baseUrl` of `/analytics/admin`) rather than being folded into `baseApi`. Both slices use the
+**SAME OIDC bearer** (identical `prepareHeaders` wiring via `getAccessToken()`) — the two namespaces
+sit behind the same internal gateway's admin-role gate. `store.ts` registers **both** slices side by
+side: each contributes its own reducer **and** its own middleware (omitting the analytics middleware
+would silently break that slice's caching/refetch). `analyticsApi` declares its own tag types
+(`['AccountSummary', 'DailyAggregate']`); both its endpoints are pure reads, so nothing invalidates
+their static LIST tags.
+
+- **`getAccountSummaries`** (query, `GET /analytics/admin/reports/account-summaries` →
+  `AccountSummaryDto[]`) — unwraps the `{ accountSummaries }` envelope; optional filter
+  `{ ownerId, accountId, currency, limit, offset }` builds only the present params (paging is
+  server-clamped `[1, 200]`, default 50).
+- **`getDailyAggregates`** (query, `GET /analytics/admin/reports/daily-aggregates` →
+  `DailyAggregateDto[]`) — unwraps the `{ dailyAggregates }` envelope; optional filter
+  `{ currency, type, from, to, limit, offset }`; `from`/`to` are sent as `YYYY-MM-DD` day strings.
 
 ## MSW stub harness and how it maps to the real contract
 
-MSW intercepts **only `/balance/admin`** (the SPA's service-namespaced outbound path, ADR-17);
-OIDC traffic to Keycloak is left alone (`onUnhandledRequest: 'bypass'` in dev). The harness is
+MSW intercepts the SPA's two service-namespaced outbound paths — **`/balance/admin`** (the
+balance-service admin surface) and **`/analytics/admin`** (the analytics reporting surface), both
+ADR-17; OIDC traffic to Keycloak is left alone (`onUnhandledRequest: 'bypass'` in dev). The harness is
 **gated so it can never start in a production build**: `main.tsx` only imports and starts the
 browser worker behind `import.meta.env.DEV` (a **dynamic** import, so the mocks are tree-shaken
 out of `vite build`), and the node server is imported solely by the test setup.
@@ -231,9 +249,21 @@ out of `vite build`), and the node server is imported solely by the test setup.
     clamped `[1, 200]`, default 50; `offset` ≥ 0). Read-only — there is no audit mutation.
     `listAudit` sorts by `createdAt` DESC then `id` DESC (a **bigint-aware** id compare, so `'10'`
     precedes `'9'`), then applies the same clamp/paging helper as `listAccounts`.
-- **Path note:** MSW intercepts the ORIGIN-ROOT path `/balance/admin/…` — that is the
-  service-namespaced API path (ADR-17), NOT a SPA URL prefix. The admin SPA is root-served on
-  its dedicated `:8081` origin, so this is simply the same-origin API path.
+- It also implements the **analytics reporting surface** on the `/analytics/admin` namespace
+  (bearer-gated → 401 otherwise):
+  - `GET /analytics/admin/reports/account-summaries` → `{ accountSummaries }`; optional exact-match
+    `ownerId` / `accountId` / `currency` filters + `limit`/`offset` paging (`limit` clamped
+    `[1, 200]`, default 50; `offset` ≥ 0). Read-only.
+  - `GET /analytics/admin/reports/daily-aggregates` → `{ dailyAggregates }`; optional exact-match
+    `currency` / `type` + inclusive `from`/`to` (`YYYY-MM-DD` day-bound) filters + `limit`/`offset`
+    paging (same clamp). Read-only. `from`/`to` filter by a lexicographic day compare (valid for the
+    fixed-width `YYYY-MM-DD` shape). `src/mocks/state/analyticsState.ts` reads the frozen
+    `fixtures/analytics.ts` DIRECTLY (analytics has NO mutations — no mutable state, no reset) and
+    returns copies. Money in both reports is a minor-unit STRING (a value ABOVE 2^53 is seeded in
+    each report to prove int64 precision survives the render).
+- **Path note:** MSW intercepts the ORIGIN-ROOT paths `/balance/admin/…` and `/analytics/admin/…`
+  — those are the service-namespaced API paths (ADR-17), NOT SPA URL prefixes. The admin SPA is
+  root-served on its dedicated `:8081` origin, so these are simply same-origin API paths.
 - `src/mocks/fixtures/identity.ts` holds the seed identity (`admin-user-1`, roles `['admin']`);
   `fixtures/accounts.ts` seeds the accounts (a mix of active/frozen, an owner with two accounts,
   a null-owner system account); `fixtures/limits.ts` the global baseline + one customer override;
@@ -283,20 +313,18 @@ Build-time Vite vars (all **public** — they ship in the bundle). See `.env.exa
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `VITE_API_BASE_URL` | `/balance/admin` | Same-origin, service-namespaced API base (ADR-17; keep relative, origin-root). Kong strips `/balance`, so the balance-service still receives its own `/admin` surface. |
+| `VITE_ANALYTICS_API_BASE_URL` | `/analytics/admin` | Same-origin, service-namespaced base for the analytics reporting surface (ADR-17; keep relative). Kong strips `/analytics`, so the analytics server still receives its own `/admin` surface. Consumed by the second `analyticsApi` slice. |
 | `VITE_OIDC_AUTHORITY` | `http://keycloak.localtest.me:8082/realms/supercool` | Keycloak realm issuer. |
 | `VITE_OIDC_CLIENT_ID` | `admin-app` | Public OIDC client id — the admin dashboard login. |
 | `VITE_ENABLE_API_MOCKS` | `true` | Set `false` to disable the dev MSW stub. |
-
-The analytics namespace (`/analytics/admin`) is not represented here yet; it arrives with the
-analytics screens (a second RTK Query slice) in a later step.
 
 ## Admin features / UX
 
 - **Home** (`/`) — renders the `whoami` identity (`userId` + `roles`) once authenticated, with
   explicit loading and error (`role="alert"`) states. This is the concrete proof that the OIDC
   bearer reaches the admin surface through the gateway.
-- **Analytics** (`/analytics`) — a placeholder page stating the dashboard is pending the
-  analytics server (spec 05).
+- **Analytics** (`/analytics`) — the analytics dashboard: two report sections over the analytics
+  server (spec 05). See "Analytics dashboard (A5)" below.
 
 ### Account management (A2)
 
@@ -388,7 +416,48 @@ The balance-side `GET /admin/audit` read does **not exist server-side yet** — 
 contract stubbed in MSW** (exactly as `GET /admin/accounts` was before balance PR #50 added it), and
 is a pending balance-service follow-up.
 
-The remaining admin screen is a **later step**: the analytics dashboard.
+### Analytics dashboard (A5)
+
+One screen (`/analytics`, `AnalyticsPage`) under the fail-closed `AuthGate` — the **final** admin
+screen, and the only one that consumes the **analytics server** (spec 05) instead of the balance
+service. It reaches the analytics reporting surface over a **second gateway namespace**,
+`/analytics/admin` (ADR-17): the SPA calls origin-relative `/analytics/admin/reports/...`, and the
+internal gateway strips `/analytics` so the analytics server receives its own `/admin/reports/...`.
+This is a **second RTK Query slice** (`analyticsApi`, `reducerPath: 'analyticsApi'`, `baseUrl`
+`/analytics/admin`) using the **same OIDC bearer** as `baseApi` — both namespaces are behind the
+internal gateway's admin-role gate. The real endpoint is reachable through the internal edge's
+`/analytics/admin` route (spec 06 internal edge); in dev/test MSW mirrors the same path.
+
+Two independent report SECTIONS, each self-contained like `AuditPage` (its own filter bar with
+Apply / Clear, offset paging with Prev / Next at `limit` 50, page-owned loading/error via
+`describeApiError`, and its own read-only table):
+
+- **Daily aggregates** (`GET /admin/reports/daily-aggregates` → `{ dailyAggregates }`,
+  `DailyAggregatesTable`) — per-day × currency × type volume over POSTED events. Filters: `currency`
+  (text), `type` (`internal` | `external_outbound` | `external_inbound`), and `from`/`to`
+  `<input type="date">` day bounds (sent as `YYYY-MM-DD`). Columns: **Date (UTC day)**, Currency,
+  Type, Count, Total.
+- **Account summaries** (`GET /admin/reports/account-summaries` → `{ accountSummaries }`,
+  `AccountSummariesTable`) — per-account activity + latest known balance. Filters: `ownerId` +
+  `currency` (text). Columns: Account (id + `accountKind` / `systemKey` context), Owner, Currency,
+  Last balance, Txns, Debited, Credited, **Last activity (Mexico City)**.
+
+**Money handling.** Every money field — `lastBalanceAfter` / `totalDebited` / `totalCredited`
+(summaries) and `totalAmount` (aggregates) — is a canonical minor-unit integer **STRING** rendered
+float-free via the `Money` atom (BigInt/string math, never `Number`/`parseFloat`). `txnCount` and
+`count` are the only numerics. The app-local wire contract (`contracts/analytics.ts`) mirrors the
+analytics-server serializer output (ADR-16 — synced via the spec).
+
+**`date` vs `lastActivityAt` (a deliberate distinction).** The daily-aggregate `date` is a per-DAY
+UTC bucket **label** (`YYYY-MM-DD`, produced server-side as `$dateToString` in UTC) — it is rendered
+**VERBATIM** (column labelled "(UTC day)") and is **never** timezone-converted. In contrast,
+`lastActivityAt` is an ISO-8601 UTC **instant** and IS converted to `America/Mexico_City` at the
+display edge via the `Timestamp` atom — exactly like every other instant in the app.
+
+**Pagination.** `offset = page * 50`. **Previous** is disabled on the first page (`offset 0`);
+**Next** is disabled when the current page returned fewer than a full window of rows (the last
+page). Changing (Apply / Clear) a filter resets to page 0. The two sections keep independent
+filter + paging state.
 
 ## Running it
 

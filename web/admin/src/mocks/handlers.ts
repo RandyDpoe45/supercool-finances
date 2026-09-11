@@ -1,5 +1,9 @@
 import { http, HttpResponse } from 'msw';
 import type { AdminAccountsResponse } from '../services/api/contracts/account';
+import type {
+  AccountSummariesResponse,
+  DailyAggregatesResponse,
+} from '../services/api/contracts/analytics';
 import type { ApprovalsResponse } from '../services/api/contracts/approval';
 import type { AuditLogResponse } from '../services/api/contracts/audit';
 import type { ErrorResponse } from '../services/api/contracts/error';
@@ -21,12 +25,14 @@ import {
   unfreezeAccount,
   upsertLimits,
 } from './state/adminState';
+import { listAccountSummaries, listDailyAggregates } from './state/analyticsState';
 
 /**
- * MSW request handlers mirroring the REAL balance-service admin wire contract
- * (specs/07-frontends.md). Only `/balance/admin` is stubbed — the SPA's service-namespaced
- * outbound path per ADR-17 (the transport strips `/balance` so the service still serves its own
- * `/admin` surface). OIDC traffic to Keycloak hits the real authority.
+ * MSW request handlers mirroring the REAL admin wire contracts (specs/07-frontends.md) across the
+ * admin app's TWO gateway namespaces (ADR-17): `/balance/admin` (the balance-service admin surface)
+ * and `/analytics/admin` (the analytics server's reporting surface). Both are service-namespaced
+ * outbound paths — the internal transport strips the leading `/balance` or `/analytics` so each
+ * service still serves its own `/admin` surface. OIDC traffic to Keycloak hits the real authority.
  *
  * The stub mirrors the gateway/controller error contract: like the admin gateway guard, a request
  * without a bearer is rejected 401; like the `ZodValidationPipe` a malformed body/param is 400; the
@@ -375,5 +381,46 @@ export const handlers = [
       return mapReversalError(result.code);
     }
     return HttpResponse.json(result.value, { status: 200 });
+  }),
+
+  // --- Analytics reporting surface (`/analytics/admin`, ADR-17) ----------------------------------
+  // The analytics server's read-model reports over the SECOND gateway namespace. Same bearer gate
+  // as `/balance/admin` (both behind the internal gateway's admin-role gate). Pure reads.
+
+  // Per-account activity + latest-known balance. Optional exact-match `ownerId` / `accountId` /
+  // `currency` filters + `limit`/`offset` paging (limit clamped [1,200], default 50; offset ≥0).
+  http.get('/analytics/admin/reports/account-summaries', ({ request }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const url = new URL(request.url);
+    const accountSummaries = listAccountSummaries({
+      ownerId: url.searchParams.get('ownerId') ?? undefined,
+      accountId: url.searchParams.get('accountId') ?? undefined,
+      currency: url.searchParams.get('currency') ?? undefined,
+      limit: numericParam(url, 'limit'),
+      offset: numericParam(url, 'offset'),
+    });
+    const body: AccountSummariesResponse = { accountSummaries };
+    return HttpResponse.json(body);
+  }),
+
+  // Per-day × currency × type volume/count. Optional exact-match `currency` / `type` + inclusive
+  // `from`/`to` (`YYYY-MM-DD` day bounds) filters + `limit`/`offset` paging (same clamp as above).
+  http.get('/analytics/admin/reports/daily-aggregates', ({ request }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const url = new URL(request.url);
+    const dailyAggregates = listDailyAggregates({
+      currency: url.searchParams.get('currency') ?? undefined,
+      type: url.searchParams.get('type') ?? undefined,
+      from: url.searchParams.get('from') ?? undefined,
+      to: url.searchParams.get('to') ?? undefined,
+      limit: numericParam(url, 'limit'),
+      offset: numericParam(url, 'offset'),
+    });
+    const body: DailyAggregatesResponse = { dailyAggregates };
+    return HttpResponse.json(body);
   }),
 ];
