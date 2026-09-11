@@ -6,10 +6,11 @@
 # It is NOT a final integration task — it exists from step 0 and accretes.
 #
 # Current state — spec 08 PUBLIC-PLANE FRONTENDS (client-app + otp-app, served by
-#   public-nginx as the router) PLUS the spec 06 INTERNAL EDGE (internal-kong +
-#   internal-nginx on :8081), now landed. The internal front door is GATEWAY-ONLY
-#   for now: it fronts /balance/admin + /analytics/admin -> internal-kong; the admin
-#   SPA at its `/` root is deferred to the spec 08 admin step (placeholder 404 until):
+#   public-nginx as the router) PLUS the spec 08 ADMIN PLANE now landed: the internal
+#   edge (internal-kong + internal-nginx on :8081) and the ADMIN SPA (admin-app),
+#   served by internal-nginx as the router. The internal front door is no longer
+#   gateway-only: it fronts /balance/admin + /analytics/admin -> internal-kong AND
+#   serves the admin SPA at its `/` root (-> admin-app; no longer a placeholder 404):
 #   - The five networks (§2) are declared. `data` carries the datastores; `keycloak`
 #     also joins `app-public`, `app-internal` and `data` (spec 00 §2). All four edge
 #     nets now have members: `edge-public`/`app-public` (public gateway + front door)
@@ -73,8 +74,15 @@
 #     thin ROUTER that assembles them: `/` -> client-app, `/otp/` -> otp-app
 #     (prefix preserved; that bundle is built for base '/otp/'), `/balance/api/`
 #     -> public-kong (unchanged). See infra/nginx-public/nginx.conf + the two
-#     web/*/docs. (The internal edge — internal-kong + internal-nginx, :8081 — is
-#     now landed below, GATEWAY-ONLY; the admin SPA at its `/` root is a LATER pass.)
+#     web/*/docs. (The internal edge — internal-kong + internal-nginx, :8081 —
+#     mirrors this pattern below: internal-nginx routes `/` -> the admin-app image.)
+#   - `admin-app` (spec 08 admin step): the ADMIN SPA, same PER-SPA ATOMIC image as
+#     client-app (its own multi-stage Dockerfile, build context scoped to web/admin —
+#     ADR-16). No build args: a production `vite build` disables the MSW stub, the API
+#     base defaults to the same-origin /balance/admin, and the OIDC defaults already
+#     match the compose issuer + the realm's `admin-app` client. ROOT-served (base
+#     '/'), like client-app. Joins `edge-internal` ONLY and is host-UNPUBLISHED —
+#     only internal-nginx (:8081) is; internal-nginx routes `/` here. See web/admin/docs.
 #   - `seed` (spec 08, THIS step): a ONE-SHOT, PROFILE-GATED demo-data tool
 #     (profiles: ["seed"]) — NOT in the default `up` graph; run explicitly with
 #     `docker compose --profile seed up`. Atomic tool under tools/seed (its own
@@ -87,24 +95,24 @@
 #     balance-service (DB_* <- POSTGRES_BALANCE_* + POSTGRES_DB; composes its own
 #     connection, no *_URL var). Joins `data` ONLY; depends_on balance-service:
 #     service_healthy (migrations run on boot -> schema present before the seed runs).
-#   - `internal-kong` + `internal-nginx` (spec 06 internal edge, NOW LANDED): the
+#   - `internal-kong` + `internal-nginx` (spec 06 internal edge + spec 08 router): the
 #     admin plane's gateway + front door. internal-nginx (:8081, edge-internal) is the
 #     only host-published internal surface (demo convenience); it reverse-proxies the
 #     service-namespaced admin paths /balance/admin/* + /analytics/admin/* ->
 #     internal-kong (ADR-17 strips /<service> -> /admin/*), which fronts balance-service
 #     + analytics-server on app-internal and enforces admin auth (JWKS pre-function,
-#     realm role `admin`). GATEWAY-ONLY: internal-nginx's `/` web root is a placeholder
-#     404 until the spec 08 admin step wires the admin SPA. See infra/{kong,nginx}-internal.
+#     realm role `admin`). As of the spec 08 admin step, internal-nginx is ALSO the thin
+#     router that serves the admin SPA: its `/` catch-all -> the admin-app image (no
+#     longer a placeholder 404). See infra/{kong,nginx}-internal + web/admin/docs.
 #
 # What arrives in later steps (do NOT add here early):
 #   - Step 3  (spec 04): `balance-service`     — EXTENDED with the money domain
 #                        (ledger, transfers, limits, OTP module, outbox relay).
 #   - Step 3  (spec 05): `analytics-server`    — EXTENDED with the stream consumer,
 #                        Mongo read model + reporting API (/admin) over it.
-#   - Step 6  (spec 08 admin): the ADMIN SPA bundle served at internal-nginx's `/`
-#                        root — placeholder 404 today; the internal gateway/routing
-#                        below is already complete. (The public client + otp bundles
-#                        are already served BY public-nginx, above.)
+#   (Nothing further for the compose spine: the ADMIN SPA — admin-app served at
+#    internal-nginx's `/` root — is now landed in this step, alongside the public
+#    client + otp bundles served by public-nginx. The spine is complete.)
 #
 # Startup order (spec 00 §5) is enforced as services arrive via
 #   depends_on: { <dep>: { condition: service_healthy } }
@@ -649,14 +657,40 @@ services:
       - edge-internal
       - app-internal
 
-  # Internal front door (spec 06, internal edge) — host-published on :8081 as a
-  # DEMO convenience (the internal plane would not be host-exposed in production).
-  # Reverse-proxies the service-namespaced admin paths (/balance/admin/*,
-  # /analytics/admin/*) -> internal-kong (ADR-17 strips /<service> to /admin/*), and
-  # will serve the admin SPA at / in spec 08 (placeholder root until then). Stock
-  # nginx image with a read-only mounted conf; no custom image. Plain HTTP on
-  # localhost (TLS not terminated here — spec 06 resolved). Joins edge-internal ONLY
-  # (it never reaches services directly). See infra/nginx-internal/README.md.
+  # Admin SPA (spec 08, admin step) — same PER-SPA ATOMIC shape as client-app: built
+  # AND served by its own multi-stage Dockerfile (node build -> nginx serving the
+  # bundle), build context scoped to web/admin ONLY (no cross-folder context, ADR-16).
+  # No build args — a production `vite build` disables the MSW stub, the API base
+  # defaults to the same-origin /balance/admin, and the OIDC defaults already match
+  # the compose issuer + the realm's `admin-app` client. ROOT-served (base '/'), like
+  # client-app. Joins edge-internal ONLY and is host-UNPUBLISHED: it is reachable
+  # solely via internal-nginx, which routes `/` here. See web/admin/docs.
+  admin-app:
+    build: ./web/admin
+    restart: unless-stopped
+    healthcheck:
+      # busybox wget (ships in the nginx:alpine base) against the served SPA root:
+      # proves the built bundle is actually served (index.html -> 200), not just
+      # that nginx is up. Local probe — does not traverse the router.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      # The internal front door reaches it here; it touches no other network and is
+      # never host-published (spec 08 §Ports & origin).
+      - edge-internal
+
+  # Internal front door (spec 06 edge + spec 08 router) — host-published on :8081 as a
+  # DEMO convenience (the internal plane would not be host-exposed in production). As
+  # of spec 08 it is the thin ROUTER that assembles the admin-app image (it holds NO
+  # bundle itself): it reverse-proxies the service-namespaced admin paths
+  # (/balance/admin/*, /analytics/admin/*) -> internal-kong (ADR-17 strips /<service>
+  # to /admin/*), and the `/` catch-all -> admin-app (the built admin SPA, no longer
+  # a placeholder). Stock nginx image with a read-only mounted conf; no custom image.
+  # Plain HTTP on localhost (TLS not terminated here — spec 06 resolved). Joins
+  # edge-internal ONLY (it never reaches services directly). See infra/nginx-internal/README.md.
   internal-nginx:
     # Pinned tag (NOT :latest) — reproducible-from-zero, same as the other pins.
     image: nginx:1.27-alpine
@@ -670,8 +704,11 @@ services:
       retries: 5
       start_period: 5s
     depends_on:
-      # The gateway it fronts must be healthy first (otherwise /*/admin -> 502).
+      # Every upstream it fronts must be healthy first: the gateway (/*/admin ->
+      # 502 otherwise) and the admin SPA image (/ catch-all).
       internal-kong:
+        condition: service_healthy
+      admin-app:
         condition: service_healthy
     networks:
       - edge-internal

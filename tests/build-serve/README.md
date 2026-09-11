@@ -11,11 +11,15 @@ nginx config: each asserts an intended invariant and is built to **fail on a rea
 defect**. Host ports are read from `.env.example`; the client/otp index markers and the
 `/otp/` base come from the committed sources — never invented.
 
-> **Scope (spec 08 scope note — this pass, public plane only).** The admin SPA and the
-> internal front door **`:8081`** are DEFERRED; only **`:8080`** (public-nginx) and
-> **`:8082`** (keycloak) are host-published this pass. The **transfer-with-OTP** and
-> **admin maker-checker** end-to-end flows are steps **8-B/8-C** and are **not** tested
-> here (the pending Playwright e2e stays `describe.fixme`, gated on `E2E_ENABLED`).
+> **Scope (public plane only).** This suite proves the **public** serving contract
+> (client/otp SPAs behind `public-nginx`) plus the host-**port contract**. The reserved
+> host-published ports are **`:8080`** (public-nginx), **`:8081`** (internal-nginx / admin
+> front door) and **`:8082`** (keycloak) — `:8081` landed with the admin plane in this
+> pass. The admin SPA being **served/routed** behind `:8081` is owned by the sibling
+> [`tests/build-serve-admin/`](../build-serve-admin/) suite; here `:8081` is admitted only
+> as an allowed published port. The **transfer-with-OTP** and **admin maker-checker**
+> end-to-end flows are step **8-C** and are **not** tested here (the pending Playwright
+> e2e stays `describe.fixme`, gated on `E2E_ENABLED`).
 
 ## Layout
 
@@ -66,7 +70,7 @@ money and mutate no state. The suite never tears down a stack it did not create.
 | # | Check | Proves / fails on |
 |---|---|---|
 | 1 | `docker compose config` resolves **and** `public-nginx` + `client-app` + `otp-app` are in the **default** up graph (no profile gate) | "Full run" / "Serving layout": the public plane is wired into the spine. **FAILs** until the implementor adds the SPA images. |
-| 2 | **Port contract** — the default `up` publishes **only** `:8080` (public-nginx) + `:8082` (keycloak); `:8081` and the SPA containers publish **nothing** | Scope note: "in this pass only `:8080` and `:8082` are published". **FAILs** if `:8081` is wired in early, a SPA is host-published, or a stray port appears. |
+| 2 | **Port contract** — the default `up` publishes **only** the reserved trio `:8080` (public-nginx) + `:8081` (internal-nginx) + `:8082` (keycloak); the SPA containers publish **nothing** | DoD: "Only `:8080`, `:8081`, `:8082` are published". **FAILs** if a SPA is host-published or any port outside the reserved trio appears. |
 | 3 | **SPA topology** — `client-app` + `otp-app` are on **`edge-public` only** and host-publish nothing | "Ports & origin": "The SPA images join `edge-public` only and are not host-published" — reachable solely via the router. |
 | 4 | **nginx router** — `/balance/api` still → `public-kong`; root `/` no longer the spec-06 `return 404` placeholder; an `/otp` route exists (reports whether it strips `/otp/`); `/healthz` still 200 | "Serving layout". Low-false-positive textual parse; **FAILs** on API removal/shadow, the placeholder left in, a missing `/otp` route, an `/otp` route that strips `/otp/`, or a dropped `/healthz`. |
 | 5 | *(opportunistic)* a built `web/otp/dist/index.html` references **`/otp/`-prefixed** assets and no root `/assets/` | "a production `vite build` … base `/otp/`". **SKIPs** when no build artifact exists (R5 proves it at runtime). |
@@ -98,7 +102,10 @@ misrouted (R1); and so on.
   reversal** end-to-end — the pending Playwright chains (`describe.fixme`, `E2E_ENABLED`)
   are **step 8-C**; not enabled here.
 - **Admin SPA** and the **internal edge** (`internal-nginx` / `:8081`) — the admin plane
-  is deferred; this suite asserts `:8081` is **not** published (Check 2), nothing more.
+  landed in this pass, but proving the admin SPA is **served/routed** behind `:8081` is
+  owned by the sibling [`tests/build-serve-admin/`](../build-serve-admin/) suite. Here
+  Check 2 only admits `:8081` as an allowed published port — it asserts nothing about
+  admin serving or routing.
 - **Seed data** idempotency and Keycloak↔seed alignment — a separate spec-08 slice.
 - **Kong auth semantics** (401/403/anti-spoof/rate-limit) — owned by `tests/transport`.
 

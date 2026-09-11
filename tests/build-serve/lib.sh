@@ -22,13 +22,17 @@
 #       GET /balance/api/* -> reaches public-kong (401 w/o token / 5xx if kong down),
 #                             NEVER a 200 SPA index (catch-all must not shadow the API)
 #       GET /healthz     -> 200 (nginx liveness)
-#   The SPA images join edge-public ONLY and are NOT host-published; only public-nginx
-#   (:8080) and keycloak (:8082) are host-published THIS pass. :8081 (internal plane)
-#   is DEFERRED (scope note) and must NOT be published.
+#   The SPA images join edge-public ONLY and are NOT host-published; the host-published
+#   ports are the reserved trio public-nginx (:8080), internal-nginx (:8081) and keycloak
+#   (:8082). :8081 (the internal/admin front door) landed in this admin pass and is now a
+#   published reserved port.
 #
-# SCOPE: PUBLIC plane only. The admin SPA, internal-nginx (:8081) and the
-# transfer-with-OTP / maker-checker e2e flows are OUT of this step (8-B/8-C). This
-# suite proves the serving contract, not a money flow.
+# SCOPE: PUBLIC plane only. This suite proves the PUBLIC serving contract (client/otp SPAs
+# behind public-nginx) plus the host-port contract. The admin SPA being SERVED and admin
+# routing behind internal-nginx (:8081) are owned by the sibling tests/build-serve-admin/
+# suite; here :8081 is admitted ONLY as an allowed published reserved port. The
+# transfer-with-OTP / maker-checker e2e flows remain OUT (8-C). This suite proves the
+# serving contract, not a money flow.
 
 # ----------------------------------------------------------------------------------
 # Environment / globals
@@ -60,7 +64,7 @@ PROJECT="scfin-build-serve-test"
 # Values loaded from .env.example at runtime.
 PUBLIC_HTTP_PORT=""
 KEYCLOAK_PORT=""
-INTERNAL_HTTP_PORT=""     # :8081 — the deferred internal front door (must NOT publish)
+INTERNAL_HTTP_PORT=""     # :8081 — the internal/admin front door; a published reserved port
 
 # Discovered artifacts / caches (cleaned on exit).
 CONFIG_JSON_FILE=""       # cached resolved-config JSON (temp path)
@@ -251,13 +255,15 @@ PY
   fi
 }
 
-# Check 2 (static, PORT CONTRACT) — the scope note: THIS pass publishes ONLY :8080
-# (public-nginx) and :8082 (keycloak). :8081 (internal front door, deferred) and the
-# SPA containers must NOT be host-published. Models the DEFAULT `up` (profile-gated
-# services, e.g. the `seed` one, are not in that graph). (DoD "Only :8080/:8081/:8082
-# are published" tightened by the scope note to :8080+:8082 for this pass.)
+# Check 2 (static, PORT CONTRACT) — the DoD: the ONLY host-published ports are the
+# reserved trio :8080 (public-nginx), :8081 (internal-nginx / admin front door) and
+# :8082 (keycloak). Anything published OUTSIDE that trio — a stray port, or a public
+# SPA container (client-app / otp-app) — is a defect. Models the DEFAULT `up`
+# (profile-gated services, e.g. the `seed` one, are not in that graph). (DoD "Only
+# :8080/:8081/:8082 are published".) Whether the admin SPA is actually served / routed
+# behind :8081 is the sibling tests/build-serve-admin/ suite's domain, not this one's.
 check_port_contract() {
-  section "Check 2 (static) — only :$PUBLIC_HTTP_PORT + :$KEYCLOAK_PORT host-published this pass; :$INTERNAL_HTTP_PORT + SPA containers NOT published"
+  section "Check 2 (static) — only the reserved trio :$PUBLIC_HTTP_PORT + :$INTERNAL_HTTP_PORT + :$KEYCLOAK_PORT is host-published; SPA containers + stray ports NOT"
   build_config; local rc=$?
   [ $rc -eq 3 ] && { skip "docker CLI absent — cannot resolve ports"; return; }
   [ $rc -ne 0 ] && { fail "config did not parse — cannot check ports (see Check 1)"; return; }
@@ -266,7 +272,7 @@ check_port_contract() {
 import json, sys
 cfg = json.load(open(sys.argv[1], encoding='utf-8'))
 pub, kc, internal, client, otp = sys.argv[2:7]
-allowed = {pub, kc}
+allowed = {pub, internal, kc}
 services = cfg.get("services") or {}
 bad = False
 published = {}   # port -> [services] (default up graph only)
@@ -289,13 +295,12 @@ for name, svc in services.items():
     for port in hp:
         published.setdefault(port, []).append(name)
 
-# 1) Nothing published outside the allowed set (this is where :8081 or a stray SPA port fails).
+# 1) Nothing published outside the reserved trio (this is where a stray SPA/other port fails).
 for port, owners in sorted(published.items()):
     if port == "(ephemeral)":
         print(f"  -> {owners} publish an ephemeral/random host port (not allowed)"); bad = True
     elif port not in allowed:
-        note = " (the DEFERRED internal front door — must NOT publish this pass)" if port == internal else ""
-        print(f"  -> host port :{port} is published by {owners}{note} — only :{pub} and :{kc} are allowed this pass"); bad = True
+        print(f"  -> host port :{port} is published by {owners} — only the reserved trio :{pub}, :{internal}, :{kc} may be host-published"); bad = True
     else:
         print(f"  :{port} published by {owners} (allowed)")
 
@@ -313,8 +318,8 @@ for name in (client, otp):
         print(f"  -> SPA image '{name}' host-publishes {host_ports(svc)} — SPAs must join edge-public only, never host-published"); bad = True
 sys.exit(1 if bad else 0)
 PY
-  then pass "port contract holds: exactly :$PUBLIC_HTTP_PORT + :$KEYCLOAK_PORT published; :$INTERNAL_HTTP_PORT + SPA containers unpublished"
-  else fail "port contract violated (a forbidden host port is published, or a required edge / SPA isolation is wrong) — see -> lines"
+  then pass "port contract holds: only the reserved trio :$PUBLIC_HTTP_PORT + :$INTERNAL_HTTP_PORT + :$KEYCLOAK_PORT is published; SPA containers unpublished"
+  else fail "port contract violated (a host port outside the reserved trio is published, or a required edge / SPA isolation is wrong) — see -> lines"
   fi
 }
 

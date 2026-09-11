@@ -35,8 +35,9 @@ working on a clean machine.
   owns its own `try_files … /index.html` history fallback. The `/<service>/<surface>`
   namespacing (Kong strips `/<service>`) is established in spec 06
   ([ADR-17](../docs/DECISIONS.md#adr-17--service-namespaced-edge-routing)).
-  `internal-nginx` (admin plane) follows the same router pattern when it lands: `/` →
-  the `admin-app` image, `/balance/admin/` and `/analytics/admin/` → `internal-kong`.
+  `internal-nginx` (admin plane) now follows the same router pattern (THIS admin step):
+  `/` → the `admin-app` image (served, not a placeholder), `/balance/admin/` and
+  `/analytics/admin/` → `internal-kong` (the internal edge landed on main via #46).
 - **Ports & origin.** The SPA images join `edge-public` only and are **not
   host-published**; only `public-nginx` (:8080) is (spec 00 §3). The browser must
   reach the apps at `http://localhost:8080` — the OIDC `redirect_uri` is derived from
@@ -96,15 +97,24 @@ working on a clean machine.
 - [ ] Re-running up is idempotent (seed doesn't duplicate; migrations no-op).
 - [ ] Only `:8080`, `:8081`, `:8082` are published.
 
-> **Scope note — this build pass (public plane only).** The admin plane is deferred:
-> the admin SPA is not yet built and the internal transport edge (spec 06 step 2) is
-> not merged. So the two admin-plane acceptance items above — the **admin
-> maker-checker reversal from the admin app** and the **`:8081`** internal front door
-> — are OUT of this pass (in this pass only `:8080` and `:8082` are published). They
-> remain the eventual target. This pass delivers the PUBLIC plane end to end: the
-> client + otp SPAs served by `public-nginx`, seed data, and a clean-machine
-> `docker compose up --build` proving the **transfer-with-OTP** flow from the client
-> app.
+> **Scope note — build passes.** Pass 1 (DONE, merged) delivered the PUBLIC plane end
+> to end: the client + otp SPAs served by `public-nginx`, seed data, and a clean-machine
+> `docker compose up --build` proving the **transfer-with-OTP** flow from the client app
+> (`:8080` + `:8082`).
+>
+> Pass 2 (THIS admin step) delivers the ADMIN plane's **build & serve + internal front
+> door**: the internal transport edge is on main (#46), and this step builds the
+> `admin-app` as a per-SPA atomic image, flips `internal-nginx`'s `/` from the placeholder
+> `404` to route `/` → `admin-app`, publishes **`:8081`**, and proves a **demo-admin
+> Keycloak login at `:8081` reaches the real `/balance/admin` surface** (the whoami
+> landing) through `internal-nginx → internal-kong → balance-service`.
+>
+> Still OPEN after this pass (NOT claimed done): the DoD item **"admin maker-checker
+> reversal from the admin app"** — the reversal UI (admin-app A3) is not built. Also, the
+> admin app's **Accounts/Limits screens** (admin-app A2) call balance-service admin READ
+> endpoints (`GET /admin/accounts`, `GET /admin/limits`) that **do not exist yet**, so
+> those screens are not functional against the real backend; only the whoami landing is
+> proven end-to-end. Published ports remain `:8080` / `:8081` / `:8082`.
 
 ## Open questions
 
