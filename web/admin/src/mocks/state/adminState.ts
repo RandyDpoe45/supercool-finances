@@ -1,9 +1,11 @@
 import type { AdminAccountDto } from '../../services/api/contracts/account';
 import type { ApprovalRequestDto } from '../../services/api/contracts/approval';
+import type { AuditLogDto } from '../../services/api/contracts/audit';
 import type { LimitsDto, UpsertLimitsBody } from '../../services/api/contracts/limits';
 import type { AdminTransactionDto } from '../../services/api/contracts/transaction';
 import { fixtureAccounts } from '../fixtures/accounts';
 import { fixtureApprovals } from '../fixtures/approvals';
+import { fixtureAudit } from '../fixtures/audit';
 import { fixtureLimits } from '../fixtures/limits';
 import { fixtureTransactions } from '../fixtures/transactions';
 
@@ -33,6 +35,7 @@ interface AdminState {
   limits: LimitsDto[];
   transactions: AdminTransactionDto[];
   approvals: ApprovalRequestDto[];
+  audit: AuditLogDto[];
 }
 
 function seed(): AdminState {
@@ -41,6 +44,9 @@ function seed(): AdminState {
     limits: fixtureLimits.map((row) => ({ ...row })),
     transactions: fixtureTransactions.map((tx) => ({ ...tx })),
     approvals: fixtureApprovals.map((approval) => ({ ...approval })),
+    // Deep-cloned: an audit entry's `metadata` is a nested object, so a shallow spread would share it
+    // back into the frozen fixture (the log is read-only, but keep the seed self-contained).
+    audit: fixtureAudit.map((entry) => structuredClone(entry)),
   };
 }
 
@@ -357,4 +363,60 @@ export function rejectReversal(
   approval.checkerId = checkerId;
   approval.decidedAt = new Date().toISOString();
   return { ok: true, value: { ...approval } };
+}
+
+// --- Audit log ---------------------------------------------------------------------------------
+
+/**
+ * The admin audit log, optionally filtered by any present param (exact match on `actorId` / `action` /
+ * `targetType` / `targetId`), sorted **newest-first** (`createdAt` DESC, then `id` DESC as a
+ * bigint-aware tiebreak), then paged with the SAME clamp as {@link listAccounts} (`limit` default 50,
+ * clamped `[1, 200]`; `offset` ≥ 0). Copies are returned. The log is READ-ONLY — there is no mutator.
+ */
+export function listAudit(params: {
+  actorId?: string;
+  action?: string;
+  targetType?: string;
+  targetId?: string;
+  limit?: number;
+  offset?: number;
+}): AuditLogDto[] {
+  const filtered = state.audit.filter((entry) => {
+    if (params.actorId && entry.actorId !== params.actorId) {
+      return false;
+    }
+    if (params.action && entry.action !== params.action) {
+      return false;
+    }
+    if (params.targetType && entry.targetType !== params.targetType) {
+      return false;
+    }
+    if (params.targetId && entry.targetId !== params.targetId) {
+      return false;
+    }
+    return true;
+  });
+  const sorted = [...filtered].sort(compareAuditNewestFirst);
+  const limit = clamp(
+    Number.isFinite(params.limit) ? (params.limit as number) : DEFAULT_LIMIT,
+    1,
+    MAX_LIMIT,
+  );
+  const offset =
+    Number.isFinite(params.offset) && (params.offset ?? 0) > 0 ? (params.offset as number) : 0;
+  return sorted.slice(offset, offset + limit).map((entry) => ({ ...entry }));
+}
+
+/** Newest-first ordering: `createdAt` DESC (ISO-8601 UTC strings compare chronologically), then `id`
+ * DESC as a bigint-aware tiebreak so `'10'` precedes `'9'` (a numeric compare, never lexicographic). */
+function compareAuditNewestFirst(a: AuditLogDto, b: AuditLogDto): number {
+  if (a.createdAt !== b.createdAt) {
+    return a.createdAt < b.createdAt ? 1 : -1;
+  }
+  const aId = BigInt(a.id);
+  const bId = BigInt(b.id);
+  if (aId === bId) {
+    return 0;
+  }
+  return aId < bId ? 1 : -1;
 }

@@ -4,12 +4,13 @@ The internal-plane admin dashboard for SuperCool Finances (spec 07). It logs in 
 **own Keycloak client** and, once authenticated, calls the balance-service admin surface's
 **`whoami`** endpoint to render the signed-in admin identity — the auth-shell proof that a
 bearer round-trips through the gateway. **Account management (freeze / unfreeze + view / edit
-limits) is built (Step A2)** — see "Account management" below — and the **maker-checker
-reversals** screen is built (Step A3) — see "Reversals (maker-checker)" below. The audit and
-analytics-dashboard screens are **later steps**; this document covers the scaffold, the auth +
-data spine, the account-management + reversals screens, the MSW stub harness, the root-served
-`:8081` serving topology, the **production image** (multi-stage, served by internal-nginx at
-`/`), and the environment variables.
+limits) is built (Step A2)** — see "Account management" below — the **maker-checker
+reversals** screen is built (Step A3) — see "Reversals (maker-checker)" below — and the
+**read-only audit view** is built (Step A4) — see "Audit view" below. The
+analytics-dashboard screen is a **later step**; this document covers the scaffold, the auth +
+data spine, the account-management + reversals + audit screens, the MSW stub harness, the
+root-served `:8081` serving topology, the **production image** (multi-stage, served by
+internal-nginx at `/`), and the environment variables.
 
 This app is **self-contained** (ADR-16): **no imports from other folders** and no shared
 component library. It is a SEPARATE project from `web/client` and `web/otp` — it does not, and
@@ -45,7 +46,7 @@ web/admin/
 ├── src/
 │   ├── main.tsx               # bootstrap: start MSW (dev) → render <App/>
 │   ├── App.tsx                # AuthProvider → Provider(store) → Router → AuthGate
-│   ├── app/routes.tsx         # authenticated routes (/ home, /accounts, /limits, /reversals, /analytics placeholder)
+│   ├── app/routes.tsx         # authenticated routes (/ home, /accounts, /limits, /reversals, /audit, /analytics placeholder)
 │   ├── auth/
 │   │   ├── userManager.ts     # OIDC settings (admin-app client) + shared UserManager + getAccessToken()
 │   │   └── AuthGate.tsx       # protected-route gate (login redirect / callback / error)
@@ -61,7 +62,8 @@ web/admin/
 │   │   ├── limitsApi.ts       # getLimits + upsertLimits (/admin/limits)
 │   │   ├── transactionsApi.ts # getTransactions query (/admin/transactions)
 │   │   ├── approvalsApi.ts    # getApprovals + proposeReversal/approveReversal/rejectReversal (/admin reversals)
-│   │   └── contracts/         # app-local copies of the /balance/admin wire contract (identity, error, account, limits, transaction, approval)
+│   │   ├── auditApi.ts        # getAudit query (/admin/audit, read-only)
+│   │   └── contracts/         # app-local copies of the /balance/admin wire contract (identity, error, account, limits, transaction, approval, audit)
 │   ├── mocks/                 # MSW handlers, fixtures, state (adminState), browser worker, node server
 │   └── components/            # atomic design: atoms / molecules / organisms / templates / pages
 └── tests/                     # test suite (segregated; owned by the test writer)
@@ -76,13 +78,14 @@ pages). It currently holds:
 - **organisms** — `AccountsTable` (accounts list + per-row freeze/unfreeze),
   `LimitsTable` (current baseline + overrides), `LimitsForm` (the `PUT /admin/limits` editor),
   `TransactionsTable` (admin transactions + per-row Reverse, exports the pure `isReversible`
-  predicate), `ApprovalsQueue` (the checker's pending queue + per-row Approve / Reject).
+  predicate), `ApprovalsQueue` (the checker's pending queue + per-row Approve / Reject),
+  `AuditTable` (read-only audit-log rows + collapsible `metadata`).
 - **templates** — `AppShell` (the authenticated frame: title + primary nav + sign-out).
 - **pages** — `HomePage` (the whoami identity landing / auth-shell proof), `AccountsPage`
-  (`/accounts`), `LimitsPage` (`/limits`), `ReversalsPage` (`/reversals`), `AnalyticsPage`
-  (placeholder pending the analytics server).
+  (`/accounts`), `LimitsPage` (`/limits`), `ReversalsPage` (`/reversals`), `AuditPage`
+  (`/audit`), `AnalyticsPage` (placeholder pending the analytics server).
 
-`molecules/` is present but empty (`.gitkeep`); the audit screen lands in a later step. `Money`,
+`molecules/` is present but empty (`.gitkeep`). `Money`,
 `StatusBadge`, `Timestamp`, and the `money.ts` / `datetime.ts` libs are **app-local copies**
 mirroring `web/client` (ADR-16 — no cross-folder imports).
 
@@ -164,15 +167,21 @@ so they compose onto `/balance/admin` unchanged):
   id AND the `'Transaction'` LIST (the original flips to REVERSED and a compensating tx appears).
 - **`rejectReversal`** (mutation, `POST /admin/approvals/:id/reject` → `ApprovalRequestDto`) — the
   CHECKER action that discards it; `invalidatesTags` the `'Approval'` LIST + that approval id.
+- **`getAudit`** (query, `GET /admin/audit` → `AuditLogDto[]`, `auditApi.ts`) — unwraps the
+  `{ entries }` envelope (newest-first); optional filter `{ actorId, action, targetType, targetId,
+  limit, offset }` builds only the present params (paging is server-clamped to `[1, 200]`, default
+  50). `providesTags` a single static LIST tag on `'Audit'`. The audit log is **read-only** — there
+  are no audit mutations, so nothing invalidates it.
 
-These reads (`GET /admin/accounts`, `/admin/limits`, `/admin/transactions`, `/admin/approvals`) are
-an **agreed contract stubbed in MSW pending the balance-side read endpoints** — the writes
-(`freeze`/`unfreeze`, `PUT /admin/limits`, and the reversal propose/approve/reject) mirror the real
-admin controllers.
+These reads (`GET /admin/accounts`, `/admin/limits`, `/admin/transactions`, `/admin/approvals`,
+`/admin/audit`) are an **agreed contract stubbed in MSW pending the balance-side read endpoints** —
+the writes (`freeze`/`unfreeze`, `PUT /admin/limits`, and the reversal propose/approve/reject) mirror
+the real admin controllers. `GET /admin/audit` is the newest such pending read (stubbed here exactly
+as `/admin/accounts` was before balance PR #50 added it server-side).
 
-`tagTypes` are declared up front — `['Account', 'Transaction', 'Approval', 'Limits']` — on
-`baseApi`; account management uses `'Account'` and `'Limits'`, and the reversals screen uses
-`'Transaction'` / `'Approval'`.
+`tagTypes` are declared up front — `['Account', 'Transaction', 'Approval', 'Limits', 'Audit']` — on
+`baseApi`; account management uses `'Account'` and `'Limits'`, the reversals screen uses
+`'Transaction'` / `'Approval'`, and the audit view uses `'Audit'`.
 
 **Two gateway namespaces (decision).** The admin app talks to **two** backend surfaces over
 the internal edge: the balance-service admin surface at `/balance/admin` (this `baseApi`) and
@@ -216,6 +225,12 @@ out of `vite build`), and the node server is imported solely by the test setup.
     the domain code): `TRANSFER_NOT_FOUND` → 404, `TRANSACTION_NOT_REVERSIBLE` → 409,
     `REVERSAL_ALREADY_REQUESTED` → 409, `APPROVAL_NOT_FOUND` → 404, `APPROVAL_NOT_PENDING` → 409,
     `SELF_APPROVAL_FORBIDDEN` → 403.
+- It also implements the **audit surface** (bearer-gated → 401 otherwise):
+  - `GET /balance/admin/audit` → `{ entries }`, **newest-first**; optional exact-match
+    `actorId` / `action` / `targetType` / `targetId` filters + `limit`/`offset` paging (`limit`
+    clamped `[1, 200]`, default 50; `offset` ≥ 0). Read-only — there is no audit mutation.
+    `listAudit` sorts by `createdAt` DESC then `id` DESC (a **bigint-aware** id compare, so `'10'`
+    precedes `'9'`), then applies the same clamp/paging helper as `listAccounts`.
 - **Path note:** MSW intercepts the ORIGIN-ROOT path `/balance/admin/…` — that is the
   service-namespaced API path (ADR-17), NOT a SPA URL prefix. The admin SPA is root-served on
   its dedicated `:8081` origin, so this is simply the same-origin API path.
@@ -224,9 +239,13 @@ out of `vite build`), and the node server is imported solely by the test setup.
   a null-owner system account); `fixtures/limits.ts` the global baseline + one customer override;
   `fixtures/transactions.ts` a transaction of every reversibility shape (POSTED internal + POSTED
   external_inbound = reversible; POSTED external_outbound, PENDING internal, REVERSED internal +
-  its compensating tx = not reversible); and `fixtures/approvals.ts` a PENDING reversal proposed by
+  its compensating tx = not reversible); `fixtures/approvals.ts` a PENDING reversal proposed by
   a DIFFERENT admin (`admin-user-2`, exported as `OTHER_MAKER_ID`) so the logged-in admin is a valid
-  checker, plus an EXECUTED + a REJECTED for status-filter coverage.
+  checker, plus an EXECUTED + a REJECTED for status-filter coverage; and `fixtures/audit.ts` ~16
+  audit entries covering EVERY known `action`, two actors, every `targetType` (account / transaction
+  / approval / limits) plus one null-target/null-metadata row, and realistic before/after `metadata`
+  blobs (money inside as minor-unit STRINGS). Ids `'9'` and `'10'` share a `createdAt` so the
+  newest-first id-DESC tiebreak is observable.
 - `src/mocks/state/adminState.ts` is the **mutable** stub state. Account/limits mutations are as
   before (freeze/unfreeze flip `status` + bump `updatedAt`; `upsertLimits` inserts/updates by
   (scope, ownerId, currency)). The reversal flow enforces the SAME domain guards as the real
@@ -246,7 +265,9 @@ out of `vite build`), and the node server is imported solely by the test setup.
   handlers). Money values (balances, caps, amounts) are minor-unit strings throughout — never parsed
   to a float. **`ownerId` on `listTransactions` is a best-effort stub filter matched against
   `initiatedBy`** — the `AdminTransactionDto` carries no `ownerId` field, so it finds transactions a
-  given owner initiated, not every transaction touching their accounts.
+  given owner initiated, not every transaction touching their accounts. The **audit** slice is
+  READ-ONLY (`listAudit`, no mutator); it is deep-cloned on `seed()` because an entry's `metadata` is
+  a nested object.
 - `src/mocks/browser.ts` (dev worker) and `src/mocks/node.ts` (test server) share the same
   handlers. The node `server` is imported and driven by the test setup (`tests/`, owned by the
   test writer). Because the app is root-served, the worker claims root scope natively — no
@@ -341,7 +362,33 @@ approval is **409 `REVERSAL_ALREADY_REQUESTED`**, and a non-reversible target is
 (`reversingId` / `pendingId`, from each mutation's `originalArgs`), and each panel surfaces its own
 action error via the `Alert` atom (the approve/reject banner shows the most-recent of the two).
 
-The remaining admin screens are **later steps**: the audit view and the analytics dashboard.
+### Audit view (A4)
+
+One screen (`/audit`, `AuditPage` → `AuditTable`) under the fail-closed `AuthGate` — a **strictly
+read-only** window over the admin audit log. It consumes `GET /admin/audit` → `{ entries }`
+(newest-first): `id` (a **bigint identity surfaced as a string** — never parsed to a number, and the
+newest-first sort key), `actorId` (the acting admin), `action` (one of the producer's fixed set),
+`targetType` / `targetId` (or `null`), `metadata`, and `createdAt` (ISO-8601 UTC, rendered in Mexico
+City via the `Timestamp` atom).
+
+- **Filters** — an **action** select (the fixed `AUDIT_ACTIONS` set + "All actions") and an
+  **actor id** text input, with **Apply** / **Clear**. Applied filters feed the query; only present
+  filters are sent. Applying or clearing a filter resets to the first page.
+- **Pagination** — offset paging with `limit` 50. **Previous** is disabled on the first page
+  (`offset 0`); **Next** is disabled when the current page returned fewer than a full page of rows
+  (the last page). The stub honours an arbitrary `limit`, so the paging logic is exercisable with the
+  ~16-row seed by requesting a small page size.
+- **`metadata` is deliberately surfaced and read-only.** It IS the audit content — a free-form
+  before/after blob (approval ids, limit deltas, amounts). `AuditTable` renders it as a collapsible
+  `<details>` of key/value pairs (an em-dash, no disclosure, when `null`); it NEVER renders an
+  editable control for any audit field (the log is append-only). Any money inside `metadata` stays a
+  minor-unit **string** — rendered verbatim, never parsed to a float.
+
+The balance-side `GET /admin/audit` read does **not exist server-side yet** — it is an **agreed
+contract stubbed in MSW** (exactly as `GET /admin/accounts` was before balance PR #50 added it), and
+is a pending balance-service follow-up.
+
+The remaining admin screen is a **later step**: the analytics dashboard.
 
 ## Running it
 

@@ -263,3 +263,58 @@ main {
   gap: 0.5rem;
   flex-wrap: wrap;
 }
+
+/* Audit log --------------------------------------------------------------- */
+.audit-action {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.375rem;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  white-space: nowrap;
+}
+
+.audit-meta > summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.audit-meta__list {
+  margin: 0.4rem 0 0;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.audit-meta__row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.audit-meta__row dt {
+  font-weight: 600;
+  min-width: 10rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+}
+
+.audit-meta__row dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  word-break: break-word;
+}
+
+/* Pagination -------------------------------------------------------------- */
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.pagination__status {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
