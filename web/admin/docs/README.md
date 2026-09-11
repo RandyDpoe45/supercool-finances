@@ -4,11 +4,12 @@ The internal-plane admin dashboard for SuperCool Finances (spec 07). It logs in 
 **own Keycloak client** and, once authenticated, calls the balance-service admin surface's
 **`whoami`** endpoint to render the signed-in admin identity — the auth-shell proof that a
 bearer round-trips through the gateway. **Account management (freeze / unfreeze + view / edit
-limits) is built (Step A2)** — see "Account management" below. The reversal **maker-checker**
-approval, audit, and analytics-dashboard screens are **later steps**; this document covers the
-scaffold, the auth + data spine, the account-management screens, the MSW stub harness, the
-root-served `:8081` serving topology, the **production image** (multi-stage, served by
-internal-nginx at `/`), and the environment variables.
+limits) is built (Step A2)** — see "Account management" below — and the **maker-checker
+reversals** screen is built (Step A3) — see "Reversals (maker-checker)" below. The audit and
+analytics-dashboard screens are **later steps**; this document covers the scaffold, the auth +
+data spine, the account-management + reversals screens, the MSW stub harness, the root-served
+`:8081` serving topology, the **production image** (multi-stage, served by internal-nginx at
+`/`), and the environment variables.
 
 This app is **self-contained** (ADR-16): **no imports from other folders** and no shared
 component library. It is a SEPARATE project from `web/client` and `web/otp` — it does not, and
@@ -44,7 +45,7 @@ web/admin/
 ├── src/
 │   ├── main.tsx               # bootstrap: start MSW (dev) → render <App/>
 │   ├── App.tsx                # AuthProvider → Provider(store) → Router → AuthGate
-│   ├── app/routes.tsx         # authenticated routes (/ home, /accounts, /limits, /analytics placeholder)
+│   ├── app/routes.tsx         # authenticated routes (/ home, /accounts, /limits, /reversals, /analytics placeholder)
 │   ├── auth/
 │   │   ├── userManager.ts     # OIDC settings (admin-app client) + shared UserManager + getAccessToken()
 │   │   └── AuthGate.tsx       # protected-route gate (login redirect / callback / error)
@@ -58,7 +59,9 @@ web/admin/
 │   │   ├── identityApi.ts     # getWhoami query (GET /balance/admin/whoami -> WhoamiDto)
 │   │   ├── accountsApi.ts     # getAccounts + freeze/unfreeze mutations (/admin/accounts)
 │   │   ├── limitsApi.ts       # getLimits + upsertLimits (/admin/limits)
-│   │   └── contracts/         # app-local copies of the /balance/admin wire contract (identity, error, account, limits)
+│   │   ├── transactionsApi.ts # getTransactions query (/admin/transactions)
+│   │   ├── approvalsApi.ts    # getApprovals + proposeReversal/approveReversal/rejectReversal (/admin reversals)
+│   │   └── contracts/         # app-local copies of the /balance/admin wire contract (identity, error, account, limits, transaction, approval)
 │   ├── mocks/                 # MSW handlers, fixtures, state (adminState), browser worker, node server
 │   └── components/            # atomic design: atoms / molecules / organisms / templates / pages
 └── tests/                     # test suite (segregated; owned by the test writer)
@@ -71,15 +74,17 @@ pages). It currently holds:
   `StatusBadge` (account status pill), `Timestamp` (ISO UTC → Mexico City), `FieldError`
   (inline form/server error).
 - **organisms** — `AccountsTable` (accounts list + per-row freeze/unfreeze),
-  `LimitsTable` (current baseline + overrides), `LimitsForm` (the `PUT /admin/limits` editor).
+  `LimitsTable` (current baseline + overrides), `LimitsForm` (the `PUT /admin/limits` editor),
+  `TransactionsTable` (admin transactions + per-row Reverse, exports the pure `isReversible`
+  predicate), `ApprovalsQueue` (the checker's pending queue + per-row Approve / Reject).
 - **templates** — `AppShell` (the authenticated frame: title + primary nav + sign-out).
 - **pages** — `HomePage` (the whoami identity landing / auth-shell proof), `AccountsPage`
-  (`/accounts`), `LimitsPage` (`/limits`), `AnalyticsPage` (placeholder pending the analytics
-  server).
+  (`/accounts`), `LimitsPage` (`/limits`), `ReversalsPage` (`/reversals`), `AnalyticsPage`
+  (placeholder pending the analytics server).
 
-`molecules/` is present but empty (`.gitkeep`); the reversal and audit screens land in later
-steps. `Money`, `StatusBadge`, `Timestamp`, and the `money.ts` / `datetime.ts` libs are
-**app-local copies** mirroring `web/client` (ADR-16 — no cross-folder imports).
+`molecules/` is present but empty (`.gitkeep`); the audit screen lands in a later step. `Money`,
+`StatusBadge`, `Timestamp`, and the `money.ts` / `datetime.ts` libs are **app-local copies**
+mirroring `web/client` (ADR-16 — no cross-folder imports).
 
 ## Serving topology (root-served on its own internal origin)
 
@@ -143,13 +148,30 @@ so they compose onto `/balance/admin` unchanged):
   `'Limits'`.
 - **`upsertLimits`** (mutation, `PUT /admin/limits` → `LimitsDto`) — body `UpsertLimitsBody`;
   `invalidatesTags` the `'Limits'` LIST.
+- **`getTransactions`** (query, `GET /admin/transactions` → `AdminTransactionDto[]`,
+  `transactionsApi.ts`) — unwraps the `{ transactions }` envelope; optional filter
+  `{ ownerId, accountId, status, type, limit, offset }` builds only the present params (paging is
+  server-clamped to `[1, 200]`, default 50). `providesTags` per-id + a LIST on `'Transaction'`.
+- **`getApprovals`** (query, `GET /admin/approvals` → `ApprovalRequestDto[]`, `approvalsApi.ts`) —
+  unwraps the `{ approvals }` envelope; optional `{ status }` (omitted → the server default, the
+  PENDING queue). `providesTags` per-id + a LIST on `'Approval'`.
+- **`proposeReversal`** (mutation, `POST /admin/transfers/:id/reverse` → `ApprovalRequestDto`) — the
+  MAKER action: `:id` is the target TRANSACTION uuid; the optional `reason` is sent as a body ONLY
+  when non-empty (the maker id is resolved server-side, never sent). `invalidatesTags` the
+  `'Approval'` LIST (the pending queue gains the proposal).
+- **`approveReversal`** (mutation, `POST /admin/approvals/:id/approve` → `ApprovalRequestDto`) — the
+  CHECKER action that EXECUTES the reversal; `invalidatesTags` the `'Approval'` LIST + that approval
+  id AND the `'Transaction'` LIST (the original flips to REVERSED and a compensating tx appears).
+- **`rejectReversal`** (mutation, `POST /admin/approvals/:id/reject` → `ApprovalRequestDto`) — the
+  CHECKER action that discards it; `invalidatesTags` the `'Approval'` LIST + that approval id.
 
-These reads (`GET /admin/accounts`, `GET /admin/limits`) are an **agreed contract stubbed in
-MSW pending the balance-side read endpoints** — the writes (`freeze`/`unfreeze`, `PUT
-/admin/limits`) mirror the real admin controllers.
+These reads (`GET /admin/accounts`, `/admin/limits`, `/admin/transactions`, `/admin/approvals`) are
+an **agreed contract stubbed in MSW pending the balance-side read endpoints** — the writes
+(`freeze`/`unfreeze`, `PUT /admin/limits`, and the reversal propose/approve/reject) mirror the real
+admin controllers.
 
 `tagTypes` are declared up front — `['Account', 'Transaction', 'Approval', 'Limits']` — on
-`baseApi`; account management uses `'Account'` and `'Limits'`, the reversals screen will use
+`baseApi`; account management uses `'Account'` and `'Limits'`, and the reversals screen uses
 `'Transaction'` / `'Approval'`.
 
 **Two gateway namespaces (decision).** The admin app talks to **two** backend surfaces over
@@ -181,19 +203,50 @@ out of `vite build`), and the node server is imported solely by the test setup.
   - `PUT /balance/admin/limits` → the upserted `LimitsDto`. A `.strict()` body (unknown key →
     400); the **scope⇒ownerId rule** is enforced (`global` + an ownerId, or `customer` without
     one → **400 `INVALID_LIMITS`**); caps must be unsigned minor-unit integer strings or null.
+- It also implements the **maker-checker reversal surface** (all bearer-gated → 401 otherwise):
+  - `GET /balance/admin/transactions` → `{ transactions }`; optional
+    `ownerId` / `accountId` / `status` / `type` filter + `limit`/`offset` paging (clamped ≤200).
+  - `GET /balance/admin/approvals` → `{ approvals }`; optional `status` (omitted → PENDING queue).
+  - `POST /balance/admin/transfers/:id/reverse` (propose) → **201** the PENDING approval. A malformed
+    (non-UUID) `:id` is **400**; the optional body is `.strict()` (`reason` only, a 1..500 char
+    string; any other key or a bad reason → **400**). The maker id is the caller's identity.
+  - `POST /balance/admin/approvals/:id/approve` → **200** the EXECUTED approval; `…/reject` → **200**
+    the REJECTED approval. A malformed `:id` is **400**.
+  - **Domain error → HTTP status map** (mirroring the service's `domain-error-status.ts`, the code IS
+    the domain code): `TRANSFER_NOT_FOUND` → 404, `TRANSACTION_NOT_REVERSIBLE` → 409,
+    `REVERSAL_ALREADY_REQUESTED` → 409, `APPROVAL_NOT_FOUND` → 404, `APPROVAL_NOT_PENDING` → 409,
+    `SELF_APPROVAL_FORBIDDEN` → 403.
 - **Path note:** MSW intercepts the ORIGIN-ROOT path `/balance/admin/…` — that is the
   service-namespaced API path (ADR-17), NOT a SPA URL prefix. The admin SPA is root-served on
   its dedicated `:8081` origin, so this is simply the same-origin API path.
 - `src/mocks/fixtures/identity.ts` holds the seed identity (`admin-user-1`, roles `['admin']`);
   `fixtures/accounts.ts` seeds the accounts (a mix of active/frozen, an owner with two accounts,
-  a null-owner system account) and `fixtures/limits.ts` the global baseline + one customer
-  override.
-- `src/mocks/state/adminState.ts` is the **mutable** stub state (freeze/unfreeze flip an
-  account's `status` + bump `updatedAt`; `upsertLimits` inserts/updates by (scope, ownerId,
-  currency)). It lives at **module scope**, so it **survives `server.resetHandlers()`** — tests
-  that mutate it must call the exported **`resetAdminState()`** to return to the pristine
-  fixtures (mirroring how `web/client` keeps `mocks/state/` separate from the handlers). Money
-  values (balances, caps) are minor-unit strings throughout — never parsed to a float.
+  a null-owner system account); `fixtures/limits.ts` the global baseline + one customer override;
+  `fixtures/transactions.ts` a transaction of every reversibility shape (POSTED internal + POSTED
+  external_inbound = reversible; POSTED external_outbound, PENDING internal, REVERSED internal +
+  its compensating tx = not reversible); and `fixtures/approvals.ts` a PENDING reversal proposed by
+  a DIFFERENT admin (`admin-user-2`, exported as `OTHER_MAKER_ID`) so the logged-in admin is a valid
+  checker, plus an EXECUTED + a REJECTED for status-filter coverage.
+- `src/mocks/state/adminState.ts` is the **mutable** stub state. Account/limits mutations are as
+  before (freeze/unfreeze flip `status` + bump `updatedAt`; `upsertLimits` inserts/updates by
+  (scope, ownerId, currency)). The reversal flow enforces the SAME domain guards as the real
+  service, returning a discriminated `{ ok } | { code }` result the handler maps to a status:
+  - **reversibility** — `proposeReversal` rejects a target that is not POSTED, or whose type is not
+    `internal`/`external_inbound` (`external_outbound` is NOT admin-reversible), with
+    `TRANSACTION_NOT_REVERSIBLE`;
+  - **duplicate guard** — a target that already has a PENDING or EXECUTED approval →
+    `REVERSAL_ALREADY_REQUESTED`;
+  - **four-eyes** — `approveReversal` / `rejectReversal` reject `checkerId === makerId` with
+    `SELF_APPROVAL_FORBIDDEN` (the checker is the caller's identity, `fixtureWhoami.userId`);
+  - on approve, the approval → EXECUTED, the target flips POSTED → REVERSED
+    (`failureReason: 'admin_reversal'`), and a balanced COMPENSATING transaction (mirrored legs,
+    `reversesTransactionId` → the target) is pushed. It lives at **module scope**, so it **survives
+  `server.resetHandlers()`** — tests that mutate it must call the exported **`resetAdminState()`** to
+  return to the pristine fixtures (mirroring how `web/client` keeps `mocks/state/` separate from the
+  handlers). Money values (balances, caps, amounts) are minor-unit strings throughout — never parsed
+  to a float. **`ownerId` on `listTransactions` is a best-effort stub filter matched against
+  `initiatedBy`** — the `AdminTransactionDto` carries no `ownerId` field, so it finds transactions a
+  given owner initiated, not every transaction touching their accounts.
 - `src/mocks/browser.ts` (dev worker) and `src/mocks/node.ts` (test server) share the same
   handlers. The node `server` is imported and driven by the test setup (`tests/`, owned by the
   test writer). Because the app is root-served, the worker claims root scope natively — no
@@ -253,8 +306,42 @@ major-unit preview (`150000` → `= 1,500.00 MXN`). Server timestamps are UTC IS
 converted to **`America/Mexico_City`** only at display, via `lib/datetime.ts` (`Intl` + the IANA
 zone at the edge — never a hardcoded offset).
 
-The remaining admin screens are **later steps**: reversals with the **maker-checker** approval
-UI, the audit view, and the analytics dashboard.
+### Reversals (maker-checker) (A3)
+
+One screen (`/reversals`, `ReversalsPage`) under the fail-closed `AuthGate`, with two panels
+driven by the `/admin` contract:
+
+- **Transactions** (`TransactionsTable`) — a table of admin-visible transactions showing the id +
+  type, a **status badge**, the amount (float-free `Money`, minor-unit string), both account legs,
+  who initiated it, and when it was created (Mexico City). An optional **owner-id filter** narrows
+  the list (server-side). A **Reverse** button appears ONLY on a **reversible** row — the pure
+  `isReversible(tx)` predicate (exported from the organism) encodes the rule VERBATIM: `POSTED` AND
+  type `internal` or `external_inbound`. Non-reversible rows (external_outbound, non-POSTED,
+  already-REVERSED) render an em-dash, no button.
+- **Pending approvals** (`ApprovalsQueue`) — the checker's queue: approval id + action type, a
+  status badge, the target transaction, the maker, and when it was proposed. Each row offers
+  **Approve** + **Reject**.
+
+**The maker-checker flow.** Reversing money is a **two-person, two-step** control:
+
+1. **Propose (maker).** Clicking **Reverse** reveals an inline reason-capture form (an optional
+   `reason` input + Confirm / Cancel). Confirm `POST`s `transfers/:id/reverse` — the target is the
+   TRANSACTION, the maker id is resolved **server-side** (never sent), and the `reason` is sent only
+   when non-empty. This creates a **PENDING** approval; **no money moves yet**.
+2. **Decide (checker).** A **different** admin approves or rejects the pending request. **Approve**
+   (`approvals/:id/approve`) EXECUTES the reversal **atomically** server-side — the original flips to
+   `REVERSED` and a balanced compensating transaction appears — so it invalidates both the
+   transaction list and the approval. **Reject** (`approvals/:id/reject`) discards it; no money moves.
+
+**Four-eyes / self-approval.** The maker of a reversal **cannot** approve or reject their own
+proposal — the server (and the MSW stub) reject `checker === maker` with **403
+`SELF_APPROVAL_FORBIDDEN`**. A duplicate proposal for a target that already has a PENDING or EXECUTED
+approval is **409 `REVERSAL_ALREADY_REQUESTED`**, and a non-reversible target is **409
+`TRANSACTION_NOT_REVERSIBLE`**. Only the acting row's button disables while its mutation is in flight
+(`reversingId` / `pendingId`, from each mutation's `originalArgs`), and each panel surfaces its own
+action error via the `Alert` atom (the approve/reject banner shows the most-recent of the two).
+
+The remaining admin screens are **later steps**: the audit view and the analytics dashboard.
 
 ## Running it
 

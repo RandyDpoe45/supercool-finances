@@ -1,13 +1,21 @@
 import { http, HttpResponse } from 'msw';
 import type { AdminAccountsResponse } from '../services/api/contracts/account';
+import type { ApprovalsResponse } from '../services/api/contracts/approval';
 import type { ErrorResponse } from '../services/api/contracts/error';
 import type { WhoamiDto } from '../services/api/contracts/identity';
 import type { LimitsResponse, LimitsScope } from '../services/api/contracts/limits';
+import type { AdminTransactionsResponse } from '../services/api/contracts/transaction';
 import { fixtureWhoami } from './fixtures/identity';
+import type { ReversalDomainCode } from './state/adminState';
 import {
+  approveReversal,
   freezeAccount,
   listAccounts,
+  listApprovals,
   listLimits,
+  listTransactions,
+  proposeReversal,
+  rejectReversal,
   unfreezeAccount,
   upsertLimits,
 } from './state/adminState';
@@ -59,6 +67,65 @@ const unauthorized = () => errorResponse(401, 'UNAUTHORIZED', 'Missing gateway i
 const badRequest = (message: string) => errorResponse(400, 'BAD_REQUEST', message);
 const notFound = (message: string) => errorResponse(404, 'NOT_FOUND', message);
 const invalidLimits = (message: string) => errorResponse(400, 'INVALID_LIMITS', message);
+// Reversal domain errors carry their OWN stable code (not the generic 404/409/403 code) — the code
+// IS the domain code, exactly as the real service returns it.
+const conflict = (code: string, message: string) => errorResponse(409, code, message);
+const forbidden = (code: string, message: string) => errorResponse(403, code, message);
+
+/** PII-light messages mirroring the balance-service domain errors verbatim (safe to surface). */
+const REVERSAL_MESSAGE: Readonly<Record<ReversalDomainCode, string>> = {
+  TRANSFER_NOT_FOUND: 'Transfer not found',
+  TRANSACTION_NOT_REVERSIBLE: 'The transaction is not reversible in its current state',
+  REVERSAL_ALREADY_REQUESTED: 'A reversal has already been requested for this transaction',
+  APPROVAL_NOT_FOUND: 'Approval request not found',
+  APPROVAL_NOT_PENDING: 'The approval request is not pending',
+  SELF_APPROVAL_FORBIDDEN: 'The maker of a reversal cannot decide their own request',
+};
+
+/** Map a reversal domain code to its HTTP status + envelope (the single mapping point, mirroring the
+ * service's `domain-error-status.ts`): 404 for the not-found codes, 409 for the state conflicts, 403
+ * for the four-eyes violation. */
+function mapReversalError(code: ReversalDomainCode) {
+  const message = REVERSAL_MESSAGE[code];
+  switch (code) {
+    case 'TRANSFER_NOT_FOUND':
+    case 'APPROVAL_NOT_FOUND':
+      return errorResponse(404, code, message);
+    case 'TRANSACTION_NOT_REVERSIBLE':
+    case 'REVERSAL_ALREADY_REQUESTED':
+    case 'APPROVAL_NOT_PENDING':
+      return conflict(code, message);
+    case 'SELF_APPROVAL_FORBIDDEN':
+      return forbidden(code, message);
+  }
+}
+
+/** Validate the OPTIONAL `POST /transfers/:id/reverse` body, mirroring the service's
+ * `z.object({ reason: z.string().min(1).max(500).optional() }).strict()` over a preprocessed
+ * `?? {}`: an absent body is valid (no reason); a present `reason` must be a 1..500 char string; any
+ * other key (or a non-string / empty / oversized reason) is a 400 BAD_REQUEST. */
+function parseReverseBody(
+  raw: unknown,
+): { ok: true; reason?: string } | { ok: false; message: string } {
+  if (raw === undefined || raw === null) {
+    return { ok: true };
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, message: 'Malformed request body' };
+  }
+  const body = raw as Record<string, unknown>;
+  if (!hasOnlyKeys(body, ['reason'])) {
+    return { ok: false, message: 'Unexpected field in reverse body' };
+  }
+  if (body.reason === undefined) {
+    return { ok: true };
+  }
+  const reason = body.reason;
+  if (typeof reason !== 'string' || reason.length < 1 || reason.length > 500) {
+    return { ok: false, message: 'reason must be a 1..500 character string' };
+  }
+  return { ok: true, reason };
+}
 
 /** Mirror a Zod `.strict()` body: reject any key outside the allowlist (defense against param
  * smuggling — a client must not send `id` / `status` / `createdAt`, etc.). */
@@ -201,5 +268,91 @@ export const handlers = [
       monthlyMax: body.monthlyMax as string | null | undefined,
     });
     return HttpResponse.json(row);
+  }),
+
+  // The admin-visible transactions, filtered (ownerId/accountId/status/type) + paged (limit ≤200).
+  http.get('/balance/admin/transactions', ({ request }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const url = new URL(request.url);
+    const transactions = listTransactions({
+      ownerId: url.searchParams.get('ownerId') ?? undefined,
+      accountId: url.searchParams.get('accountId') ?? undefined,
+      status: url.searchParams.get('status') ?? undefined,
+      type: url.searchParams.get('type') ?? undefined,
+      limit: numericParam(url, 'limit'),
+      offset: numericParam(url, 'offset'),
+    });
+    const body: AdminTransactionsResponse = { transactions };
+    return HttpResponse.json(body);
+  }),
+
+  // The maker-checker approval requests; an absent `status` lets the state default to PENDING.
+  http.get('/balance/admin/approvals', ({ request }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const url = new URL(request.url);
+    const status = url.searchParams.get('status') ?? undefined;
+    const body: ApprovalsResponse = { approvals: listApprovals({ status }) };
+    return HttpResponse.json(body);
+  }),
+
+  // Propose a reversal (the MAKER action). `:id` is the target TRANSACTION uuid; optional `reason`
+  // body. The maker id is the caller's identity (server-side), NEVER the body. 201, the PENDING
+  // approval; a domain violation maps to 404/409.
+  http.post('/balance/admin/transfers/:id/reverse', async ({ request, params }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const id = String(params.id);
+    if (!UUID_PATTERN.test(id)) {
+      return badRequest('Malformed transaction id');
+    }
+    const raw = await request.json().catch(() => undefined);
+    const parsed = parseReverseBody(raw);
+    if (!parsed.ok) {
+      return badRequest(parsed.message);
+    }
+    const result = proposeReversal(fixtureWhoami.userId, id, parsed.reason);
+    if (!result.ok) {
+      return mapReversalError(result.code);
+    }
+    return HttpResponse.json(result.value, { status: 201 });
+  }),
+
+  // Approve a PENDING reversal (the CHECKER action) — executes it. `:id` is the APPROVAL uuid. The
+  // checker id is the caller's identity; a self-approval is 403. 200, the EXECUTED approval.
+  http.post('/balance/admin/approvals/:id/approve', ({ request, params }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const id = String(params.id);
+    if (!UUID_PATTERN.test(id)) {
+      return badRequest('Malformed approval id');
+    }
+    const result = approveReversal(fixtureWhoami.userId, id);
+    if (!result.ok) {
+      return mapReversalError(result.code);
+    }
+    return HttpResponse.json(result.value, { status: 200 });
+  }),
+
+  // Reject a PENDING reversal (the CHECKER action) — moves no money. `:id` is the APPROVAL uuid.
+  // 200, the REJECTED approval; a domain violation maps to 404/409/403.
+  http.post('/balance/admin/approvals/:id/reject', ({ request, params }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const id = String(params.id);
+    if (!UUID_PATTERN.test(id)) {
+      return badRequest('Malformed approval id');
+    }
+    const result = rejectReversal(fixtureWhoami.userId, id);
+    if (!result.ok) {
+      return mapReversalError(result.code);
+    }
+    return HttpResponse.json(result.value, { status: 200 });
   }),
 ];
