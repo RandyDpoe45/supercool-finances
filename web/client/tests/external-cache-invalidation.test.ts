@@ -4,11 +4,11 @@ import { http, HttpResponse } from 'msw';
 import { User } from 'oidc-client-ts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// jsdom's node fetch cannot resolve the app's relative `/api` base; make the same-origin base
+// jsdom's node fetch cannot resolve the app's relative `/balance/api` base; make the same-origin base
 // absolute against the test origin BEFORE baseApi captures the env at import (identical to the
 // page/bearer tests). MSW resolves its relative handlers against the same origin, so requests match.
 vi.hoisted(() => {
-  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/api`);
+  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/balance/api`);
 });
 
 import { accountsApi } from '../src/services/api/accountsApi';
@@ -55,12 +55,12 @@ function makeStore() {
   });
 }
 
-/** Count GET /api/accounts hits AND serve the live hold projection, so a refetch is observable and
+/** Count GET /balance/api/accounts hits AND serve the live hold projection, so a refetch is observable and
  * the returned balances stay coherent with any placed/released/settled hold. */
 function countAccountsFetches(): () => number {
   let count = 0;
   server.use(
-    http.get('/api/accounts', () => {
+    http.get('/balance/api/accounts', () => {
       count += 1;
       return HttpResponse.json({ accounts: projectAccounts() });
     }),
@@ -107,7 +107,7 @@ async function initiateExternal(store: Store, amount = '50000') {
 /** Create an INTERNAL pending transfer through the store (resolving a token via a direct fetch
  * first, since the internal initiate requires a confirmation token). */
 async function initiateInternal(store: Store) {
-  const resolveRes = await fetch(url('/api/transfers/resolve-destination'), {
+  const resolveRes = await fetch(url('/balance/api/transfers/resolve-destination'), {
     method: 'POST',
     headers: AUTH,
     body: JSON.stringify({ accountNumber: SEEDED_DESTINATION }),

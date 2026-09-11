@@ -3,7 +3,7 @@ import type { AccountsResponse } from '../src/services/api/contracts/accounts';
 import type { ErrorResponse } from '../src/services/api/contracts/error';
 
 /**
- * The `/api/accounts` MSW stub must honor the REAL balance-service wire contract, so
+ * The `/balance/api/accounts` MSW stub must honor the REAL balance-service wire contract, so
  * the SPA is developed against the shape the backend actually emits. Expectations are
  * derived from the contract of record — the accounts serializer
  * (`AccountDto`: id, currency, status, kind, balance, held, available, accountNumber)
@@ -26,10 +26,10 @@ const CONTRACT_FIELDS = [
   'accountNumber',
 ].sort();
 
-const ACCOUNTS_URL = new URL('/api/accounts', window.location.origin).toString();
+const ACCOUNTS_URL = new URL('/balance/api/accounts', window.location.origin).toString();
 const INTEGER_STRING = /^-?\d+$/;
 
-describe('GET /api/accounts stub — contract of record', () => {
+describe('GET /balance/api/accounts stub — contract of record', () => {
   it('returns the { accounts } envelope with only the whitelisted DTO fields', async () => {
     const res = await fetch(ACCOUNTS_URL, { headers: { Authorization: 'Bearer test' } });
     expect(res.status).toBe(200);

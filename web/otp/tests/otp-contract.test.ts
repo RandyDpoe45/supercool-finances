@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { resetMockState } from '../src/mocks/state';
 
 /**
- * Anti-drift for `POST /api/otp`: the stub MUST honour the balance-service contract of record
+ * Anti-drift for `POST /balance/api/otp`: the stub MUST honour the balance-service contract of record
  * (OtpDto { code, ttlSeconds } + serializeOtp; the OTP service's SINGLETON gate ->
  * OtpAlreadyActiveError => 409; GatewayIdentityGuard => 401 on a missing identity). If the
  * stub drifts (leaks a field, drops the 409 singleton, or accepts an unauthenticated mint) the
@@ -12,7 +12,7 @@ import { resetMockState } from '../src/mocks/state';
  * reset it after every case.
  */
 
-const ENDPOINT = `${window.location.origin}/api/otp`;
+const ENDPOINT = `${window.location.origin}/balance/api/otp`;
 
 function mintWithBearer() {
   return fetch(ENDPOINT, { method: 'POST', headers: { Authorization: 'Bearer test-token' } });
@@ -22,7 +22,7 @@ afterEach(() => {
   resetMockState();
 });
 
-describe('POST /api/otp stub — contract of record', () => {
+describe('POST /balance/api/otp stub — contract of record', () => {
   it('returns EXACTLY the { code, ttlSeconds } DTO — no extra field leaks onto the wire', async () => {
     const res = await mintWithBearer();
     expect(res.status).toBe(200);

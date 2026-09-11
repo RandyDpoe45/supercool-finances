@@ -21,7 +21,7 @@ spec — the spec, not the service code, is the contract of record.
 - **Redux Toolkit + RTK Query** for server state / caching.
 - **react-oidc-context + oidc-client-ts** for OIDC Authorization Code + PKCE.
 - **react-router-dom** for the routed shell.
-- **MSW** for the `/api` stub (dev browser worker + node server for tests).
+- **MSW** for the `/balance/api` stub (dev browser worker + node server for tests).
 - **Vitest + React Testing Library + jsdom** as the test runner (tests live in
   `tests/`, segregated from `src/`).
 
@@ -94,7 +94,7 @@ see `tools/keycloak/realm-export.json`).
 - **One shared `UserManager`** (`src/auth/userManager.ts`) is the single source of
   truth. `<AuthProvider userManager={...}>` drives it (login, silent renew, logout),
   and RTK Query's `prepareHeaders` reads the live access token from the *same*
-  instance via `getAccessToken()`. So the bearer attached to `/api` calls always
+  instance via `getAccessToken()`. So the bearer attached to `/balance/api` calls always
   reflects the current session.
 - **Redirect URI** is the app origin (`http://localhost:8080/` in dev), which matches
   the realm's allowlisted `http://localhost:8080/*`. That is why the Vite dev server
@@ -112,13 +112,16 @@ see `tools/keycloak/realm-export.json`).
 ## Data spine (RTK Query)
 
 `baseApi` is a single `createApi` with `fetchBaseQuery({ baseUrl, prepareHeaders })`.
-`baseUrl` defaults to **`/api`** (same-origin) — never an absolute backend URL — so
-calls flow through the app's own origin (MSW in dev/test; the real nginx origin once
-transport lands). Feature endpoints are added with `injectEndpoints`. The accounts slice
-(`services/api/accountsApi.ts`) ships two reads:
+`baseUrl` defaults to **`/balance/api`** (same-origin) — never an absolute backend URL — so
+calls flow through the app's own origin. The base is **service-namespaced** per the transport
+(ADR-17): the real nginx→Kong edge exposes the balance-service under `/balance/api` and **strips
+`/balance`**, so the service still receives its own `/api` upstream surface; MSW **mirrors this
+`/balance/api` path** in dev/test. Feature endpoints are added with `injectEndpoints` and are
+**relative to the base** (`'accounts'`, `` `transfers/${id}/confirm` ``, …), so they compose onto
+`/balance/api` unchanged. The accounts slice (`services/api/accountsApi.ts`) ships two reads:
 
-- `getAccounts` → `GET /api/accounts`, unwrapping the `{ accounts }` envelope to the array.
-- `getAccountStatement(accountId)` → `GET /api/accounts/:id/transactions`, keeping its
+- `getAccounts` → `GET /balance/api/accounts`, unwrapping the `{ accounts }` envelope to the array.
+- `getAccountStatement(accountId)` → `GET /balance/api/accounts/:id/transactions`, keeping its
   `{ accountId, entries }` envelope; `entries` arrive **newest-first** (the server orders
   by `created_at DESC, id DESC`) and are rendered in that order.
 
@@ -160,11 +163,12 @@ invalidate `PendingAuthorization`. `registerPayee` invalidates `Payee` so the li
 
 ## MSW stub harness and how it maps to the real contract
 
-MSW intercepts **only `/api`**; OIDC traffic to Keycloak is left alone
+MSW intercepts **only `/balance/api`** (the SPA's service-namespaced outbound path, ADR-17);
+OIDC traffic to Keycloak is left alone
 (`onUnhandledRequest: 'bypass'` in dev, `'error'` in tests).
 
-- `src/mocks/handlers.ts` implements `GET /api/accounts` and
-  `GET /api/accounts/:id/transactions` faithful to the real wire contract (mirrors
+- `src/mocks/handlers.ts` implements `GET /balance/api/accounts` and
+  `GET /balance/api/accounts/:id/transactions` faithful to the real wire contract (mirrors
   balance-service's serializers + controller): the `{ accounts }` / `{ accountId, entries }`
   envelopes, money as canonical **bigint minor-unit strings**, `available` =
   `balance − held`, and statement `entries` **newest-first** with a running `balanceAfter`
@@ -176,9 +180,10 @@ MSW intercepts **only `/api`**; OIDC traffic to Keycloak is left alone
   (like `GatewayIdentityGuard`); a malformed account id → **400** (like the controller's
   `ParseUUIDPipe`); and an unknown / non-owned / system account id → **404** (the service
   makes those indistinguishable — never 403 — so existence cannot be probed, ADR-3).
-- It also stubs the **transfers surface** — `POST /api/transfers/resolve-destination`,
-  `POST /api/transfers`, `POST /api/transfers/:id/confirm`, `POST /api/transfers/:id/cancel`,
-  and `GET /api/pending-authorization` — with small in-memory state in
+- It also stubs the **transfers surface** — `POST /balance/api/transfers/resolve-destination`,
+  `POST /balance/api/transfers`, `POST /balance/api/transfers/:id/confirm`,
+  `POST /balance/api/transfers/:id/cancel`, and `GET /balance/api/pending-authorization` — with
+  small in-memory state in
   `src/mocks/state/transferStore.ts`: confirmation-of-payee tokens, idempotent initiate — a
   replay compares the incoming **request fingerprint** (source + destination + amount + currency,
   EXCLUDING `confirmDuplicate`, matching the service's `computeFingerprint`) against the one
@@ -195,7 +200,7 @@ MSW intercepts **only `/api`**; OIDC traffic to Keycloak is left alone
   **internal** transfer the stub deliberately does **not** mutate account balances — the fixtures
   stay deterministic, and the money-safety proof is the client's cache invalidation / refetch.
   `resetTransferStore()` clears the state (incl. the hold projection below) for test isolation.
-- It also stubs the **payees surface** — `GET /api/payees` and `POST /api/payees` — with state in
+- It also stubs the **payees surface** — `GET /balance/api/payees` and `POST /balance/api/payees` — with state in
   `src/mocks/state/payeeStore.ts`: minimal `.strict()` enrollment (`{ displayName, destinationRef }`
   only; unknown keys → 400, so the rail/status/coolingOffUntil/ownerId cannot be smuggled), a
   duplicate `destinationRef` → **409 `PAYEE_ALREADY_ENROLLED`** (mirroring `uq_payee`), and
@@ -204,7 +209,7 @@ MSW intercepts **only `/api`**; OIDC traffic to Keycloak is left alone
   coolingOffUntil`). Payees are seeded in `src/mocks/fixtures/payees.ts` — **one already usable**
   (the external-transfer demo target) and **one still cooling off** (exercises the cooling-off UX).
   `resetPayeeStore()` reseeds for test isolation.
-- It stubs the **external-outbound surface** — `POST /api/transfers/external` — sharing the
+- It stubs the **external-outbound surface** — `POST /balance/api/transfers/external` — sharing the
   transfer lifecycle (confirm/cancel/pending feed) with internal transfers. It validates the
   `.strict()` body + `Idempotency-Key`, resolves the payee (missing → **404 `PAYEE_NOT_FOUND`**,
   still cooling → **409 `PAYEE_IN_COOLING_OFF`**, the *authoritative* gate judged on the current
@@ -218,7 +223,7 @@ MSW intercepts **only `/api`**; OIDC traffic to Keycloak is left alone
   reflect the hold immediately, the stub DOES move money for it — via `accountAdjustments`, a set of
   per-account `held`/`balance` deltas folded over the fixed accounts fixture: **initiate** raises
   `held` (available drops), **confirm** settles it (`balance -= amount`, `held -= amount`),
-  **cancel/expiry** releases it (`held -= amount`). `GET /api/accounts` returns
+  **cancel/expiry** releases it (`held -= amount`). `GET /balance/api/accounts` returns
   `projectAccounts()`, so the demo balances and the external cache-invalidation are coherent. With
   no external activity (or right after a reset) `projectAccounts()` returns values **byte-identical
   to the fixtures**, so internal-only tests are unaffected.
@@ -238,7 +243,7 @@ copy to `.env.local` to override locally. Never put a secret here.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
-| `VITE_API_BASE_URL` | `/api` | Same-origin API base (keep relative). |
+| `VITE_API_BASE_URL` | `/balance/api` | Same-origin, service-namespaced API base (ADR-17; keep relative). Kong strips `/balance`, so the balance-service still receives its own `/api` surface. |
 | `VITE_OIDC_AUTHORITY` | `http://keycloak.localtest.me:8082/realms/supercool` | Keycloak realm issuer. |
 | `VITE_OIDC_CLIENT_ID` | `client-app` | Public OIDC client id. |
 | `VITE_ENABLE_API_MOCKS` | `true` | Set `false` to disable the dev MSW stub. |
@@ -278,19 +283,19 @@ response to server results. The journey (spec 04 Transfers):
    **reused across every initiate attempt of that logical transfer** (including a
    duplicate-confirm re-submit), sent as the **`Idempotency-Key` header** — so a retry can never
    double-submit.
-5. **Initiate.** `POST /api/transfers` creates a **PENDING** transfer (no money moves). If the
+5. **Initiate.** `POST /balance/api/transfers` creates a **PENDING** transfer (no money moves). If the
    service soft-blocks an identical recent payment (`SUSPECTED_DUPLICATE`), the form surfaces a
    clear **"Send anyway"** that re-submits with `confirmDuplicate: true` and the **same** key. A
    `PENDING_TRANSFER_CONFLICT` (a concurrent race) is recovered by resuming the existing pending;
    a `DESTINATION_NOT_CONFIRMED` (expired token) is surfaced so the payer re-confirms.
 6. **OTP confirm.** The PENDING transfer awaits a one-time code the payer gets **out of band**
    from the otp-app (built later). The client-app **never mints or reveals** the code — it only
-   submits it: `POST /api/transfers/:id/confirm` → **POSTED** (money moves). A wrong code
+   submits it: `POST /balance/api/transfers/:id/confirm` → **POSTED** (money moves). A wrong code
    (`INVALID_OTP` 401), lockout (`OTP_LOCKED_OUT` 429) or expiry (`TRANSFER_EXPIRED` 410) map to
    clear messages (`lib/transferError.ts`, keyed off the **domain code**, not the HTTP status).
-7. **Cancel.** `POST /api/transfers/:id/cancel` (guarded PENDING→CANCELLED; idempotent on an
+7. **Cancel.** `POST /balance/api/transfers/:id/cancel` (guarded PENDING→CANCELLED; idempotent on an
    already terminal transfer).
-8. **Resume.** On mount, `GET /api/pending-authorization` reflects the caller's single active
+8. **Resume.** On mount, `GET /balance/api/pending-authorization` reflects the caller's single active
    pending; if one exists the flow **resumes at the confirm step** (at most once, right after
    the initial load).
 
@@ -337,7 +342,7 @@ delay is the anti-fraud gate). The journey (spec 04 external outbound):
 2. **Idempotency.** A `crypto.randomUUID()` is generated **once** when the flow mounts and **reused
    across every initiate attempt** (including the duplicate "Send anyway" re-submit), sent as the
    **`Idempotency-Key` header** — so a retry can never double-submit.
-3. **Initiate** (`POST /api/transfers/external`). Creates a **PENDING** transfer **and places a
+3. **Initiate** (`POST /balance/api/transfers/external`). Creates a **PENDING** transfer **and places a
    hold** — the source account's `available` drops **now** (this is the cache-invalidation
    asymmetry: `initiateExternalTransfer` invalidates `Account`, unlike the internal initiate). A
    soft-blocked duplicate becomes **"Send anyway"** (`confirmDuplicate: true`, same key); a
@@ -345,12 +350,12 @@ delay is the anti-fraud gate). The journey (spec 04 external outbound):
    frozen / currency errors surface as clear messages (`lib/transferError.ts`, keyed off the domain
    **code**).
 4. **OTP confirm.** The PENDING transfer awaits a one-time code the payer gets **out of band** from
-   the otp-app — the client-app **never mints or reveals** it. `POST /api/transfers/:id/confirm` →
+   the otp-app — the client-app **never mints or reveals** it. `POST /balance/api/transfers/:id/confirm` →
    **settles** (the hold becomes a posted movement, money moves). `confirmTransfer` already
    invalidates `Account`, which covers the external settle.
-5. **Cancel.** `POST /api/transfers/:id/cancel` **releases the hold** — so, unlike an internal
+5. **Cancel.** `POST /balance/api/transfers/:id/cancel` **releases the hold** — so, unlike an internal
    cancel, it invalidates `Account` (keyed off the returned `type === 'external_outbound'`).
-6. **Resume.** On mount, `GET /api/pending-authorization` reflects the caller's single active
+6. **Resume.** On mount, `GET /balance/api/pending-authorization` reflects the caller's single active
    pending; if one exists the flow **resumes at the confirm step** (at most once).
 
 There is **no `confirmationToken`** on the external path (external has no resolve/confirm step).
@@ -408,7 +413,7 @@ npm run dev                 # serves at http://localhost:8080
 
 Then in the browser: open `http://localhost:8080/` → you are redirected to Keycloak
 → sign in → you land on the **accounts overview** (formatted balances from the MSW stub),
-proving PKCE token → RTK Query bearer → `/api/accounts` → render. Select an account to open
+proving PKCE token → RTK Query bearer → `/balance/api/accounts` → render. Select an account to open
 its **statement** at `/accounts/:id/transactions` (amounts formatted, timestamps in Mexico
 City time).
 

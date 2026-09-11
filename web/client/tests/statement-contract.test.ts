@@ -3,7 +3,7 @@ import type { StatementResponse } from '../src/services/api/contracts/accounts';
 import type { ErrorResponse } from '../src/services/api/contracts/error';
 
 /**
- * The `GET /api/accounts/:id/transactions` MSW stub must honor the REAL balance-service wire
+ * The `GET /balance/api/accounts/:id/transactions` MSW stub must honor the REAL balance-service wire
  * contract, so the SPA is developed against the shape the backend actually emits. Expectations
  * come from the contract of record — `serializeStatementEntry` / `StatementEntryDto`
  * (id, transactionId, delta, balanceAfter, currency, createdAt) and specs/balance-schema.yaml
@@ -30,7 +30,7 @@ const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 const OWNED_ID = '11111111-1111-4111-8111-111111111111';
 
 function url(id: string): string {
-  return new URL(`/api/accounts/${id}/transactions`, window.location.origin).toString();
+  return new URL(`/balance/api/accounts/${id}/transactions`, window.location.origin).toString();
 }
 
 async function getStatement(id: string): Promise<{ status: number; body: StatementResponse }> {
@@ -38,7 +38,7 @@ async function getStatement(id: string): Promise<{ status: number; body: Stateme
   return { status: res.status, body: (await res.json()) as StatementResponse };
 }
 
-describe('GET /api/accounts/:id/transactions stub — contract of record', () => {
+describe('GET /balance/api/accounts/:id/transactions stub — contract of record', () => {
   it('returns the { accountId, entries } envelope, echoing the resolved account id', async () => {
     const { status, body } = await getStatement(OWNED_ID);
     expect(status).toBe(200);
@@ -104,7 +104,7 @@ describe('GET /api/accounts/:id/transactions stub — contract of record', () =>
   });
 });
 
-describe('GET /api/accounts/:id/transactions stub — identity/error contract', () => {
+describe('GET /balance/api/accounts/:id/transactions stub — identity/error contract', () => {
   it('rejects a request with no bearer as 401 in the error envelope', async () => {
     const res = await fetch(url(OWNED_ID)); // no Authorization header
     expect(res.status).toBe(401);

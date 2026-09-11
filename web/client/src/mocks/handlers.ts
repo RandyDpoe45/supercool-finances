@@ -26,9 +26,11 @@ import {
 } from './state/transferStore';
 
 /**
- * MSW request handlers mirroring the REAL `/api` wire contract (specs/07 + specs/04 +
- * specs/balance-schema.yaml; balance-service serializers + controllers). Only `/api` is stubbed —
- * OIDC traffic to Keycloak is left to hit the real authority.
+ * MSW request handlers mirroring the REAL balance-service wire contract (specs/07 + specs/04 +
+ * specs/balance-schema.yaml; balance-service serializers + controllers). Only `/balance/api` is
+ * stubbed — the SPA's service-namespaced outbound path per ADR-17 (the transport strips `/balance`
+ * so the service still serves its own `/api` surface). OIDC traffic to Keycloak is left to hit the
+ * real authority.
  *
  * The stub mirrors the gateway/controller error contract: like `GatewayIdentityGuard` a request
  * without a bearer is rejected 401; like the `ZodValidationPipe` a malformed body/param is 400; and
@@ -82,7 +84,7 @@ function hasOnlyKeys(body: Record<string, unknown>, allowed: readonly string[]):
 }
 
 export const handlers = [
-  http.get('/api/accounts', ({ request }) => {
+  http.get('/balance/api/accounts', ({ request }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
@@ -92,7 +94,7 @@ export const handlers = [
     return HttpResponse.json(body);
   }),
 
-  http.get('/api/accounts/:id/transactions', ({ request, params }) => {
+  http.get('/balance/api/accounts/:id/transactions', ({ request, params }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
@@ -111,7 +113,7 @@ export const handlers = [
 
   // Confirmation of payee (query only): resolve a 10-digit account number to a masked name +
   // currency + single-use token. Unknown number -> 404 (indistinguishable, anti-IDOR).
-  http.post('/api/transfers/resolve-destination', async ({ request }) => {
+  http.post('/balance/api/transfers/resolve-destination', async ({ request }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
@@ -129,7 +131,7 @@ export const handlers = [
 
   // Initiate an internal transfer (creates PENDING, no money moves). Requires the Idempotency-Key
   // header + a confirmation token bound to the destination.
-  http.post('/api/transfers', async ({ request }) => {
+  http.post('/balance/api/transfers', async ({ request }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
@@ -199,7 +201,7 @@ export const handlers = [
   }),
 
   // Confirm a PENDING transfer with the one-time code -> POSTED (money moves).
-  http.post('/api/transfers/:id/confirm', async ({ request, params }) => {
+  http.post('/balance/api/transfers/:id/confirm', async ({ request, params }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
@@ -229,7 +231,7 @@ export const handlers = [
   }),
 
   // Cancel a PENDING transfer (guarded PENDING->CANCELLED; idempotent on already terminal).
-  http.post('/api/transfers/:id/cancel', async ({ request, params }) => {
+  http.post('/balance/api/transfers/:id/cancel', async ({ request, params }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
@@ -250,7 +252,7 @@ export const handlers = [
   }),
 
   // The caller's single active pending transfer (or null) — the resume / OTP feed.
-  http.get('/api/pending-authorization', ({ request }) => {
+  http.get('/balance/api/pending-authorization', ({ request }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
@@ -259,7 +261,7 @@ export const handlers = [
   }),
 
   // The caller's enrolled external payees, each with its cooling-off status.
-  http.get('/api/payees', ({ request }) => {
+  http.get('/balance/api/payees', ({ request }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
@@ -269,7 +271,7 @@ export const handlers = [
 
   // Enroll an external beneficiary. Minimal `.strict()` body `{ displayName, destinationRef }` — the
   // rail/status/coolingOffUntil/ownerId are server-owned and rejected as unknown keys.
-  http.post('/api/payees', async ({ request }) => {
+  http.post('/balance/api/payees', async ({ request }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
@@ -302,7 +304,7 @@ export const handlers = [
   // Initiate an external outbound transfer to an ENROLLED payee (addressed by payeeId) — PLACES A
   // HOLD + creates a PENDING transaction (available drops now). `.strict()` body; requires the
   // Idempotency-Key header. No confirmation token (external has no resolve/confirm step).
-  http.post('/api/transfers/external', async ({ request }) => {
+  http.post('/balance/api/transfers/external', async ({ request }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }

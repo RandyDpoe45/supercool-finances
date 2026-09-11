@@ -20,7 +20,7 @@ the contract of record. **Triplication across the three SPAs is the accepted pri
 - **Redux Toolkit + RTK Query** for server state / caching.
 - **react-oidc-context + oidc-client-ts** for OIDC Authorization Code + PKCE.
 - **react-router-dom** for the routed shell (basename `/otp`).
-- **MSW** for the `/api` stub (dev browser worker + node server for tests).
+- **MSW** for the `/balance/api` stub (dev browser worker + node server for tests).
 - **Vitest + React Testing Library + jsdom** as the test runner (tests live in
   `tests/`, segregated from `src/`).
 
@@ -55,7 +55,7 @@ web/otp/
 │   ├── services/api/
 │   │   ├── baseApi.ts         # createApi + fetchBaseQuery(prepareHeaders: bearer)
 │   │   ├── pendingAuthorizationApi.ts  # getPendingAuthorization query
-│   │   ├── otpApi.ts          # generateOtp mutation (POST /api/otp -> OtpDto)
+│   │   ├── otpApi.ts          # generateOtp mutation (POST /balance/api/otp -> OtpDto)
 │   │   └── contracts/         # app-local copies of the /api wire contract (pending, otp, error)
 │   ├── mocks/                 # MSW handlers, fixtures, mutable dev state, browser worker, node server
 │   └── components/            # atomic design: atoms / molecules / organisms / templates / pages
@@ -84,8 +84,9 @@ Per spec 08 (resolved question in spec 07), the client and OTP apps are served
 - **Vite `base: '/otp/'`** — asset URLs and the dev server all live under `/otp/`.
 - **Router basename** is derived from `import.meta.env.BASE_URL` (`/otp/` → `/otp`), so
   in-app routes resolve relative to `/otp/`.
-- **API base stays origin-root `/api`** (not `/otp/api`): the OTP app calls the same
-  public Kong through the same nginx `/api` location as the client app.
+- **API base stays origin-root `/balance/api`** (not `/otp/balance/api`): the OTP app calls the
+  same public Kong through the same nginx `/balance/api` location as the client app. The base is
+  service-namespaced (ADR-17), NOT prefixed by this app's `/otp/` base.
 
 ## Auth spine (OIDC Authorization Code + PKCE) — separate login
 
@@ -96,7 +97,7 @@ Login uses the Keycloak **`otp-app`** public client (PKCE S256, no client secret
 - **One shared `UserManager`** (`src/auth/userManager.ts`) is the single source of
   truth. `<AuthProvider userManager={...}>` drives it (login, silent renew, logout),
   and RTK Query's `prepareHeaders` reads the live access token from the *same* instance
-  via `getAccessToken()`. So the bearer attached to `/api` calls always reflects the
+  via `getAccessToken()`. So the bearer attached to `/balance/api` calls always reflects the
   current session.
 - **Redirect URI** is the app origin + the `/otp/` base
   (`http://localhost:8080/otp/` in dev), which matches the realm's allowlisted
@@ -117,14 +118,18 @@ Login uses the Keycloak **`otp-app`** public client (PKCE S256, no client secret
 ## Data spine (RTK Query)
 
 `baseApi` is a single `createApi` with `fetchBaseQuery({ baseUrl, prepareHeaders })`.
-`baseUrl` defaults to **`/api`** (same-origin) — never an absolute backend URL — so
-calls flow through the app's own origin (MSW in dev/test; the real nginx origin once
-transport lands). Feature endpoints are added with `injectEndpoints`:
+`baseUrl` defaults to **`/balance/api`** (same-origin) — never an absolute backend URL — so
+calls flow through the app's own origin. The base is **service-namespaced** per the transport
+(ADR-17): the real nginx→Kong edge exposes the balance-service under `/balance/api` and **strips
+`/balance`**, so the service still receives its own `/api` upstream surface; MSW **mirrors this
+`/balance/api` path** in dev/test. Feature endpoints are added with `injectEndpoints` (their
+`query` paths are **relative to the base** — `'pending-authorization'`, `'otp'` — so they compose
+onto `/balance/api` unchanged):
 
-- **`getPendingAuthorization`** (query, `GET /api/pending-authorization`) — unwraps the
+- **`getPendingAuthorization`** (query, `GET /balance/api/pending-authorization`) — unwraps the
   `{ authorization }` envelope to the `PendingAuthorizationDto | null`; tagged
   `PendingAuthorization` and refetched by the feed's manual refresh.
-- **`generateOtp`** (mutation, `POST /api/otp` → `OtpDto`) — mints the caller's
+- **`generateOtp`** (mutation, `POST /balance/api/otp` → `OtpDto`) — mints the caller's
   user-scoped one-time code. It is a **mutation** because it has a server side-effect
   (it claims the single active-code slot); it takes **no body** (the code is scoped to
   the gateway identity, never a client id). It deliberately does **not** invalidate
@@ -165,19 +170,20 @@ transport lands). Feature endpoints are added with `injectEndpoints`:
 
 ## MSW stub harness and how it maps to the real contract
 
-MSW intercepts **only `/api`**; OIDC traffic to Keycloak is left alone
+MSW intercepts **only `/balance/api`** (the SPA's service-namespaced outbound path, ADR-17);
+OIDC traffic to Keycloak is left alone
 (`onUnhandledRequest: 'bypass'` in dev, `'error'` in tests). The harness is **gated so
 it can never start in a production build**: `main.tsx` only imports and starts the
 browser worker behind `import.meta.env.DEV` (dynamic import), and the node server is
 imported solely by the test setup.
 
-- `src/mocks/handlers.ts` implements `GET /api/pending-authorization` faithful to the
+- `src/mocks/handlers.ts` implements `GET /balance/api/pending-authorization` faithful to the
   real wire contract (mirrors balance-service's `serializePendingAuthorization`): the
   `{ authorization: PendingAuthorizationDto | null }` envelope, `amount` as a canonical
   **bigint minor-unit string**, ISO-8601 UTC `createdAt`/`expiresAt`, and the
   type-dependent destination fields (`internal` → `destinationAccountNumber` +
   `destinationMaskedName`; `external_outbound` → `payeeDisplayName`).
-- It also implements **`POST /api/otp`** faithful to `serializeOtp` + the OTP service's
+- It also implements **`POST /balance/api/otp`** faithful to `serializeOtp` + the OTP service's
   semantics: on mint it returns `{ code, ttlSeconds }`; it models the **singleton** — while
   a minted code is still within its ttl a second mint is rejected **`409 OTP_ALREADY_ACTIVE`**
   in the `{ error: { code, message, requestId } }` envelope, and once the ttl elapses the
@@ -202,7 +208,7 @@ imported solely by the test setup.
   (`{ error: { code, message, requestId } }`), the same way `GatewayIdentityGuard`
   rejects a request that carries no gateway identity.
 - **Service-worker scope note (dev only):** the worker script is served from the
-  `/otp/` base, but it must intercept origin-root `/api` calls. So it is registered
+  `/otp/` base, but it must intercept origin-root `/balance/api` calls. So it is registered
   with `scope: '/'`, and the Vite dev server sends `Service-Worker-Allowed: /` for the
   worker script (a small dev-only plugin in `vite.config.ts`). This concerns only the
   in-browser dev worker; the node server used by tests needs no scope.
@@ -218,7 +224,7 @@ copy to `.env.local` to override locally. Never put a secret here.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
-| `VITE_API_BASE_URL` | `/api` | Same-origin API base (keep relative, origin-root). |
+| `VITE_API_BASE_URL` | `/balance/api` | Same-origin, service-namespaced API base (ADR-17; keep relative, origin-root). Kong strips `/balance`, so the balance-service still receives its own `/api` surface. |
 | `VITE_OIDC_AUTHORITY` | `http://keycloak.localtest.me:8082/realms/supercool` | Keycloak realm issuer. |
 | `VITE_OIDC_CLIENT_ID` | `otp-app` | Public OIDC client id — the SEPARATE OTP login. |
 | `VITE_ENABLE_API_MOCKS` | `true` | Set `false` to disable the dev MSW stub. |
@@ -264,7 +270,7 @@ code** → the deterministic dev code **`424242`** is shown once with a `120s` c
 the shown-once warning; type it into the client-app confirm step. Clicking reveal again
 while the code is still active shows the **singleton (409)** message; once the ttl elapses,
 revealing works again. This proves the full spine: PKCE token → RTK Query bearer →
-`/api/pending-authorization` + `/api/otp` → render.
+`/balance/api/pending-authorization` + `/balance/api/otp` → render.
 
 Other scripts: `npm run build`, `npm run typecheck`, `npm run lint`,
 `npm run format` / `npm run format:check`, `npm test`.

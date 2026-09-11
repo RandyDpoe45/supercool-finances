@@ -6,12 +6,12 @@ import { Provider } from 'react-redux';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// jsdom's node fetch cannot resolve the app's relative `/api` base; make the SAME same-origin base
+// jsdom's node fetch cannot resolve the app's relative `/balance/api` base; make the SAME same-origin base
 // absolute against the test origin before baseApi captures the env at import (identical to the
 // bearer/statement tests). MSW resolves its relative handlers against the same origin, so the
 // requests still match.
 vi.hoisted(() => {
-  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/api`);
+  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/balance/api`);
 });
 
 // Importing the page registers accountsApi + transfersApi endpoints on baseApi.
@@ -65,12 +65,12 @@ function renderTransferPage() {
   );
 }
 
-/** Install a counting GET /api/accounts handler so a post-confirm refetch (cache invalidation) is
+/** Install a counting GET /balance/api/accounts handler so a post-confirm refetch (cache invalidation) is
  * observable. Returns a getter for the number of times it was hit. */
 function countAccountsFetches(): () => number {
   let count = 0;
   server.use(
-    http.get('/api/accounts', () => {
+    http.get('/balance/api/accounts', () => {
       count += 1;
       return HttpResponse.json({ accounts: fixtureAccounts });
     }),
@@ -206,13 +206,13 @@ describe('TransferPage — suspected duplicate offers "Send anyway"', () => {
   it('soft-blocks an identical recent payment, then proceeds via confirmDuplicate', async () => {
     // Pre-seed the soft-duplicate window: an identical payment already went through and was
     // cancelled, so the fingerprint is "recent" but there is no active pending to auto-resume.
-    const resolveRes = await fetch(url('/api/transfers/resolve-destination'), {
+    const resolveRes = await fetch(url('/balance/api/transfers/resolve-destination'), {
       method: 'POST',
       headers: AUTH,
       body: JSON.stringify({ accountNumber: SEEDED_DESTINATION }),
     });
     const { confirmationToken } = (await resolveRes.json()) as { confirmationToken: string };
-    const priorRes = await fetch(url('/api/transfers'), {
+    const priorRes = await fetch(url('/balance/api/transfers'), {
       method: 'POST',
       headers: { ...AUTH, 'Idempotency-Key': 'prior-key' },
       body: JSON.stringify({
@@ -224,7 +224,10 @@ describe('TransferPage — suspected duplicate offers "Send anyway"', () => {
       }),
     });
     const prior = (await priorRes.json()) as { id: string };
-    await fetch(url(`/api/transfers/${prior.id}/cancel`), { method: 'POST', headers: AUTH });
+    await fetch(url(`/balance/api/transfers/${prior.id}/cancel`), {
+      method: 'POST',
+      headers: AUTH,
+    });
 
     renderTransferPage();
 
@@ -288,7 +291,7 @@ describe('TransferPage — resumes an existing pending transfer', () => {
 
   it('jumps straight to the OTP confirm step when a pending exists on mount (no resolve needed)', async () => {
     server.use(
-      http.get('/api/pending-authorization', () =>
+      http.get('/balance/api/pending-authorization', () =>
         HttpResponse.json({ authorization: pendingAuthorization }),
       ),
     );
@@ -307,7 +310,7 @@ describe('TransferPage — resumes an existing pending transfer', () => {
     // the page must refetch the pending and resume at confirm rather than dead-end on the 409.
     let conflictRaised = false;
     server.use(
-      http.post('/api/transfers', () => {
+      http.post('/balance/api/transfers', () => {
         conflictRaised = true;
         return HttpResponse.json(
           {
@@ -320,7 +323,7 @@ describe('TransferPage — resumes an existing pending transfer', () => {
           { status: 409 },
         );
       }),
-      http.get('/api/pending-authorization', () =>
+      http.get('/balance/api/pending-authorization', () =>
         HttpResponse.json({ authorization: conflictRaised ? pendingAuthorization : null }),
       ),
     );

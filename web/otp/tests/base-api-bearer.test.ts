@@ -12,7 +12,7 @@ import { server } from '../src/mocks/node';
  * a function was called.
  *
  * Harness note: Node's global `Request` (used by RTK Query + MSW) cannot resolve the
- * app's relative `/api` base, which is correct for the browser. So we stub
+ * app's relative `/balance/api` base, which is correct for the browser. So we stub
  * `VITE_API_BASE_URL` to the absolute jsdom origin BEFORE importing `baseApi`, then
  * exercise the same prepareHeaders code path. This is a test accommodation, not a
  * production change.
@@ -60,7 +60,7 @@ const NOT_CALLED = '__handler-not-called__';
 let capturedAuthorization: string | null;
 
 beforeAll(async () => {
-  vi.stubEnv('VITE_API_BASE_URL', `${API_ORIGIN}/api`);
+  vi.stubEnv('VITE_API_BASE_URL', `${API_ORIGIN}/balance/api`);
   baseApiMod = await import('../src/services/api/baseApi');
   pendingApiMod = await import('../src/services/api/pendingAuthorizationApi');
   userManagerMod = await import('../src/auth/userManager');
@@ -76,7 +76,7 @@ beforeEach(async () => {
   // Capture the header the server sees and always answer 200 so the header-attachment
   // concern is isolated from the 401 identity path (covered elsewhere).
   server.use(
-    http.get('/api/pending-authorization', ({ request }) => {
+    http.get('/balance/api/pending-authorization', ({ request }) => {
       capturedAuthorization = request.headers.get('authorization');
       return HttpResponse.json({ authorization: null });
     }),

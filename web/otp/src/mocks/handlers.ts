@@ -6,15 +6,16 @@ import { DEV_OTP_CODE, OTP_MOCK_TTL_SECONDS } from './fixtures/otp';
 import { getMockPending, isOtpActive, markOtpActive } from './state';
 
 /**
- * MSW request handlers mirroring the REAL `/api` wire contract (specs/07-frontends.md;
+ * MSW request handlers mirroring the REAL balance-service wire contract (specs/07-frontends.md;
  * balance-service `serializePendingAuthorization`, `serializeOtp`, and the OTP service's
- * singleton/ttl semantics). Only `/api` is stubbed — OIDC traffic to Keycloak hits the real
- * authority.
+ * singleton/ttl semantics). Only `/balance/api` is stubbed — the SPA's service-namespaced outbound
+ * path per ADR-17 (the transport strips `/balance` so the service still serves its own `/api`
+ * surface). OIDC traffic to Keycloak hits the real authority.
  *
  * The stub mirrors the gateway identity contract: like `GatewayIdentityGuard`, a request
  * without a bearer token is rejected 401 with the service-wide `ErrorResponse` envelope.
  *
- * `POST /api/otp` models the SINGLETON: while a minted code is within its ttl a second mint
+ * `POST /balance/api/otp` models the SINGLETON: while a minted code is within its ttl a second mint
  * is rejected `409 OTP_ALREADY_ACTIVE`; once the ttl elapses the slot frees and minting is
  * allowed again (see `./state`). The mocked code is the deterministic `DEV_OTP_CODE`.
  */
@@ -32,7 +33,7 @@ function errorResponse(status: number, code: string, message: string) {
 const unauthorized = () => errorResponse(401, 'UNAUTHORIZED', 'Missing gateway identity');
 
 export const handlers = [
-  http.get('/api/pending-authorization', ({ request }) => {
+  http.get('/balance/api/pending-authorization', ({ request }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
@@ -40,7 +41,7 @@ export const handlers = [
     return HttpResponse.json(body);
   }),
 
-  http.post('/api/otp', ({ request }) => {
+  http.post('/balance/api/otp', ({ request }) => {
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }

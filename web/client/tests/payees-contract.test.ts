@@ -39,14 +39,14 @@ const USABLE_PAYEE = fixturePayees[0]; // Landlord — cooling-off lapsed a day 
 const COOLING_PAYEE = fixturePayees[1]; // New Supplier — still cooling off
 
 async function getPayees(headers: Record<string, string> = AUTH): Promise<Response> {
-  return fetch(url('/api/payees'), { headers });
+  return fetch(url('/balance/api/payees'), { headers });
 }
 
 async function enroll(
   body: Record<string, unknown>,
   headers: Record<string, string> = AUTH,
 ): Promise<Response> {
-  return fetch(url('/api/payees'), { method: 'POST', headers, body: JSON.stringify(body) });
+  return fetch(url('/balance/api/payees'), { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
 function expectNoForbiddenFields(record: object) {
@@ -58,7 +58,7 @@ function expectNoForbiddenFields(record: object) {
 beforeEach(() => resetPayeeStore());
 afterEach(() => resetPayeeStore());
 
-describe('GET /api/payees — whitelist + usable derivation (hint = now >= coolingOffUntil)', () => {
+describe('GET /balance/api/payees — whitelist + usable derivation (hint = now >= coolingOffUntil)', () => {
   it('returns each payee with EXACTLY the whitelisted keys and no internal columns', async () => {
     const res = await getPayees();
     expect(res.status).toBe(200);
@@ -93,7 +93,7 @@ describe('GET /api/payees — whitelist + usable derivation (hint = now >= cooli
   });
 });
 
-describe('POST /api/payees — enrollment: valid body + cooling-off gate', () => {
+describe('POST /balance/api/payees — enrollment: valid body + cooling-off gate', () => {
   it('enrolls with the two whitelisted fields → 201 PayeeDto, NOT-yet-usable, future cooling-off', async () => {
     const res = await enroll({ displayName: 'Butcher', destinationRef: '9000000123' });
     expect(res.status).toBe(201);
@@ -117,7 +117,7 @@ describe('POST /api/payees — enrollment: valid body + cooling-off gate', () =>
   });
 });
 
-describe('POST /api/payees — .strict() rejects smuggled server-owned fields (400)', () => {
+describe('POST /balance/api/payees — .strict() rejects smuggled server-owned fields (400)', () => {
   it.each([
     ['rail', { displayName: 'X', destinationRef: '9000000123', rail: 'SPEI' }],
     ['status', { displayName: 'X', destinationRef: '9000000123', status: 'active' }],
@@ -139,7 +139,7 @@ describe('POST /api/payees — .strict() rejects smuggled server-owned fields (4
   );
 });
 
-describe('POST /api/payees — shape validation (400)', () => {
+describe('POST /balance/api/payees — shape validation (400)', () => {
   it.each([
     ['too short', '123'],
     ['non-numeric', 'abcdef'],
@@ -168,7 +168,7 @@ describe('POST /api/payees — shape validation (400)', () => {
   });
 });
 
-describe('POST /api/payees — duplicate enrollment collides (409 PAYEE_ALREADY_ENROLLED)', () => {
+describe('POST /balance/api/payees — duplicate enrollment collides (409 PAYEE_ALREADY_ENROLLED)', () => {
   it('rejects a second enrollment of the SAME destinationRef (mirrors uq_payee)', async () => {
     const first = await enroll({ displayName: 'Butcher', destinationRef: '9000000123' });
     expect(first.status).toBe(201);

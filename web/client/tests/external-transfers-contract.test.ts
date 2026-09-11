@@ -75,7 +75,7 @@ function initiateExternal(
   key: string | null = crypto.randomUUID(),
   headers: Record<string, string> = AUTH,
 ): Promise<Response> {
-  return fetch(url('/api/transfers/external'), {
+  return fetch(url('/balance/api/transfers/external'), {
     method: 'POST',
     headers: key === null ? headers : { ...headers, 'Idempotency-Key': key },
     body: JSON.stringify(body),
@@ -83,7 +83,7 @@ function initiateExternal(
 }
 
 async function readSourceAccount(): Promise<AccountDto> {
-  const res = await fetch(url('/api/accounts'), { headers: AUTH });
+  const res = await fetch(url('/balance/api/accounts'), { headers: AUTH });
   const { accounts } = (await res.json()) as AccountsResponse;
   const source = accounts.find((a) => a.id === SOURCE_ID);
   if (!source) {
@@ -107,7 +107,7 @@ afterEach(() => {
   resetPayeeStore();
 });
 
-describe('POST /api/transfers/external — whitelist + external type', () => {
+describe('POST /balance/api/transfers/external — whitelist + external type', () => {
   it('creates a PENDING external_outbound exposing only the whitelisted TransferDto fields', async () => {
     const res = await initiateExternal(validBody());
     expect(res.status).toBe(201);
@@ -125,7 +125,7 @@ describe('POST /api/transfers/external — whitelist + external type', () => {
 
   it('projects the external pending onto the feed with the payee label + null destination-account fields', async () => {
     await initiateExternal(validBody());
-    const res = await fetch(url('/api/pending-authorization'), { headers: AUTH });
+    const res = await fetch(url('/balance/api/pending-authorization'), { headers: AUTH });
     const { authorization } = (await res.json()) as PendingAuthorizationResponse;
     expect(authorization).not.toBeNull();
     if (authorization) {
@@ -140,7 +140,7 @@ describe('POST /api/transfers/external — whitelist + external type', () => {
   });
 });
 
-describe('POST /api/transfers/external — payee + shape errors (correct statuses)', () => {
+describe('POST /balance/api/transfers/external — payee + shape errors (correct statuses)', () => {
   it('collapses an unknown/non-owned payee to 404 PAYEE_NOT_FOUND (never 403 — anti-enumeration)', async () => {
     const res = await initiateExternal(validBody({ payeeId: UNKNOWN_PAYEE_ID }));
     expect(res.status).toBe(404);
@@ -178,7 +178,7 @@ describe('POST /api/transfers/external — payee + shape errors (correct statuse
   });
 });
 
-describe('POST /api/transfers/external — funds + currency (money-state errors, 422)', () => {
+describe('POST /balance/api/transfers/external — funds + currency (money-state errors, 422)', () => {
   it('rejects an amount over the source available with 422 INSUFFICIENT_FUNDS (no hold placed)', async () => {
     const res = await initiateExternal(validBody({ amount: '99999999' }));
     expect(res.status).toBe(422);
@@ -196,7 +196,7 @@ describe('POST /api/transfers/external — funds + currency (money-state errors,
   });
 });
 
-describe('POST /api/transfers/external — idempotency (a replayed key holds money once)', () => {
+describe('POST /balance/api/transfers/external — idempotency (a replayed key holds money once)', () => {
   it('replays the SAME transfer for a byte-identical retry (never a second hold)', async () => {
     const key = crypto.randomUUID();
     const body = validBody();
@@ -229,7 +229,7 @@ describe('POST /api/transfers/external — idempotency (a replayed key holds mon
     expect(((await reuse.json()) as ErrorResponse).error.code).toBe('IDEMPOTENCY_KEY_REUSED');
 
     // The original hold stands, at the ORIGINAL amount — no adoption of 77777, no second hold.
-    const feed = await fetch(url('/api/pending-authorization'), { headers: AUTH });
+    const feed = await fetch(url('/balance/api/pending-authorization'), { headers: AUTH });
     const { authorization } = (await feed.json()) as PendingAuthorizationResponse;
     expect(authorization?.transferId).toBe(created.id);
     expect(authorization?.amount).toBe('50000');
@@ -238,7 +238,7 @@ describe('POST /api/transfers/external — idempotency (a replayed key holds mon
   });
 });
 
-describe('POST /api/transfers/external — soft-duplicate window (honors confirmDuplicate)', () => {
+describe('POST /balance/api/transfers/external — soft-duplicate window (honors confirmDuplicate)', () => {
   it('soft-blocks an identical recent payment under a new key, then lets confirmDuplicate through', async () => {
     const first = await initiateExternal(validBody(), crypto.randomUUID());
     expect(first.status).toBe(201);
@@ -255,7 +255,7 @@ describe('POST /api/transfers/external — soft-duplicate window (honors confirm
   });
 });
 
-describe('POST /api/transfers/external — the HOLD moves the money boundary (cache-coherence source of truth)', () => {
+describe('POST /balance/api/transfers/external — the HOLD moves the money boundary (cache-coherence source of truth)', () => {
   it('initiate PLACES A HOLD (available drops now), cancel RELEASES it (available restored)', async () => {
     // Baseline.
     const before = await readSourceAccount();
@@ -273,7 +273,7 @@ describe('POST /api/transfers/external — the HOLD moves the money boundary (ca
     expect(held.held).toBe('50000');
     expect(held.available).toBe('1450000');
 
-    const cancel = await fetch(url(`/api/transfers/${initiated.id}/cancel`), {
+    const cancel = await fetch(url(`/balance/api/transfers/${initiated.id}/cancel`), {
       method: 'POST',
       headers: AUTH,
     });
@@ -292,7 +292,7 @@ describe('POST /api/transfers/external — the HOLD moves the money boundary (ca
       await initiateExternal(validBody({ amount: '50000' }))
     ).json()) as TransferDto;
 
-    const confirm = await fetch(url(`/api/transfers/${initiated.id}/confirm`), {
+    const confirm = await fetch(url(`/balance/api/transfers/${initiated.id}/confirm`), {
       method: 'POST',
       headers: AUTH,
       body: JSON.stringify({ code: DEV_OTP_CODE }),

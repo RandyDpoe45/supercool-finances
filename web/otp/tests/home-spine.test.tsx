@@ -10,7 +10,7 @@ import type { PendingAuthorizationDto } from '../src/services/api/contracts/pend
 
 /**
  * End-to-end spine: a signed-in user's live token flows through the RTK Query bearer to
- * `GET /api/pending-authorization` (live MSW) and the REAL HomePage renders the pending card
+ * `GET /balance/api/pending-authorization` (live MSW) and the REAL HomePage renders the pending card
  * (composed of the real feed + reveal panel), then re-fetches on demand. This exercises the
  * real component + store + base query + UserManager together, so it fails if the bearer is not
  * attached, the `{ authorization }` envelope is not unwrapped, the money/datetime helpers are
@@ -77,7 +77,7 @@ function signIn(): Promise<void> {
 }
 
 beforeAll(async () => {
-  vi.stubEnv('VITE_API_BASE_URL', `${API_ORIGIN}/api`);
+  vi.stubEnv('VITE_API_BASE_URL', `${API_ORIGIN}/balance/api`);
   baseApiMod = await import('../src/services/api/baseApi');
   homePageMod = await import('../src/components/pages/HomePage');
   userManagerMod = await import('../src/auth/userManager');
@@ -92,11 +92,11 @@ afterEach(async () => {
   resetMockState();
 });
 
-describe('HomePage spine (token -> bearer -> /api -> render)', () => {
+describe('HomePage spine (token -> bearer -> /balance/api -> render)', () => {
   it('renders the real pending card for a seeded internal authorization', async () => {
     await signIn();
     server.use(
-      http.get('/api/pending-authorization', () =>
+      http.get('/balance/api/pending-authorization', () =>
         HttpResponse.json({ authorization: CONTROLLED_INTERNAL }),
       ),
     );
@@ -123,7 +123,9 @@ describe('HomePage spine (token -> bearer -> /api -> render)', () => {
   it('shows the empty state and withholds reveal when the API returns { authorization: null }', async () => {
     await signIn();
     server.use(
-      http.get('/api/pending-authorization', () => HttpResponse.json({ authorization: null })),
+      http.get('/balance/api/pending-authorization', () =>
+        HttpResponse.json({ authorization: null }),
+      ),
     );
     renderHome();
 
