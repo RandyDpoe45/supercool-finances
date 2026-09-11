@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
-# run.sh — verification suite for the PUBLIC EDGE of TRANSPORT (Spec 06, Step 1):
-# public-nginx (:8080) -> public-kong -> balance-service, plus the vertical-slice
-# checkpoint (GET /api/whoami echoes the Kong-injected identity).
+# run.sh — verification suite for BOTH TRANSPORT edges (Spec 06):
+#   PUBLIC   : public-nginx (:8080)   -> public-kong   -> balance-service
+#              vertical slice GET /balance/api/whoami (customer role)
+#   INTERNAL : internal-nginx (:8081) -> internal-kong -> balance-service + analytics-server
+#              vertical slice GET /balance/admin/whoami + /analytics/admin/whoami (admin role)
 #
 # Runs the STATIC checks (docker CLI only, no live stack) then the RUNTIME checks
-# (need the FULL stack already running via `docker compose up`; skipped with an
-# explicit message when the edge is not reachable), then prints a summary. Exits
-# non-zero if any check FAILED. Skips never fail the run.
+# (need the FULL stack already running via `docker compose up`; each edge is probed and
+# skipped independently with an explicit message when unreachable), then prints a summary.
+# Exits non-zero if any check FAILED. Skips never fail the run.
 #
 # Usage:
 #   ./run.sh            # static then runtime (default)
-#   ./run.sh static     # daemon/stack-free checks only (checks 1-3)
-#   ./run.sh runtime    # live-stack checks only (checks 4-9)
-#
-# SCOPE: the PUBLIC plane only (spec 06 DoD lines for /api + the vertical slice).
-# The /admin surface, the internal edge, and analytics are Step 2 — NOT tested here.
+#   ./run.sh static     # stack-free checks only (public 1-3 + internal I1-I3)
+#   ./run.sh runtime    # live-stack checks only (public 4-9 + internal I4-I9)
 #
 # All checks are defined in lib.sh. Each maps to a Definition-of-Done line in
 # specs/06-transport.md — see README.md.
