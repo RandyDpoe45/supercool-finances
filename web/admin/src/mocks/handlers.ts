@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw';
 import type { AdminAccountsResponse } from '../services/api/contracts/account';
 import type { ApprovalsResponse } from '../services/api/contracts/approval';
+import type { AuditLogResponse } from '../services/api/contracts/audit';
 import type { ErrorResponse } from '../services/api/contracts/error';
 import type { WhoamiDto } from '../services/api/contracts/identity';
 import type { LimitsResponse, LimitsScope } from '../services/api/contracts/limits';
@@ -12,6 +13,7 @@ import {
   freezeAccount,
   listAccounts,
   listApprovals,
+  listAudit,
   listLimits,
   listTransactions,
   proposeReversal,
@@ -296,6 +298,25 @@ export const handlers = [
     const url = new URL(request.url);
     const status = url.searchParams.get('status') ?? undefined;
     const body: ApprovalsResponse = { approvals: listApprovals({ status }) };
+    return HttpResponse.json(body);
+  }),
+
+  // The admin audit log (read-only), newest-first. Optional exact-match filters
+  // (actorId/action/targetType/targetId) + `limit`/`offset` paging (limit clamped [1,200], default 50).
+  http.get('/balance/admin/audit', ({ request }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const url = new URL(request.url);
+    const entries = listAudit({
+      actorId: url.searchParams.get('actorId') ?? undefined,
+      action: url.searchParams.get('action') ?? undefined,
+      targetType: url.searchParams.get('targetType') ?? undefined,
+      targetId: url.searchParams.get('targetId') ?? undefined,
+      limit: numericParam(url, 'limit'),
+      offset: numericParam(url, 'offset'),
+    });
+    const body: AuditLogResponse = { entries };
     return HttpResponse.json(body);
   }),
 
