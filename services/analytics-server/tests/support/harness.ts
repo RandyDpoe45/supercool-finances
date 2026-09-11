@@ -321,6 +321,125 @@ export function getRedisClientToken(): symbol {
 }
 
 /**
+ * Spec-05 reporting layer (step A3) seams — the role-gated `/admin/reports` API over
+ * the Mongo read model. Same coordination discipline as the A1/A2 resolvers above:
+ * called LAZILY (inside the opted-in integration `beforeAll`, the no-Docker e2e
+ * `beforeAll`, or the serializer unit suite's `beforeAll`), so the default `npm test`
+ * never touches them — an absent reporting layer SKIPS (integration) or fails with a
+ * single actionable message (e2e / unit), never masks a missing seam.
+ *
+ * Candidate module paths guess the A3 layout (a `reporting`/`reports` feature module
+ * with an `admin` surface controller, per the controller-surface convention); the
+ * STABLE contract is the EXPORT NAMES — `ReportingModule`, `REPORTING_SERVICE`,
+ * `REPORTING_REPOSITORY`, the admin controller class, and the two whitelist
+ * serializers `serializeAccountSummary` / `serializeDailyAggregate`. If the
+ * implementor lands them under a different path/name, THIS file is the single edit.
+ */
+
+/** The reporting feature module — provides + exports REPORTING_SERVICE and owns the
+ *  `/admin/reports` controller. Imported by the integration boot alongside the
+ *  persistence layer so the real aggregation pipelines run against a live Mongo. */
+export function getReportingModule(): any {
+  return resolveOrThrow(
+    'the reporting feature module (spec 05 step A3)',
+    [
+      `${SRC}/modules/reporting/reporting.module`,
+      `${SRC}/modules/reports/reports.module`,
+      `${SRC}/modules/admin-reporting/admin-reporting.module`,
+    ],
+    ['ReportingModule', 'ReportsModule', 'AdminReportingModule'],
+  );
+}
+
+/** DI token for the reporting SERVICE (interface-behind-token). The service owns the
+ *  business rules (clamping/normalization) and returns domain objects; consumers
+ *  resolve it through this token, never the concrete class. */
+export function getReportingServiceToken(): symbol {
+  return resolveOrThrow(
+    'the reporting service DI token',
+    [
+      `${SRC}/modules/reporting/service/interfaces/reporting.service.interface`,
+      `${SRC}/modules/reporting/service/interfaces/reporting.service`,
+      `${SRC}/modules/reports/service/interfaces/reporting.service.interface`,
+      `${SRC}/modules/reporting/reporting.tokens`,
+      `${SRC}/modules/reports/reports.tokens`,
+    ],
+    ['REPORTING_SERVICE'],
+  );
+}
+
+/** DI token for the reporting REPOSITORY (interface-behind-token). The repository
+ *  runs the query-time aggregation pipelines over `transactions`. */
+export function getReportingRepositoryToken(): symbol {
+  return resolveOrThrow(
+    'the reporting repository DI token',
+    [
+      `${SRC}/database/repositories/interfaces/reporting.repository.interface`,
+      `${SRC}/database/repositories/interfaces/reporting.repository`,
+      `${SRC}/modules/reporting/repository/interfaces/reporting.repository.interface`,
+      `${SRC}/modules/reporting/service/interfaces/reporting.repository.interface`,
+    ],
+    ['REPORTING_REPOSITORY'],
+  );
+}
+
+/** The real `/admin/reports` controller class (bound in a minimal e2e module to prove
+ *  role-gating + validation + the wrapped/serialized wire shape without Docker). */
+export function getReportsController(): any {
+  return resolveOrThrow(
+    'the admin reporting controller (spec 05 step A3)',
+    [
+      `${SRC}/modules/reporting/admin/reports-admin.controller`,
+      `${SRC}/modules/reporting/admin/reporting-admin.controller`,
+      `${SRC}/modules/reporting/admin/reports.controller`,
+      `${SRC}/modules/reports/admin/reports-admin.controller`,
+      `${SRC}/modules/reporting/reporting-admin.controller`,
+      `${SRC}/modules/reporting/reports.controller`,
+    ],
+    [
+      'ReportsAdminController',
+      'ReportingAdminController',
+      'ReportsController',
+      'ReportingController',
+      'AdminReportsController',
+    ],
+  );
+}
+
+/** The two whitelist serializers (pure functions): domain object -> wire DTO. Money
+ *  becomes a STRING (bigint/int64 -> decimal string, exact past 2^53), dates ISO. */
+export function getReportingSerializers(): {
+  serializeAccountSummary: (summary: any) => any;
+  serializeDailyAggregate: (aggregate: any) => any;
+} {
+  const candidates = [
+    `${SRC}/modules/reporting/admin/serializers/account-summary.serializer`,
+    `${SRC}/modules/reporting/admin/serializers/reporting.serializer`,
+    `${SRC}/modules/reporting/admin/serializers/reports.serializer`,
+    `${SRC}/modules/reporting/serializers/account-summary.serializer`,
+    `${SRC}/modules/reports/admin/serializers/account-summary.serializer`,
+  ];
+  const serializeAccountSummary = resolveOrThrow(
+    'serializeAccountSummary (account-summary whitelist serializer)',
+    candidates,
+    ['serializeAccountSummary'],
+  );
+  const dailyCandidates = [
+    `${SRC}/modules/reporting/admin/serializers/daily-aggregate.serializer`,
+    `${SRC}/modules/reporting/admin/serializers/reporting.serializer`,
+    `${SRC}/modules/reporting/admin/serializers/reports.serializer`,
+    `${SRC}/modules/reporting/serializers/daily-aggregate.serializer`,
+    `${SRC}/modules/reports/admin/serializers/daily-aggregate.serializer`,
+  ];
+  const serializeDailyAggregate = resolveOrThrow(
+    'serializeDailyAggregate (daily-aggregate whitelist serializer)',
+    dailyCandidates,
+    ['serializeDailyAggregate'],
+  );
+  return { serializeAccountSummary, serializeDailyAggregate };
+}
+
+/**
  * Best-effort TCP reachability probe for the honest-SKIP integration gate. Resolves
  * true iff a TCP connection to host:port opens within `timeoutMs`. Never throws.
  */
