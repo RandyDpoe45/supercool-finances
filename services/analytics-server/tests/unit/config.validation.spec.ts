@@ -29,6 +29,9 @@ function mongoPortOf(cfg: any): unknown {
 function mongoAuthSourceOf(cfg: any): unknown {
   return cfg?.MONGO_AUTH_SOURCE ?? cfg?.mongoAuthSource ?? cfg?.mongo?.authSource;
 }
+function redisPortOf(cfg: any): unknown {
+  return cfg?.REDIS_PORT ?? cfg?.redisPort ?? cfg?.redis?.port;
+}
 
 describe('config validation (fail-fast, zod)', () => {
   it('accepts a complete valid env and returns a config object with typed values', () => {
@@ -112,6 +115,90 @@ describe('config validation (fail-fast, zod)', () => {
     expect(() =>
       validateEnv(rawEnvWithout('PORT', 'MONGO_PORT', 'MONGO_AUTH_SOURCE')),
     ).not.toThrow();
+  });
+});
+
+describe('redis config validation (spec 05 — fail-fast on the stream coordinates/secret)', () => {
+  // Spec 05 adds the transaction-stream consumer: analytics now reads Redis
+  // (events:transactions). REDIS_HOST + REDIS_PASSWORD are REQUIRED coordinates/secret
+  // (fail-fast, no silent default); REDIS_PORT is optional-with-default 6379.
+  it('accepts a complete env carrying REDIS_HOST/REDIS_PORT/REDIS_PASSWORD (port coerced to a NUMBER)', () => {
+    const cfg = validateEnv(completeRawEnv({ REDIS_PORT: '6379' }));
+    expect(typeof redisPortOf(cfg)).toBe('number');
+    expect(redisPortOf(cfg)).toBe(6379);
+  });
+
+  it('applies the REDIS_PORT default (6379) as a NUMBER when REDIS_PORT is omitted', () => {
+    const cfg = validateEnv(rawEnvWithout('REDIS_PORT'));
+    const port = redisPortOf(cfg);
+    expect(typeof port).toBe('number');
+    expect(port).toBe(6379);
+  });
+
+  it('coerces a provided numeric REDIS_PORT string to a real number ("6380" -> 6380)', () => {
+    const cfg = validateEnv(completeRawEnv({ REDIS_PORT: '6380' }));
+    expect(redisPortOf(cfg)).toBe(6380);
+  });
+
+  it('rejects a non-numeric REDIS_PORT (does NOT fall back to the default)', () => {
+    expect(() => validateEnv(completeRawEnv({ REDIS_PORT: 'not-a-port' }))).toThrow();
+  });
+
+  it('fails fast when the REQUIRED coordinate REDIS_HOST is missing', () => {
+    expect(() => validateEnv(rawEnvWithout('REDIS_HOST'))).toThrow();
+  });
+
+  it('fails fast when the REQUIRED secret REDIS_PASSWORD is missing', () => {
+    // A silent default here would connect the consumer to Redis with no/empty auth —
+    // a real defect the fail-fast must catch.
+    expect(() => validateEnv(rawEnvWithout('REDIS_PASSWORD'))).toThrow();
+  });
+
+  it('fails fast when REDIS_PASSWORD is present but empty', () => {
+    expect(() => validateEnv(completeRawEnv({ REDIS_PASSWORD: '' }))).toThrow();
+  });
+});
+
+describe('redis URL composition (URL-encoding, regression lock)', () => {
+  // Mirrors the Mongo DSN lock: the reserved-char-free creds every other test uses
+  // would let a dropped encoding pass silently while corrupting the DSN. The redis URL
+  // has an EMPTY username and the password after the ':' — redis://:<pw>@<host>:<port>.
+  const PASSWORD = 'p@ss:w/rd?#'; // '@' ':' '/' '?' '#' — all reserved in userinfo
+  const ENC_PASSWORD = 'p%40ss%3Aw%2Frd%3F%23';
+
+  function redisUrlFor(overrides: Record<string, unknown> = {}): string {
+    const cfg = composeConfig(completeRawEnv({ REDIS_PASSWORD: PASSWORD, ...overrides }));
+    const url = cfg?.redis?.url;
+    expect(typeof url).toBe('string');
+    return url as string;
+  }
+
+  it('composes redis://:<pw>@<host>:<port> with reserved chars percent-encoded', () => {
+    const url = redisUrlFor({ REDIS_HOST: 'redis', REDIS_PORT: '6379' });
+    expect(url.startsWith('redis://')).toBe(true);
+    expect(url).toContain(ENC_PASSWORD);
+    // The raw (unencoded) password must NOT appear — that would mean encoding was dropped.
+    expect(url).not.toContain(`:${PASSWORD}@`);
+    expect(url).toContain('@redis:6379');
+  });
+
+  it('round-trips through new URL() back to the intended host/port/password (empty user)', () => {
+    // The strongest form: a dropped/wrong encoding either fails to parse or yields the
+    // wrong credentials. The password carries '@' and '/', which would break parsing
+    // if left bare.
+    const url = new URL(redisUrlFor({ REDIS_HOST: 'redis', REDIS_PORT: '6379' }));
+    expect(url.protocol).toBe('redis:');
+    expect(url.hostname).toBe('redis');
+    expect(url.port).toBe('6379');
+    expect(url.username).toBe(''); // redis default user — no username in the userinfo
+    expect(decodeURIComponent(url.password)).toBe(PASSWORD);
+  });
+
+  it('keeps the discrete redis.password RAW (only the composed url is encoded)', () => {
+    // Encoding belongs to the DSN, not the stored credential — a client library that
+    // takes discrete host/port/password must receive the true password.
+    const cfg = composeConfig(completeRawEnv({ REDIS_PASSWORD: PASSWORD }));
+    expect(cfg?.redis?.password).toBe(PASSWORD);
   });
 });
 

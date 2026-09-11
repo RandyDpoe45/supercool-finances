@@ -516,16 +516,25 @@ reversal are two documents — a faithful money history).
   "eventType":      "transaction.posted",
   "type":           "external_outbound",
   "status":         "POSTED",
-  "amount":         "50000",              // int64 minor units, stored as-in-the-event (STRING)
+  "amount":         50000,                // int64 minor units — Mongo Long, parsed from the event's string
   "currency":       "MXN",
   "initiatedBy":    "sub",
   "reversesTransactionId": null,
   "payee":          { "id": "uuid", "displayName": "ACME", "rail": "rail-outbound" },
-  "legs":           [ /* as in the event — camelCase, string money */ ],
+  "legs":           [ /* as in the event — camelCase; delta/balanceAfter are Mongo Long (int64) */ ],
   "owners":         ["sub"],              // distinct customer owner_ids across legs (filter helper)
   "occurredAt":     ISODate("2026-09-08T12:00:00Z")
 }
 ```
+> **Money is stored as Mongo `Long` (int64), not a string.** The **wire/event**
+> carries money as an int64 **string** (unchanged — see the event contract above);
+> the consumer **parses that string into a `Long`** when it projects this stored
+> document (`amount`, `legs[].delta`, `legs[].balanceAfter`). `Long` is exact past
+> 2^53 **and** aggregatable, so the query-time views can `$sum` it and return numeric
+> `totalAmount` / `lastBalanceAfter`. A stored string couldn't be summed; a `double`
+> would lose precision. (Analytics uses Mongoose's `BigInt` schema type, which maps
+> to BSON `Long`.)
+
 Indexes: **unique `{ _id }`** (event dedup, spec 05) · `{ transactionId: 1 }` ·
 `{ occurredAt: -1 }` (time series / recent) · `{ owners: 1, occurredAt: -1 }`
 (per-customer history) · `{ type: 1, occurredAt: -1 }` · `{ "legs.accountId": 1 }`
