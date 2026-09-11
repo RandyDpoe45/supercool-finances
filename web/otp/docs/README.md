@@ -274,3 +274,12 @@ revealing works again. This proves the full spine: PKCE token → RTK Query bear
 
 Other scripts: `npm run build`, `npm run typecheck`, `npm run lint`,
 `npm run format` / `npm run format:check`, `npm test`.
+
+## End-to-end tests (Playwright, PENDING)
+
+Real-chain browser → nginx → Kong → balance-service e2e suites live in
+[`tests/e2e/`](../tests/e2e/README.md) (`npm run test:e2e`). They cover the spec-07 DoD flows
+(separate `otp-app` PKCE login, the pending feed, code reveal via `POST /balance/api/otp`, and
+the singleton 409) and are **PENDING (skipped via `describe.fixme`) until spec 08** provides the
+running stack, a seeded pending, and a Keycloak login user. They are kept separate from the
+Vitest suites by the `*.e2e.ts` naming and Playwright's `testDir`, so `npm test` never runs them.
