@@ -115,6 +115,18 @@ working on a clean machine.
 > endpoints (`GET /admin/accounts`, `GET /admin/limits`) that **do not exist yet**, so
 > those screens are not functional against the real backend; only the whoami landing is
 > proven end-to-end. Published ports remain `:8080` / `:8081` / `:8082`.
+>
+> **Update (post-Pass-2).** The admin app has since been completed — A2 accounts/limits
+> (#47), A3 maker-checker reversals (#51), A4 audit view (#52), A5 analytics dashboard
+> (#53) — and the balance-service admin READ surface now exists: `GET /admin/accounts` +
+> `/admin/limits` + `/admin/approvals` (#50) and `GET /admin/audit` (PR #54, pending
+> merge). Accordingly the full-run harness (`tests/e2e-fullrun/`) now runs the admin
+> **read/landing** browser e2e — `login` (PKCE + whoami), `accounts` (accounts + limits
+> reads through the gateway), and `analytics` (the `/analytics/admin` reporting reads) —
+> in addition to the public transfer-with-OTP chain. The DoD item **"admin maker-checker
+> reversal from the admin app"** stays unchecked: proving a reversal (and an audit-trail)
+> end-to-end needs SEEDED data the seed does not create yet (a POSTED transaction to
+> reverse, a pending approval, audit rows), so those browser flows remain future work.
 
 ## Open questions
 

@@ -1,15 +1,18 @@
-# admin-app end-to-end (Playwright) — PENDING until spec 08
+# admin-app end-to-end (Playwright)
 
 These suites exercise the **real chain** — browser → internal-nginx → internal-Kong (JWT
-verify + identity injection, **`admin` role enforced**) → balance-service admin surface —
-**not** the MSW stub the unit/component tests use. They encode the spec-07 Definition of Done
-for the admin SPA's auth shell (Step 1).
+verify + identity injection, **`admin` role enforced**) → the admin surfaces (balance-service
+`/balance/admin`, analytics-server `/analytics/admin`) — **not** the MSW stub the
+unit/component tests use.
 
-They are **PENDING (skipped by default)** because the running stack, the seed data, and the
-Keycloak login user are **spec-08 territory and do not exist yet**. Each suite is registered
-via `describe.fixme` (see `fixtures/harness.ts`), so `npx playwright test --list` enumerates
-them but nothing runs and **no browser is required**. Vitest never sees them: its `include`
-matches `*.{test,spec}.{ts,tsx}` and these are `*.e2e.ts` under `tests/e2e/`.
+`login.e2e.ts`, `accounts.e2e.ts`, and `analytics.e2e.ts` are now **wired into and run by**
+`tests/e2e-fullrun/` (the spec-08 full-run harness): it brings the stack up, seeds, mints a
+demo-admin bearer, and runs all three with `E2E_ENABLED=1` against the live `:8081` origin.
+
+By default (when `E2E_ENABLED` is unset) each suite is registered via `describe.fixme` (see
+`fixtures/harness.ts`), so `npx playwright test --list` enumerates them but nothing runs and
+**no browser is required**. Vitest never sees them: its `include` matches
+`*.{test,spec}.{ts,tsx}` and these are `*.e2e.ts` under `tests/e2e/`.
 
 ## What each spec proves
 
@@ -20,16 +23,27 @@ matches `*.{test,spec}.{ts,tsx}` and these are `*.e2e.ts` under `tests/e2e/`.
 - **`accounts.e2e.ts`** (Step A2) — the account-management and limits SCREENS are reachable on
   the internal plane and their reads (`GET /balance/admin/accounts`, `GET /balance/admin/limits`)
   traverse the gateway with an admin bearer (`200`) and render as tables. This is a **read smoke
-  on purpose**: the freeze/unfreeze and PUT-limits MUTATION flow is **deferred to spec 08** (when
-  seed data + the full stack exist) — mutating a shared seeded account/limit from a smoke test
-  would risk interfering with the transfer-with-OTP e2e that spec 08 enables, and asserting a
-  mutation without seed would be hollow.
+  on purpose**: the freeze/unfreeze and PUT-limits MUTATION flow is **deferred** — mutating a
+  shared seeded account/limit from a smoke test would risk interfering with the transfer-with-OTP
+  e2e that spec 08 enables, and asserting a mutation without seed would be hollow. The reads are
+  non-empty even before the customer seed (the migration seeds the system accounts + a global
+  baseline limit).
+- **`analytics.e2e.ts`** — login → `/analytics` → the two reporting reads
+  `GET /analytics/admin/reports/account-summaries` + `/daily-aggregates` traverse the **internal
+  gateway** (`/analytics/admin` namespace, the analytics-server) with an admin bearer (`200`) and
+  the dashboard's "Daily aggregates" / "Account summaries" sections render. This is a **read
+  smoke**: it asserts reachability + render, **not** row counts — the reports may be **empty**
+  because no transactions are seeded.
 
-The reversal **maker-checker** approval, audit, and analytics-dashboard flows — and the
-account/limits **mutation** flow — are **later work** and get their own e2e specs as those
-screens/seeds land; these files cover the Step-1 auth shell and the Step-A2 read surface.
+The reversal **maker-checker** approval and **audit** flows — and the account/limits
+**mutation** flow — are **later work** and get their own e2e specs as those screens/seeds land.
+The audit read endpoint shipped as **PR #54** but is **not yet merged** to main; the reversal
+and audit e2e need seeded transactions/approvals/audit rows the seed does not yet create.
 
-## Enabling them (spec 08)
+## Enabling them
+
+The `tests/e2e-fullrun/` harness does all of this for you against an isolated live stack.
+To run these specs **by hand** against your own stack:
 
 1. Bring up the stack: `docker compose up` (internal plane on `:8081`).
 2. Provision the Keycloak login user: a user carrying the **`admin` realm role** (the admin

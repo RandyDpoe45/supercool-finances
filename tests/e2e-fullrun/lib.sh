@@ -38,10 +38,23 @@
 # ENABLES + runs the admin app's login.e2e.ts browser chain (PKCE at :8081). Only :8080
 # (public-nginx), :8081 (internal-nginx) and :8082 (keycloak) are host-published.
 #
-# KNOWN GAP (not proven here): the admin maker-checker reversal e2e (the reversal UI is not
-# built) and the admin /accounts + /limits screens (their GET /admin/accounts + GET
-# /admin/limits endpoints do not exist yet). So the admin browser chain runs ONLY
-# login.e2e.ts (the whoami landing) — never accounts.e2e.ts.
+# ADMIN BROWSER CHAIN (now three read/landing specs). The admin app's Playwright specs run
+# with E2E_ENABLED=1 against the live :8081 origin:
+#   login.e2e.ts     — PKCE login + GET /balance/admin/whoami renders the admin identity.
+#   accounts.e2e.ts  — GET /balance/admin/accounts + /balance/admin/limits read smoke through
+#                      the gateway (both endpoints shipped in PR #50 as role-gated reads; the
+#                      migration-seeded system accounts + the global baseline limit make both
+#                      reads NON-EMPTY even before the customer seed).
+#   analytics.e2e.ts — GET /analytics/admin/reports/{account-summaries,daily-aggregates} read
+#                      smoke through the internal gateway's /analytics/admin namespace (the
+#                      analytics-server, spec 05). Reachability + render only — the reports may
+#                      be EMPTY because no transactions are seeded.
+#
+# REMAINING GAP (not proven here): the admin maker-checker REVERSAL e2e and the AUDIT e2e are
+# still not run — the reversal + audit flows need SEEDED data the seed does not create (no
+# transactions, no pending approval, no audit rows), and the GET /admin/audit read endpoint
+# shipped as PR #54 but is NOT yet merged to main. Those get e2e coverage once the seed is
+# expanded and #54 lands.
 #
 # Failure policy (the point of the step): a real SERVING or TRANSFER failure FAILs;
 # environmental blockers (no Docker daemon, offline/registry, host ports occupied, DNS for
@@ -761,20 +774,27 @@ prepare_playwright_admin() {
   return 0
 }
 
-# --- The admin-plane DoD spine: ENABLE + run the admin app's login.e2e.ts browser chain
-# (PKCE at :8081 -> whoami landing renders the gateway-resolved admin identity). This is the
-# admin analog of how 8-C enabled the client chain: flip E2E_ENABLED on and feed the demo-admin
-# creds + the :8081 origin. Only login.e2e.ts is run — accounts.e2e.ts is NOT (its GET
-# /admin/accounts + /admin/limits reads do not exist yet; that screen is not functional against
-# the real backend). A non-zero exit is a REAL serving/auth failure (or a test-code bug) -> FAIL. ---
+# --- The admin-plane DoD spine: ENABLE + run the admin app's browser chain against the live
+# :8081 origin (flip E2E_ENABLED on and feed the demo-admin creds + the :8081 origin — the admin
+# analog of how 8-C enabled the client chain). Three read/landing specs run:
+#   login.e2e.ts     — PKCE at :8081 -> GET /balance/admin/whoami renders the gateway-resolved
+#                      admin identity ("Admin console", role admin).
+#   accounts.e2e.ts  — GET /balance/admin/accounts + /balance/admin/limits read smoke through the
+#                      gateway (endpoints shipped in PR #50; reads NON-EMPTY from the migration
+#                      seeds — system accounts + the global baseline limit).
+#   analytics.e2e.ts — GET /analytics/admin/reports/{account-summaries,daily-aggregates} read
+#                      smoke through the internal gateway's /analytics/admin namespace (spec 05).
+#                      Reachability + render only; the reports may be EMPTY (no seeded transactions).
+# NOT run yet: the maker-checker REVERSAL e2e and the AUDIT e2e — both need seeded data the seed
+# does not create (no transactions/pending approval/audit rows), and GET /admin/audit (PR #54) is
+# not yet merged to main. A non-zero exit is a REAL serving/auth failure (or a test-code bug) -> FAIL. ---
 run_admin_e2e() {
-  section "Admin login e2e — PKCE at :$INTERNAL_HTTP_PORT -> whoami landing renders the admin identity (the admin-plane proof)"
+  section "Admin read/landing e2e — PKCE at :$INTERNAL_HTTP_PORT -> whoami landing + /accounts + /limits + analytics reporting read smokes (the admin-plane proof)"
   if ! load_realm_admin_login; then
     skip "could not read the demo-admin login from realm-export.json — admin e2e skipped"; return
   fi
   info "e2e env: E2E_ENABLED=1 E2E_BASE_URL=$(internal_base)/ E2E_USERNAME=$E2E_ADMIN_USERNAME E2E_PASSWORD=****"
-  info "spec: tests/e2e/login.e2e.ts (admin PKCE login + GET /balance/admin/whoami renders 'Admin console' + admin role)"
-  info "(accounts.e2e.ts is NOT run: its GET /admin/accounts + /admin/limits reads do not exist yet — the screen is not functional against the real backend)"
+  info "specs: login.e2e.ts (PKCE + whoami renders 'Admin console' + admin role), accounts.e2e.ts (GET /balance/admin/accounts + /balance/admin/limits read smoke — non-empty from migration seeds), analytics.e2e.ts (GET /analytics/admin/reports/{account-summaries,daily-aggregates} read smoke — may be empty, no seeded transactions)"
   local rc
   (
     cd "$WEB_ADMIN" && \
@@ -782,13 +802,13 @@ run_admin_e2e() {
     E2E_BASE_URL="$(internal_base)/" \
     E2E_USERNAME="$E2E_ADMIN_USERNAME" \
     E2E_PASSWORD="$E2E_ADMIN_PASSWORD" \
-    npx playwright test tests/e2e/login.e2e.ts
+    npx playwright test tests/e2e/login.e2e.ts tests/e2e/accounts.e2e.ts tests/e2e/analytics.e2e.ts
   )
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    pass "ADMIN LOGIN passed: demo-admin PKCE login at :$INTERNAL_HTTP_PORT -> GET /balance/admin/whoami 200 through internal-nginx -> internal-kong -> balance-service -> the admin identity (role 'admin') renders on 'Admin console'"
+    pass "ADMIN READ/LANDING passed: demo-admin PKCE login at :$INTERNAL_HTTP_PORT -> whoami 200 (admin identity renders on 'Admin console'), the /accounts + /limits reads (200 via /balance/admin, non-empty from migration seeds), and the analytics reporting reads (200 via /analytics/admin/reports) all traverse internal-nginx -> internal-kong -> the services"
   else
-    fail "the admin login e2e exited $rc — a real serving/auth failure (or a test-code bug). Re-run verbosely: (cd web/admin && E2E_ENABLED=1 E2E_BASE_URL=$(internal_base)/ E2E_USERNAME=$E2E_ADMIN_USERNAME E2E_PASSWORD=**** npx playwright test tests/e2e/login.e2e.ts --reporter=list)"
+    fail "an admin read/landing e2e exited $rc — a real serving/auth failure (or a test-code bug). Re-run verbosely: (cd web/admin && E2E_ENABLED=1 E2E_BASE_URL=$(internal_base)/ E2E_USERNAME=$E2E_ADMIN_USERNAME E2E_PASSWORD=**** npx playwright test tests/e2e/login.e2e.ts tests/e2e/accounts.e2e.ts tests/e2e/analytics.e2e.ts --reporter=list)"
   fi
 }
 

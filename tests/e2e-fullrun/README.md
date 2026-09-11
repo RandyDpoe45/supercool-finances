@@ -21,8 +21,14 @@ It orchestrates the existing pieces — it does **not** re-implement them:
 4. **Admin plane (Pass 2):** the admin SPA is served at **`:8081`**, a no-token
    `/balance/admin/whoami` is a **401 at Kong**, a **real demo-admin bearer** reaches
    `/balance/admin/whoami` → **200** with the `admin` role (black-box, through
-   internal-nginx → internal-kong → balance-service), and the admin app's `login.e2e.ts`
-   browser chain runs for real (PKCE at `:8081` → the whoami landing renders "Admin console").
+   internal-nginx → internal-kong → balance-service), and the admin app's browser chain runs
+   for real (PKCE at `:8081`): `login.e2e.ts` (the whoami landing renders "Admin console"),
+   `accounts.e2e.ts` (the `GET /balance/admin/accounts` + `/balance/admin/limits` reads —
+   endpoints shipped in #50, non-empty from the migration seeds — traverse the gateway and
+   render), and `analytics.e2e.ts` (the `GET /analytics/admin/reports/{account-summaries,
+   daily-aggregates}` reads traverse the internal gateway's `/analytics/admin` namespace and
+   the dashboard renders — a read smoke; the reports may be **empty** as no transactions are
+   seeded).
 
 The Playwright specs (`web/client/tests/e2e/**`, `web/otp/tests/e2e/**`,
 `web/admin/tests/e2e/**`) are the **test-writer's artifact** and are **not** edited here.
@@ -32,16 +38,18 @@ This harness only supplies the env those specs read and the running stack.
 > landing. Host-published: **`:8080`** (public-nginx), **`:8081`** (internal-nginx),
 > **`:8082`** (keycloak).
 >
-> **Known gap (not proven here).** The **admin maker-checker reversal** e2e (the reversal UI
-> is not built) and the admin **`/accounts` + `/limits`** screens (their `GET /admin/accounts`
-> + `GET /admin/limits` reads do not exist yet). The admin browser chain runs **only**
-> `login.e2e.ts` (the whoami landing), never `accounts.e2e.ts`.
+> **Known gap (not proven here).** The admin **maker-checker reversal** e2e and the **audit**
+> e2e are still not run — both need **seeded data the seed does not create** (no transactions,
+> no pending approval, no audit rows), and the `GET /admin/audit` read endpoint shipped as
+> **PR #54** but is **not yet merged** to main. Those get e2e coverage once the seed is
+> expanded and #54 lands. (The admin browser chain now runs `login.e2e.ts` + the
+> `accounts.e2e.ts` and `analytics.e2e.ts` read smokes.)
 
 ## Layout
 
 | File | Purpose |
 |---|---|
-| `run.sh` | Orchestrator: up → healthy → seed → browser-reach → public edge + e2e → admin edge + whoami + admin login e2e → teardown. |
+| `run.sh` | Orchestrator: up → healthy → seed → browser-reach → public edge + e2e → admin edge + whoami + admin read/landing e2e (login + accounts + analytics) → teardown. |
 | `lib.sh` | All phases + helpers (sourced by `run.sh`; never run directly). |
 | `README.md` | This file. |
 
@@ -90,7 +98,7 @@ The specs read everything infrastructure-specific from the environment; the harn
 | **Transfer-with-OTP e2e** | the headline **DoD #2 (public half)**: `internal-transfer.e2e.ts` drives the full chain (client → real otp-app reveal → confirm → exact debit) and `login.e2e.ts` proves the seeded account renders (DoD #3). A non-zero exit is a **real** serving/transfer failure (or a test-code bug) → **FAIL**. |
 | **Admin edge sanity** | `GET :8081/healthz` → 200, `GET :8081/` → 200 the **admin** SPA index (title contains `Admin`, not the client/otp bundle), `GET /balance/admin/whoami` **no token** → **401 at Kong** — the admin `/` catch-all does not shadow the admin API, and the authenticated admin spine is wired. |
 | **Admin whoami slice** | black-box (browser-independent): a **real demo-admin bearer** (PKCE via the `admin-app` client) → `GET /balance/admin/whoami` → **200** with `userId == token sub` and `roles` containing `admin` — the demo-admin login reaches balance-service through `internal-nginx → internal-kong`. **FAILs** on a 401/403 for a valid admin or a wrong echoed identity; **SKIPs** if a token can't be minted (no `*.localtest.me` DNS). |
-| **Admin login e2e** | the admin-plane spine: the admin app's `login.e2e.ts` runs for real (E2E enabled, demo-admin creds, origin `:8081`) — PKCE login through internal-nginx/Kong and `GET /balance/admin/whoami` renders the gateway-resolved admin identity ("Admin console", role `admin`). A non-zero exit is a **real** serving/auth failure (or a test-code bug) → **FAIL**. `accounts.e2e.ts` is **not** run (its reads don't exist yet). |
+| **Admin read/landing e2e** | the admin-plane spine: the admin app's `login.e2e.ts`, `accounts.e2e.ts`, and `analytics.e2e.ts` run for real (E2E enabled, demo-admin creds, origin `:8081`). `login` — PKCE through internal-nginx/Kong and `GET /balance/admin/whoami` renders the admin identity ("Admin console", role `admin`); `accounts` — the `GET /balance/admin/accounts` + `/balance/admin/limits` reads (shipped in #50, non-empty from the migration seeds) traverse the gateway and render; `analytics` — the `GET /analytics/admin/reports/{account-summaries,daily-aggregates}` reads traverse the internal gateway's `/analytics/admin` namespace and the dashboard renders (read smoke — reports may be **empty**, no seeded transactions). A non-zero exit is a **real** serving/auth failure (or a test-code bug) → **FAIL**. |
 
 ### Why `external-transfer.e2e.ts` is not run here
 
@@ -106,8 +114,10 @@ proof and exercises the identical OTP out-of-band chain.
   `tests/build-serve-admin` (router, port contract, catch-all-not-shadow, static self-up).
 - **Seed** dataset exactness, sub-alignment, no-collateral, deep idempotency — `tests/seed`.
 - **Kong auth** semantics (401/403/anti-spoof/rate-limit, both edges) — `tests/transport`.
-- **Admin maker-checker reversal** e2e (reversal UI not built) and the admin
-  **`/accounts` + `/limits`** screens (their reads don't exist yet) — later work.
+- **Admin maker-checker reversal** e2e and the **audit** e2e — both need seeded
+  transactions/approvals/audit rows the seed does not create, and the `GET /admin/audit` read
+  endpoint (PR #54) is unmerged — later work. (The admin `/accounts` + `/limits` reads shipped
+  in #50 and now have a read smoke, `accounts.e2e.ts`.)
 
 ## Skips you may see (never false passes)
 

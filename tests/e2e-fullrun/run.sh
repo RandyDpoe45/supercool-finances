@@ -4,7 +4,7 @@
 #
 #   up (all-healthy) -> seed (+ idempotency) -> browser reaches Keycloak ->
 #     PUBLIC: public-edge sanity -> Chromium -> client TRANSFER-WITH-OTP e2e
-#     ADMIN : admin-edge sanity -> demo-admin bearer whoami 200 -> admin login.e2e.ts
+#     ADMIN : admin-edge sanity -> demo-admin bearer whoami 200 -> admin read/landing e2e (login + accounts + analytics)
 #   -> teardown.
 #
 # It uses an ISOLATED compose project and an --env-file temp copy of .env.example, so it

@@ -32,11 +32,13 @@
 # with a real demo-admin bearer (the browser-driven variant lives in the admin app's
 # login.e2e.ts, which the full-run harness enables).
 #
-# KNOWN GAP (do NOT test as working): the admin app's /accounts + /limits screens call
-# balance-service admin READ endpoints (GET /admin/accounts, GET /admin/limits) that do
-# NOT exist yet. So the runtime checks target only the whoami LANDING + SPA serving; a
-# deep-link check asserts the SPA SHELL is served (history fallback), never that
-# accounts/limits DATA loads.
+# SCOPE NOTE (serving contract only): the admin app's /accounts + /limits screens call
+# balance-service admin READ endpoints (GET /admin/accounts, GET /admin/limits) that NOW
+# exist (shipped in PR #50 as role-gated reads) and are exercised end to end by the full-run
+# runner (tests/e2e-fullrun/, which drives the admin browser specs against the live stack).
+# This build-serve harness stays the SERVING-contract check: the runtime checks target the
+# whoami LANDING + SPA serving; a deep-link check asserts the SPA SHELL is served (history
+# fallback). It intentionally does NOT drive browser specs or assert accounts/limits DATA.
 
 # ----------------------------------------------------------------------------------
 # Environment / globals

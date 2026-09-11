@@ -24,16 +24,21 @@ e2eDescribe('admin-app · account-management surface through the gateway', () =>
   test('renders the accounts table from GET /balance/admin/accounts (admin bearer through Kong)', async ({
     page,
   }) => {
+    // The app returns to `/` after PKCE (no deep-link restoration), so log in at the root landing,
+    // then open the screen via the primary nav — the read fires on that client-side navigation.
+    await keycloakLogin(page, {
+      entryPath: '/',
+      username: requireUsername(),
+      password: requirePassword(),
+    });
+    await expect(page.getByRole('heading', { name: 'Admin console', level: 1 })).toBeVisible();
+
     const accountsResponse = page.waitForResponse((response) => {
       const pathname = new URL(response.url()).pathname;
       return pathname.endsWith('/balance/admin/accounts') && response.request().method() === 'GET';
     });
 
-    await keycloakLogin(page, {
-      entryPath: '/accounts',
-      username: requireUsername(),
-      password: requirePassword(),
-    });
+    await page.getByRole('link', { name: 'Accounts' }).click();
 
     await expect(page.getByRole('heading', { name: 'Account management', level: 1 })).toBeVisible();
 
@@ -50,16 +55,19 @@ e2eDescribe('admin-app · account-management surface through the gateway', () =>
   });
 
   test('renders the current-limits table from GET /balance/admin/limits', async ({ page }) => {
+    await keycloakLogin(page, {
+      entryPath: '/',
+      username: requireUsername(),
+      password: requirePassword(),
+    });
+    await expect(page.getByRole('heading', { name: 'Admin console', level: 1 })).toBeVisible();
+
     const limitsResponse = page.waitForResponse((response) => {
       const pathname = new URL(response.url()).pathname;
       return pathname.endsWith('/balance/admin/limits') && response.request().method() === 'GET';
     });
 
-    await keycloakLogin(page, {
-      entryPath: '/limits',
-      username: requireUsername(),
-      password: requirePassword(),
-    });
+    await page.getByRole('link', { name: 'Limits' }).click();
 
     await expect(page.getByRole('heading', { name: 'Limits', level: 1 })).toBeVisible();
 
