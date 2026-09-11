@@ -9,8 +9,8 @@ import { AppShell } from '../components/templates/AppShell';
 
 /** Authenticated routes. Home carries the whoami identity landing; `/accounts` is account
  * management (freeze/unfreeze), `/limits` is the limits editor, `/reversals` is the maker-checker
- * reversals screen, `/audit` is the read-only audit view; `/analytics` is the placeholder dashboard;
- * unknown paths redirect home. */
+ * reversals screen, `/audit` is the read-only audit view; `/analytics` is the analytics dashboard
+ * (two report sections over the analytics server); unknown paths redirect home. */
 export function AppRoutes() {
   return (
     <AppShell>
