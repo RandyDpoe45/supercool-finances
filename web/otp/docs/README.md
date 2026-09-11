@@ -1,10 +1,11 @@
 # otp-app — OTP out-of-band SPA
 
 The simulated out-of-band OTP channel for SuperCool Finances (spec 07). It has its
-**own separate login** and lists the signed-in user's pending authorization; the real
-pending feed and one-time **code reveal** land in O2. This document covers the **O1
-scaffold**: the app structure, the auth + data spine, the MSW stub harness, the `/otp`
-base path, and the environment variables.
+**own separate login**, lists the signed-in user's single pending authorization, and
+**reveals the one-time code** the user reads back into the client-app to confirm the
+transfer. This document covers the app structure, the auth + data spine, the MSW stub
+harness, the `/otp` base path, the pending feed + code-reveal UX (one-time / ttl /
+singleton), the money + datetime helpers, and the environment variables.
 
 This app is **self-contained** (ADR-16): **no imports from other folders** and no
 shared component library. It is a SEPARATE project from `web/client` — it does not, and
@@ -40,24 +41,39 @@ web/otp/
 ├── src/
 │   ├── main.tsx               # bootstrap: start MSW (dev) → render <App/>
 │   ├── App.tsx                # AuthProvider → Provider(store) → Router(basename /otp) → AuthGate
-│   ├── app/routes.tsx         # authenticated routes (home only, for O1)
+│   ├── app/routes.tsx         # authenticated routes (single home screen)
 │   ├── auth/
 │   │   ├── userManager.ts     # OIDC settings (otp-app client) + shared UserManager + getAccessToken()
 │   │   └── AuthGate.tsx       # protected-route gate (login redirect / callback / error)
 │   ├── store/                 # configureStore + typed hooks
+│   ├── lib/                   # app-local, framework-light helpers (ADR-16 independent copies)
+│   │   ├── money.ts           # minor-unit string -> localized currency (BigInt/string, NO float)
+│   │   ├── datetime.ts        # UTC ISO -> America/Mexico_City via Intl IANA; instant -> epoch ms
+│   │   ├── countdown.ts       # pure ttl math: remainingSeconds + formatCountdown (m:ss)
+│   │   ├── useCountdown.ts     # live 1s countdown hook (tears its timer down at zero)
+│   │   └── apiError.ts        # normalize an RTK Query error -> { status, code, message }
 │   ├── services/api/
 │   │   ├── baseApi.ts         # createApi + fetchBaseQuery(prepareHeaders: bearer)
-│   │   ├── pendingAuthorizationApi.ts  # getPendingAuthorization query (the smoke call)
-│   │   └── contracts/         # app-local copies of the /api wire contract
-│   ├── mocks/                 # MSW handlers, fixtures, browser worker, node server
+│   │   ├── pendingAuthorizationApi.ts  # getPendingAuthorization query
+│   │   ├── otpApi.ts          # generateOtp mutation (POST /api/otp -> OtpDto)
+│   │   └── contracts/         # app-local copies of the /api wire contract (pending, otp, error)
+│   ├── mocks/                 # MSW handlers, fixtures, mutable dev state, browser worker, node server
 │   └── components/            # atomic design: atoms / molecules / organisms / templates / pages
 └── tests/
     └── setup.ts               # jsdom matchers + MSW server lifecycle (runner wiring)
 ```
 
 The `components/` tree follows **atomic design** (atoms → molecules → organisms →
-templates → pages). For O1 only the components actually used exist; `atoms/` and
-`molecules/` are intentionally empty placeholders.
+templates → pages):
+
+- **atoms** — `Button`, `Alert` (role=alert/status), `DetailRow` (label/value in a `<dl>`),
+  `Countdown` (live `m:ss` for a deadline).
+- **molecules** — `PendingDestination` (type-dependent destination rows), `RevealedCode`
+  (the prominent code + ttl countdown + one-time warning).
+- **organisms** — `PendingFeed` (the feed card + manual refresh + empty state),
+  `CodeRevealPanel` (the reveal action + revealed code + error mapping).
+- **pages** — `HomePage` (composes the feed + reveal; drives the expiry-disables-reveal
+  logic).
 
 ## The `/otp` base path (separate app on the public plane)
 
@@ -103,10 +119,49 @@ Login uses the Keycloak **`otp-app`** public client (PKCE S256, no client secret
 `baseApi` is a single `createApi` with `fetchBaseQuery({ baseUrl, prepareHeaders })`.
 `baseUrl` defaults to **`/api`** (same-origin) — never an absolute backend URL — so
 calls flow through the app's own origin (MSW in dev/test; the real nginx origin once
-transport lands). Feature endpoints are added with `injectEndpoints`. O1 ships one:
-`getPendingAuthorization` → `GET /api/pending-authorization`, which unwraps the
-`{ authorization }` envelope, rendered as a bare indicator on the home route to prove
-the spine end to end.
+transport lands). Feature endpoints are added with `injectEndpoints`:
+
+- **`getPendingAuthorization`** (query, `GET /api/pending-authorization`) — unwraps the
+  `{ authorization }` envelope to the `PendingAuthorizationDto | null`; tagged
+  `PendingAuthorization` and refetched by the feed's manual refresh.
+- **`generateOtp`** (mutation, `POST /api/otp` → `OtpDto`) — mints the caller's
+  user-scoped one-time code. It is a **mutation** because it has a server side-effect
+  (it claims the single active-code slot); it takes **no body** (the code is scoped to
+  the gateway identity, never a client id). It deliberately does **not** invalidate
+  `PendingAuthorization` — minting a code doesn't change the pending transfer — so the
+  feed is only refreshed on explicit user action (no over-polling). As a mutation result
+  the response `{ code, ttlSeconds }` lives only transiently in RTK Query's in-memory
+  mutation cache — `CodeRevealPanel` calls the mutation's `reset()` to drop that entry when
+  the ttl elapses, so the plaintext is **never persisted to durable storage**. The plaintext
+  only ever exists on the success path; a rejected mint leaves only the error envelope
+  (`code`/`message`/`requestId`) in the store — never a plaintext code.
+
+### Pending feed + code-reveal UX (one-time / ttl / singleton)
+
+- **The feed** (`PendingFeed`) renders the full `PendingAuthorizationDto`: the **formatted**
+  amount + currency, the transfer `type`, the **type-dependent** destination (internal →
+  masked name + account number; external_outbound → payee display name), and the
+  `createdAt`/`expiresAt` in **Mexico City** time with a live countdown to the **2-minute**
+  deadline. A `null` response shows a clear empty state. A **Refresh** button refetches on
+  demand.
+- **Reveal** (`CodeRevealPanel`) is a primary action that mints via `generateOtp` and shows
+  the returned `code` prominently with its `ttlSeconds` countdown and an explicit warning:
+  the code is **shown once and cannot be retrieved again** (the server never re-reveals it).
+  This is the code the user types into the client-app confirm step. The plaintext lives only
+  transiently — in the panel's local state and RTK Query's in-memory mutation cache — and is
+  **dropped the moment the ttl elapses**: a timeout clears the local state and calls the
+  mutation's `reset()` to drop the cached `{ code, ttlSeconds }`. The error path also calls
+  `reset()`, but only to clear the local state — the rejected mutation entry may remain in the
+  in-memory store, holding just the error envelope (`code`/`message`/`requestId`), never a
+  plaintext code. The plaintext is never logged or persisted to durable storage.
+- **Reveal is gated to a live pending.** `HomePage` runs the same expiry countdown, so when
+  the pending's 2-minute deadline lapses (or there is no pending) the reveal action is
+  withheld with a reason — an expired authorization can no longer mint a code.
+- **Singleton (409).** A second mint while a code is still active returns
+  **`409 OTP_ALREADY_ACTIVE`**, mapped to: *"A one-time code is already active. It was shown
+  once — wait for it to expire before requesting a new one."* A `401` maps to a re-auth
+  prompt; any other failure surfaces the envelope message (or a generic fallback). Error
+  parsing is centralized in `lib/apiError.ts`.
 
 ## MSW stub harness and how it maps to the real contract
 
@@ -122,9 +177,26 @@ imported solely by the test setup.
   **bigint minor-unit string**, ISO-8601 UTC `createdAt`/`expiresAt`, and the
   type-dependent destination fields (`internal` → `destinationAccountNumber` +
   `destinationMaskedName`; `external_outbound` → `payeeDisplayName`).
-- It seeds ONE pending (an internal transfer). The **no-pending** case
-  (`{ authorization: null }`) is exercised by swapping the response (see
-  `src/mocks/fixtures/pending-authorization.ts`).
+- It also implements **`POST /api/otp`** faithful to `serializeOtp` + the OTP service's
+  semantics: on mint it returns `{ code, ttlSeconds }`; it models the **singleton** — while
+  a minted code is still within its ttl a second mint is rejected **`409 OTP_ALREADY_ACTIVE`**
+  in the `{ error: { code, message, requestId } }` envelope, and once the ttl elapses the
+  slot frees and minting is allowed again. The mocked code is the **deterministic
+  `DEV_OTP_CODE = '424242'`** (`src/mocks/fixtures/otp.ts`, ttl `120s`) — a dev convenience
+  for a reproducible flow; the REAL service mints a random 6-digit CSPRNG code and never
+  re-reveals it. **`DEV_OTP_CODE` is not a secret.**
+- **Mutable dev/test state** lives in `src/mocks/state.ts` (isolated from handlers because
+  `server.resetHandlers()` resets handlers, not module state): the selected pending fixture
+  and the OTP singleton slot. It exposes `setMockPending()` (swap internal ↔ external ↔
+  `null`) and `resetMockState()` so tests start clean.
+- It seeds ONE pending (an internal transfer) by default. Both an **internal**
+  (`fixturePendingAuthorization`) and an **external_outbound**
+  (`fixtureExternalPendingAuthorization`) fixture are provided so the type-dependent
+  rendering can be exercised (switch via `setMockPending`); the **no-pending** case
+  (`{ authorization: null }`) is exercised via `fixtureNoPendingAuthorization` or by
+  swapping the response. The fixtures' `createdAt`/`expiresAt` are computed **relative to
+  now** at module load, so the dev demo shows a live 2-minute countdown that actually lapses
+  rather than a perpetually-past instant.
 - It also mirrors the **identity/error contract**: a request without a bearer token is
   rejected **401** with the service-wide `ErrorResponse` envelope
   (`{ error: { code, message, requestId } }`), the same way `GatewayIdentityGuard`
@@ -151,13 +223,29 @@ copy to `.env.local` to override locally. Never put a secret here.
 | `VITE_OIDC_CLIENT_ID` | `otp-app` | Public OIDC client id — the SEPARATE OTP login. |
 | `VITE_ENABLE_API_MOCKS` | `true` | Set `false` to disable the dev MSW stub. |
 
-## Timezone / money (deferred to O2)
+## Money + datetime helpers (app-local, ADR-16)
 
-The server is UTC-only; the code-reveal UI in O2 will convert timestamps at the edge to
-`America/Mexico_City` and format the amount from its canonical minor-unit string. Those
-**money + datetime helpers are this app's OWN** — copied per ADR-16, **never imported**
-from `web/client`. O1 renders no formatted amounts or dates, so no conversion is wired
-yet (the smoke indicator shows only presence/absence of a pending).
+The `src/lib/` helpers are this app's **OWN independent copies** — they mirror the
+client-app's intent but are **never imported** from `web/client` or anywhere outside
+`web/otp/`. Triplication across the SPAs is the accepted price of atomic folders.
+
+- **`money.ts` — float-free.** Amounts arrive as canonical **bigint minor-unit strings**
+  (MXN centavos). `formatMinorUnits` splits the value into major/minor parts with **BigInt +
+  string math** and feeds the integer part to `Intl.NumberFormat` **as a `bigint`**, using
+  `Intl` only for locale scaffolding (symbol, grouping, separators, sign placement). No value
+  is ever coerced through `Number`/`parseFloat`, because on a money surface silent precision
+  loss on a large balance is a correctness defect, not a cosmetic one. The per-currency minor
+  scale is a small map (MXN = 2), defaulting to 2 for an unseeded code.
+- **`datetime.ts` — IANA, no hardcoded offset.** The server is UTC-only; `formatInstant`
+  renders an ISO-8601 `Z` instant in Mexico City wall-clock via the **IANA zone
+  `America/Mexico_City`** passed to `Intl.DateTimeFormat` (with the zone abbreviation shown),
+  and `instantToEpochMs` yields the absolute epoch ms for the countdown. Using the IANA zone
+  lets the platform apply the correct offset for the instant; a hardcoded `-06:00` would
+  drift the moment a rule changes.
+- **`countdown.ts` / `useCountdown.ts` — ttl.** `remainingSeconds` + `formatCountdown` are
+  pure (`now` is passed in, so they are deterministic); `useCountdown` is the live 1-second
+  hook that tears its timer down at zero. Both the pending's 2-minute deadline and the
+  revealed code's ttl are rendered through these.
 
 ## Running it
 
@@ -168,10 +256,15 @@ npx msw init public/ --save # writes public/mockServiceWorker.js (once, if missi
 npm run dev                 # serves at http://localhost:8080/otp/
 ```
 
-Then in the browser: open `http://localhost:8080/otp/` → you are redirected to Keycloak
-→ sign in (the `otp-app` login) → you land back on the home route → the bare indicator
-("1 pending authorization" from the MSW stub) renders, proving PKCE token → RTK Query
-bearer → `/api/pending-authorization` → render.
+Full OTP flow in the browser: open `http://localhost:8080/otp/` → you are redirected to
+Keycloak → sign in (the `otp-app` login) → you land on the home route → the **pending
+authorization** card renders from the MSW stub (formatted amount, type-dependent
+destination, Mexico City times, a live 2-minute countdown). Click **Reveal one-time
+code** → the deterministic dev code **`424242`** is shown once with a `120s` countdown and
+the shown-once warning; type it into the client-app confirm step. Clicking reveal again
+while the code is still active shows the **singleton (409)** message; once the ttl elapses,
+revealing works again. This proves the full spine: PKCE token → RTK Query bearer →
+`/api/pending-authorization` + `/api/otp` → render.
 
 Other scripts: `npm run build`, `npm run typecheck`, `npm run lint`,
 `npm run format` / `npm run format:check`, `npm test`.
