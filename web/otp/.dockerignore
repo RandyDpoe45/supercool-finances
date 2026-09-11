@@ -1,0 +1,29 @@
+# Build-context hygiene for the per-SPA atomic image. Keep the context small and
+# deterministic: the builder reinstalls deps from the lockfile, so never ship
+# node_modules or a prior build; tests, e2e artifacts, docs, and local env files
+# never belong in the image (and .env* must never leak a secret into a layer).
+node_modules
+dist
+dist-ssr
+coverage
+tests
+test-results
+playwright-report
+blob-report
+.playwright
+playwright.config.ts
+docs
+eslint.config.mjs
+.prettierrc
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+Dockerfile
+.dockerignore

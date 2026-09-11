@@ -436,6 +436,30 @@ to the still-cooling payee is blocked with a clear cooling-off message.
 Other scripts: `npm run build`, `npm run typecheck`, `npm run lint`,
 `npm run format` / `npm run format:check`, `npm test`.
 
+## Production image & how it's served (spec 08)
+
+Packaging is a **per-SPA atomic image** (developer ruling, spec 08): this app is
+built **and** served by its own multi-stage [`Dockerfile`](../Dockerfile), with the
+build context scoped to `web/client` only — **no cross-folder COPY** (ADR-16). The
+image needs **no build args**: a production `vite build` sets `import.meta.env.DEV`
+to `false`, so the MSW stub self-disables (`enableApiMocks` returns early); the API
+base defaults to the same-origin `/balance/api`; and the OIDC authority / client-id
+defaults already match the compose issuer + the realm's `client-app` client.
+
+- **Stage 1 (builder, `node:24-alpine`):** `npm ci` from the committed lockfile +
+  hardened `.npmrc`, then `npm run build` → `dist/` (base `/`, assets under
+  `/assets/`). `NODE_ENV` is left unset so the devDependency build toolchain (vite,
+  typescript) installs.
+- **Stage 2 (runtime, `nginx:1.27-alpine`):** `dist/` is copied to
+  `/usr/share/nginx/html`, and the image's OWN [`nginx.conf`](../nginx.conf) (a
+  server fragment placed at `conf.d/default.conf`) serves it at `/` with the SPA
+  history fallback `try_files $uri /index.html`. This is the *image's* config,
+  distinct from the mounted `public-nginx` router.
+- **Topology:** the container joins `edge-public` **only** and is **not
+  host-published**; `public-nginx` (the sole `:8080` surface) routes `/` here. The
+  browser reaches the app at `http://localhost:8080/`, so the `window.location.origin`
+  OIDC `redirect_uri` matches the realm's allowlisted `http://localhost:8080/*`.
+
 ## End-to-end tests (Playwright, PENDING)
 
 Real-chain browser → nginx → Kong → balance-service e2e suites live in

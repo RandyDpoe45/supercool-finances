@@ -5,7 +5,8 @@
 # it GROWS ONE SERVICE PER STEP as the specs are built (see specs/README.md).
 # It is NOT a final integration task — it exists from step 0 and accretes.
 #
-# Current state — Step 4 (spec 06, PUBLIC EDGE half: public-kong + public-nginx):
+# Current state — Step 5 (spec 08, PUBLIC-PLANE FRONTENDS: client-app + otp-app,
+#   served by public-nginx as the router; builds on spec 06's public edge):
 #   - The five networks (§2) are declared. `data` carries the datastores; `keycloak`
 #     also joins `app-public`, `app-internal` and `data` (spec 00 §2). `edge-public`
 #     + `app-public` now have members (the public gateway/front door below);
@@ -58,6 +59,19 @@
 #     ONLY (spec 00 §2 — NOT app-public: unreachable from the public plane at L3);
 #     host-unpublished. The stream consumer + Mongo read model + reporting API are
 #     added in spec 05.
+#   - `client-app` + `otp-app` (spec 08, THIS step): the two PUBLIC SPAs, each a
+#     PER-SPA ATOMIC image (developer ruling) — its own multi-stage Dockerfile
+#     (node build -> nginx serving the bundle), build context scoped to its own
+#     folder (web/client, web/otp — no cross-folder context, ADR-16). No build
+#     args: a production `vite build` disables the MSW stub, the API base defaults
+#     to the same-origin /balance/api, and the OIDC defaults already match the
+#     compose issuer + realm clients. Both join `edge-public` ONLY and are
+#     host-UNPUBLISHED — only public-nginx (:8080) is. public-nginx is now the
+#     thin ROUTER that assembles them: `/` -> client-app, `/otp/` -> otp-app
+#     (prefix preserved; that bundle is built for base '/otp/'), `/balance/api/`
+#     -> public-kong (unchanged). See infra/nginx-public/nginx.conf + the two
+#     web/*/docs. (The admin SPA + internal edge are a LATER pass — spec 08 scope
+#     note; only :8080 + :8082 are published in this pass.)
 #
 # What arrives in later steps (do NOT add here early):
 #   - Step 3  (spec 04): `balance-service`     — EXTENDED with the money domain
@@ -437,15 +451,59 @@ services:
       - edge-public
       - app-public
 
-  # Public front door (spec 06, public edge) — the ONLY host-published surface of
-  # the public plane. Reverse-proxies the service-namespaced /balance/api/* ->
-  # public-kong (ADR-17: Kong strips /balance so balance-service gets /api/*) and
-  # will serve the customer + OTP SPA bundles at / in spec 08 (placeholder root
-  # until then). Stock nginx image
-  # with a read-only mounted conf (config as code); no custom image needed. Plain
-  # HTTP on localhost — TLS is NOT terminated here for this demo (spec 06, open
-  # question resolved). Joins edge-public ONLY (it never reaches services
-  # directly). See infra/nginx-public/README.md.
+  # Customer SPA (spec 08) — a PER-SPA ATOMIC image (developer ruling): built AND
+  # served by its own multi-stage Dockerfile (node build -> nginx serving the
+  # bundle), build context scoped to web/client ONLY (no cross-folder context,
+  # ADR-16). No build args — a production `vite build` disables the MSW stub and
+  # the API/OIDC defaults already match the compose topology. Joins edge-public
+  # ONLY and is host-UNPUBLISHED: it is reachable solely via public-nginx, which
+  # routes `/` here. See web/client/docs.
+  client-app:
+    build: ./web/client
+    restart: unless-stopped
+    healthcheck:
+      # busybox wget (ships in the nginx:alpine base) against the served SPA root:
+      # proves the built bundle is actually served (index.html -> 200), not just
+      # that nginx is up. Local probe — does not traverse the router.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      # The public front door reaches it here; it touches no other network and is
+      # never host-published (spec 08 §Ports & origin).
+      - edge-public
+
+  # OTP out-of-band SPA (spec 08) — same PER-SPA ATOMIC shape as client-app, build
+  # context scoped to web/otp ONLY. The bundle is built for base '/otp/', so its
+  # assets + OIDC redirect live under /otp/; public-nginx routes /otp/* here with
+  # the prefix PRESERVED and the container serves the bundle from …/html/otp/.
+  # Joins edge-public ONLY and is host-UNPUBLISHED. See web/otp/docs.
+  otp-app:
+    build: ./web/otp
+    restart: unless-stopped
+    healthcheck:
+      # Probe the served SPA under its /otp/ base (the app is not at the root here):
+      # /otp/ -> /otp/index.html -> 200, proving the bundle is served.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/otp/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - edge-public
+
+  # Public front door (spec 06 edge + spec 08 router) — the ONLY host-published
+  # surface of the public plane. As of spec 08 it is the thin ROUTER that assembles
+  # the per-SPA atomic images (it holds NO bundles itself): /balance/api/* ->
+  # public-kong (ADR-17: Kong strips /balance so balance-service gets /api/*),
+  # /otp/* -> otp-app (prefix preserved), and the / catch-all -> client-app. Stock
+  # nginx image with a read-only mounted conf (config as code); no custom image
+  # needed. Plain HTTP on localhost — TLS is NOT terminated here for this demo
+  # (spec 06, open question resolved). Joins edge-public ONLY (it reaches the
+  # gateway + the two SPA images over that network, never a service directly).
+  # See infra/nginx-public/README.md.
   public-nginx:
     # Pinned tag (NOT :latest) — reproducible-from-zero, same rationale as the
     # other image pins.
@@ -461,8 +519,13 @@ services:
       retries: 5
       start_period: 5s
     depends_on:
-      # The gateway it fronts must be healthy first (otherwise /balance/api -> 502).
+      # Every upstream it fronts must be healthy first, else that route 502s: the
+      # gateway (/balance/api) and both SPA images (/, /otp/).
       public-kong:
+        condition: service_healthy
+      client-app:
+        condition: service_healthy
+      otp-app:
         condition: service_healthy
     networks:
       - edge-public
