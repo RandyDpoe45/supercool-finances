@@ -275,6 +275,36 @@ revealing works again. This proves the full spine: PKCE token → RTK Query bear
 Other scripts: `npm run build`, `npm run typecheck`, `npm run lint`,
 `npm run format` / `npm run format:check`, `npm test`.
 
+## Production image & how it's served (spec 08)
+
+Packaging is a **per-SPA atomic image** (developer ruling, spec 08): this app is
+built **and** served by its own multi-stage [`Dockerfile`](../Dockerfile), with the
+build context scoped to `web/otp` only — **no cross-folder COPY** (ADR-16). The
+image needs **no build args**: a production `vite build` sets `import.meta.env.DEV`
+to `false`, so the MSW stub self-disables; the API base defaults to the same-origin
+`/balance/api`; and the OIDC authority / client-id defaults already match the
+compose issuer + the realm's `otp-app` client.
+
+The load-bearing detail is the **`/otp/` base** (see the `/otp` base-path section
+above): the bundle's assets and OIDC redirect are emitted under `/otp/`, and
+`public-nginx` forwards `/otp/*` here **without stripping** the prefix. So:
+
+- **Stage 1 (builder, `node:24-alpine`):** `npm ci` from the committed lockfile +
+  hardened `.npmrc`, then `npm run build` → `dist/` (base `/otp/`; `index.html`
+  references `/otp/assets/…`). `NODE_ENV` is left unset so the devDependency build
+  toolchain installs.
+- **Stage 2 (runtime, `nginx:1.27-alpine`):** `dist/` is copied to
+  `/usr/share/nginx/html/otp` — one level down, so the URL path maps **1:1** onto
+  the filesystem (`/otp/assets/x.js` → `…/html/otp/assets/x.js`) with a plain
+  `root`, no alias/rewrite. The image's OWN [`nginx.conf`](../nginx.conf) serves
+  `/otp/` with the fallback `try_files $uri /otp/index.html`. This is the *image's*
+  config, distinct from the mounted `public-nginx` router.
+- **Topology:** the container joins `edge-public` **only** and is **not
+  host-published**; `public-nginx` (the sole `:8080` surface) routes `/otp/*` here.
+  The browser reaches the app at `http://localhost:8080/otp/`, so the
+  `origin + '/otp/'` OIDC `redirect_uri` matches the realm's allowlisted
+  `http://localhost:8080/otp/*`.
+
 ## End-to-end tests (Playwright, PENDING)
 
 Real-chain browser → nginx → Kong → balance-service e2e suites live in
