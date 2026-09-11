@@ -453,5 +453,148 @@ suite(
       await asAdmin(admin).get('/admin/approvals');
       expect(await countAuditRows(ds, { actorId: admin })).toBe(0);
     });
+
+    // =========================================================================================
+    // GET /admin/audit — role gating, { entries } envelope, filters + paging, .strict() 400,
+    // and the anti-leak whitelist (entries carry ONLY the 7 DTO keys) over the real HTTP stack.
+    // =========================================================================================
+
+    // Seed audit rows directly (a GET writes none) with a settable created_at, tracking the actor
+    // id in `trackedAdmins` so the shared afterEach sweeps them (deleteAuditRowsByActor).
+    async function seedAudit(row: {
+      actorId: string;
+      action: string;
+      targetType?: string | null;
+      targetId?: string | null;
+      metadata?: Record<string, unknown> | null;
+      createdAt?: Date;
+    }): Promise<{ id: string }> {
+      if (!trackedAdmins.includes(row.actorId)) trackedAdmins.push(row.actorId);
+      const res = await ds.query(
+        `INSERT INTO "audit_log" (actor_id, action, target_type, target_id, metadata, created_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6) RETURNING id`,
+        [
+          row.actorId,
+          row.action,
+          row.targetType ?? null,
+          row.targetId ?? null,
+          row.metadata === undefined || row.metadata === null ? null : JSON.stringify(row.metadata),
+          row.createdAt ?? new Date(),
+        ],
+      );
+      return res[0];
+    }
+
+    it('GET /admin/audit: no X-User-Id → 401; a non-admin identity → 403; admin → 200', async () => {
+      const anon = await request(http).get('/admin/audit');
+      expect(anon.status).toBe(401);
+
+      const nonAdmin = await asUser(newOwner()).get('/admin/audit');
+      expect(nonAdmin.status).toBe(403);
+      expectErrorDto(nonAdmin.body, 'FORBIDDEN');
+
+      const admin = await asAdmin(newAdmin()).get('/admin/audit');
+      expect(admin.status).toBe(200);
+    });
+
+    it('GET /admin/audit: { entries } envelope (not a bare array, not { audit }) with EXACTLY the 7 whitelist keys — no leak', async () => {
+      const admin = newAdmin();
+      const actor = `admin-${randomUUID()}`;
+      const metadata = {
+        before: { status: 'active' },
+        after: { status: 'frozen' },
+        note: 'do-not-mangle',
+      };
+      await seedAudit({
+        actorId: actor,
+        action: 'account.freeze',
+        targetType: 'account',
+        targetId: 'acc-e2e-1',
+        metadata,
+      });
+
+      const res = await asAdmin(admin).get('/admin/audit').query({ actorId: actor });
+      expect(res.status).toBe(200);
+      // Envelope key is `entries` (the admin app A4 contract) — an array, not a bare array response.
+      expect(Array.isArray(res.body.entries)).toBe(true);
+      expect(res.body).not.toHaveProperty('audit');
+      expect(Array.isArray(res.body)).toBe(false);
+      expect(res.body.entries).toHaveLength(1);
+
+      const dto = res.body.entries[0];
+      // ANTI-LEAK: the whitelist serializer must surface EXACTLY these 7 keys and no more.
+      expect(Object.keys(dto).sort()).toEqual(
+        ['action', 'actorId', 'createdAt', 'id', 'metadata', 'targetId', 'targetType'].sort(),
+      );
+      expect(dto.actorId).toBe(actor);
+      expect(dto.action).toBe('account.freeze');
+      expect(dto.targetType).toBe('account');
+      expect(dto.targetId).toBe('acc-e2e-1');
+      expect(typeof dto.id).toBe('string'); // bigint as string on the wire
+      // createdAt is an ISO-8601 UTC string.
+      expect(typeof dto.createdAt).toBe('string');
+      expect(new Date(dto.createdAt).toISOString()).toBe(dto.createdAt);
+      // metadata is deliberately surfaced (the audit content), round-tripped intact.
+      expect(dto.metadata).toEqual(metadata);
+    }, 30_000);
+
+    it('GET /admin/audit: actorId + action filters and a limit reach through the stack', async () => {
+      const admin = newAdmin();
+      const actor = `admin-${randomUUID()}`;
+      const base = new Date('2026-04-01T00:00:00.000Z');
+      await seedAudit({ actorId: actor, action: 'account.freeze', createdAt: base });
+      await seedAudit({
+        actorId: actor,
+        action: 'limits.change',
+        createdAt: new Date(base.getTime() + 60_000),
+      });
+      await seedAudit({
+        actorId: actor,
+        action: 'limits.change',
+        createdAt: new Date(base.getTime() + 120_000),
+      });
+
+      // actorId + action → only this actor's two 'limits.change' rows.
+      const filtered = await asAdmin(admin)
+        .get('/admin/audit')
+        .query({ actorId: actor, action: 'limits.change' });
+      expect(filtered.status).toBe(200);
+      expect(filtered.body.entries).toHaveLength(2);
+      expect(filtered.body.entries.every((e: any) => e.action === 'limits.change')).toBe(true);
+      expect(filtered.body.entries.every((e: any) => e.actorId === actor)).toBe(true);
+
+      // A limit narrows the page (coerced from the query string), still filtered to this actor.
+      const limited = await asAdmin(admin)
+        .get('/admin/audit')
+        .query({ actorId: actor, limit: '1' });
+      expect(limited.status).toBe(200);
+      expect(limited.body.entries).toHaveLength(1);
+      expect(limited.body.entries[0].actorId).toBe(actor);
+    }, 30_000);
+
+    it('GET /admin/audit: an over-large limit is ACCEPTED (service clamps); an unknown key → 400 (.strict()); a negative limit → 400', async () => {
+      const admin = newAdmin();
+
+      // Unbounded at the wire → the service clamps to ≤ 200; a huge limit is a 200, never a 400.
+      const huge = await asAdmin(admin).get('/admin/audit').query({ limit: '5000' });
+      expect(huge.status).toBe(200);
+      expect(Array.isArray(huge.body.entries)).toBe(true);
+      expect(huge.body.entries.length).toBeLessThanOrEqual(200);
+
+      // `.strict()` rejects an unknown query key (param-smuggling defense).
+      const unknown = await asAdmin(admin).get('/admin/audit').query({ foo: 'bar' });
+      expect(unknown.status).toBe(400);
+      expectErrorDto(unknown.body);
+
+      // A negative limit fails the wire `nonnegative` coercion (400, not a silent clamp).
+      const negative = await asAdmin(admin).get('/admin/audit').query({ limit: '-1' });
+      expect(negative.status).toBe(400);
+    }, 30_000);
+
+    it('GET /admin/audit is a READ: it writes no audit row for the calling admin', async () => {
+      const admin = newAdmin();
+      await asAdmin(admin).get('/admin/audit').query({ limit: '10' });
+      expect(await countAuditRows(ds, { actorId: admin })).toBe(0);
+    });
   },
 );

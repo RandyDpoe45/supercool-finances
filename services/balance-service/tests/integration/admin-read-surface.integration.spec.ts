@@ -41,6 +41,7 @@ import {
   getAccountsServiceToken,
   getLimitsServiceToken,
   getApprovalServiceToken,
+  getAuditServiceToken,
   getApprovalStatus,
   getUserLimitsScope,
   tcpProbe,
@@ -53,6 +54,7 @@ import {
   insertTransaction,
   countAuditRows,
   deleteApprovalsByTarget,
+  deleteAuditRowsByActor,
   localAccountNumber,
   TODAY,
   MONTH_START,
@@ -86,6 +88,7 @@ suite(
     let accounts: any;
     let limits: any;
     let approvals: any;
+    let audit: any;
 
     let createdAccountIds: string[] = [];
     let trackedOwners: string[] = [];
@@ -154,6 +157,13 @@ suite(
       if (!approvals || typeof approvals.listApprovals !== 'function') {
         throw new Error(
           '[integration] resolved APPROVAL_SERVICE but it lacks listApprovals({ status? }).',
+        );
+      }
+      audit = app.get(getAuditServiceToken(), { strict: false });
+      if (!audit || typeof audit.listAudit !== 'function') {
+        throw new Error(
+          '[integration] resolved AUDIT_SERVICE but it lacks listAudit({ actorId?, action?, ' +
+            'targetType?, targetId?, limit?, offset? }).',
         );
       }
     }, 60_000);
@@ -357,6 +367,238 @@ suite(
       expect(idsOf(rejectedList)).not.toContain(pending.id);
 
       expect(await countAuditRows(ds)).toBe(auditBefore);
+    }, 30_000);
+
+    // =========================================================================================
+    // GET /admin/audit — newest-first (created_at DESC, id DESC), exact-match filters, paging,
+    // metadata round-trip, NULL-target row surfaced (NON-owner-scoped browse of the audit log).
+    //
+    // Driven against the REAL `AUDIT_SERVICE.listAudit(query)` (the service clamp + the repo's
+    // parameterized ORDER BY / WHERE / LIMIT-OFFSET), so a wrong ordering, a lost filter, an
+    // ignored offset, or a lexicographic id tiebreak FAILS here. Audit rows are seeded directly
+    // (a GET writes none) with controlled `created_at`, and TWO rows sharing a `created_at` so the
+    // numeric bigint `id DESC` tiebreak is observable. Cleaned up per-test by actor id.
+    // =========================================================================================
+
+    // A locally-scoped audit-row seeder (there is no shared insertAuditRow helper): a parameterized
+    // INSERT ... RETURNING, with `metadata` written as a JSON string so Postgres parses text → jsonb
+    // (the read-back deep-equals the seeded object). `id` is DB-generated (bigint identity → the
+    // insertion order IS the id order); `created_at` is settable so ordering is deterministic.
+    let auditActors: string[] = [];
+    async function seedAudit(row: {
+      actorId: string;
+      action: string;
+      targetType?: string | null;
+      targetId?: string | null;
+      metadata?: Record<string, unknown> | null;
+      createdAt?: Date;
+    }): Promise<{ id: string; created_at: Date }> {
+      if (!auditActors.includes(row.actorId)) auditActors.push(row.actorId);
+      const res = await ds.query(
+        `INSERT INTO "audit_log" (actor_id, action, target_type, target_id, metadata, created_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6) RETURNING id, created_at`,
+        [
+          row.actorId,
+          row.action,
+          row.targetType ?? null,
+          row.targetId ?? null,
+          row.metadata === undefined || row.metadata === null ? null : JSON.stringify(row.metadata),
+          row.createdAt ?? new Date(),
+        ],
+      );
+      return res[0];
+    }
+
+    afterEach(async () => {
+      const actors = auditActors;
+      auditActors = [];
+      try {
+        await deleteAuditRowsByActor(ds, actors);
+      } catch {
+        /* best-effort; random actor ids keep re-runs safe */
+      }
+    });
+
+    /** Assert a returned page respects `created_at DESC, id DESC` (numeric bigint tiebreak): each row
+     * is no newer than the one before it, and among equal timestamps the id strictly DECREASES as a
+     * BigInt — a lexicographic or ascending tiebreak fails this. */
+    function expectNewestFirst(rows: any[]): void {
+      for (let i = 1; i < rows.length; i++) {
+        const prev = rows[i - 1];
+        const cur = rows[i];
+        const prevT = new Date(prev.createdAt).getTime();
+        const curT = new Date(cur.createdAt).getTime();
+        expect(prevT).toBeGreaterThanOrEqual(curT);
+        if (prevT === curT) {
+          expect(BigInt(prev.id) > BigInt(cur.id)).toBe(true);
+        }
+      }
+    }
+
+    it('orders newest-first (created_at DESC, id DESC) — a shared-timestamp pair proves the numeric bigint tiebreak', async () => {
+      const actor = `admin-${randomUUID()}`;
+      const base = new Date('2026-01-01T00:00:00.000Z');
+      const T0 = new Date(base.getTime());
+      const T1 = new Date(base.getTime() + 60_000);
+      const T2 = new Date(base.getTime() + 120_000);
+
+      const oldest = await seedAudit({ actorId: actor, action: 'account.freeze', createdAt: T0 });
+      // TWO rows sharing created_at T1; the SECOND insert gets the higher (numerically larger) id.
+      const tieEarlier = await seedAudit({
+        actorId: actor,
+        action: 'account.unfreeze',
+        createdAt: T1,
+      });
+      const tieLater = await seedAudit({
+        actorId: actor,
+        action: 'limits.change',
+        createdAt: T1,
+      });
+      const newest = await seedAudit({
+        actorId: actor,
+        action: 'external.inbound.simulated',
+        createdAt: T2,
+      });
+
+      expect(BigInt(tieLater.id) > BigInt(tieEarlier.id)).toBe(true); // sanity: later insert → higher id
+
+      const rows = await audit.listAudit({ actorId: actor, limit: 50, offset: 0 });
+      const order = rows.map((r: any) => r.id);
+      // Exactly our four, newest-first; the T1 tie resolves to the higher-id (later-inserted) row FIRST.
+      expect(order).toEqual([newest.id, tieLater.id, tieEarlier.id, oldest.id]);
+      expectNewestFirst(rows);
+    }, 30_000);
+
+    it('applies exact-match filters (actorId / action / targetType); an unmatched value → empty', async () => {
+      const actorA = `admin-${randomUUID()}`;
+      const actorB = `admin-${randomUUID()}`;
+
+      const aFreeze = await seedAudit({
+        actorId: actorA,
+        action: 'account.freeze',
+        targetType: 'account',
+        targetId: 'acc-A1',
+      });
+      const aLimits = await seedAudit({
+        actorId: actorA,
+        action: 'limits.change',
+        targetType: 'user_limits',
+        targetId: 'lim-A1',
+      });
+      const bFreeze = await seedAudit({
+        actorId: actorB,
+        action: 'account.freeze',
+        targetType: 'account',
+        targetId: 'acc-B1',
+      });
+
+      // actorId → ONLY actorA's rows (never actorB's) — a non-owner-scoped log still filters exactly.
+      const byActor = await audit.listAudit({ actorId: actorA, limit: 50, offset: 0 });
+      const byActorIds = byActor.map((r: any) => r.id);
+      expect(byActorIds).toEqual(expect.arrayContaining([aFreeze.id, aLimits.id]));
+      expect(byActorIds).not.toContain(bFreeze.id);
+      expect(byActor.every((r: any) => r.actorId === actorA)).toBe(true);
+
+      // action → ONLY 'limits.change' among actorA's rows (excludes the freeze).
+      const byAction = await audit.listAudit({
+        actorId: actorA,
+        action: 'limits.change',
+        limit: 50,
+      });
+      expect(byAction.map((r: any) => r.id)).toEqual([aLimits.id]);
+      expect(byAction.every((r: any) => r.action === 'limits.change')).toBe(true);
+
+      // targetType → both actors' 'account' rows carry targetType 'account'; scope to actorA to
+      // keep the assertion deterministic across a shared DB.
+      const byTarget = await audit.listAudit({
+        actorId: actorA,
+        targetType: 'account',
+        limit: 50,
+      });
+      expect(byTarget.map((r: any) => r.id)).toEqual([aFreeze.id]);
+      expect(byTarget.every((r: any) => r.targetType === 'account')).toBe(true);
+
+      // An unmatched exact value → empty.
+      const none = await audit.listAudit({
+        actorId: actorA,
+        action: 'reversal.executed',
+        limit: 50,
+      });
+      expect(none).toEqual([]);
+    }, 30_000);
+
+    it('paginates by limit/offset — disjoint pages that concatenate to a prefix of the full order; over-large limit clamps', async () => {
+      const actor = `admin-${randomUUID()}`;
+      const base = new Date('2026-02-01T00:00:00.000Z');
+      // Seed 5 rows with STRICTLY increasing created_at → a total, deterministic newest-first order.
+      const seeded: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const r = await seedAudit({
+          actorId: actor,
+          action: 'account.freeze',
+          createdAt: new Date(base.getTime() + i * 60_000),
+        });
+        seeded.push(r.id);
+      }
+      const newestFirst = [...seeded].reverse(); // i=4 (latest) first
+
+      const full = await audit.listAudit({ actorId: actor, limit: 50, offset: 0 });
+      expect(full.map((r: any) => r.id)).toEqual(newestFirst);
+
+      const page1 = await audit.listAudit({ actorId: actor, limit: 2, offset: 0 });
+      const page2 = await audit.listAudit({ actorId: actor, limit: 2, offset: 2 });
+      const p1 = page1.map((r: any) => r.id);
+      const p2 = page2.map((r: any) => r.id);
+      expect(p1).toHaveLength(2);
+      expect(p2).toHaveLength(2);
+      // Disjoint (offset genuinely skipped page 1) AND the two pages are the first-4 prefix in order.
+      expect(p2.every((id: string) => !p1.includes(id))).toBe(true);
+      expect([...p1, ...p2]).toEqual(newestFirst.slice(0, 4));
+
+      // The service clamps an over-large limit to ≤ 200 (no unbounded scan); our rows are still there.
+      const huge = await audit.listAudit({ actorId: actor, limit: 5000, offset: 0 });
+      expect(huge.length).toBeLessThanOrEqual(200);
+      expect(huge.map((r: any) => r.id)).toEqual(expect.arrayContaining(seeded));
+    }, 30_000);
+
+    it('round-trips a jsonb metadata blob intact and surfaces a NULL-target / NULL-metadata row (non-owner-scoped — nothing filtered out)', async () => {
+      const actor = `admin-${randomUUID()}`;
+      const metadata = {
+        before: { status: 'active', dailyMax: '20000' },
+        after: { status: 'frozen', dailyMax: '5000' },
+        nested: { list: [1, 2, 3], flag: true },
+      };
+      const withMeta = await seedAudit({
+        actorId: actor,
+        action: 'limits.change',
+        targetType: 'user_limits',
+        targetId: 'lim-1',
+        metadata,
+        createdAt: new Date('2026-03-01T00:00:00.000Z'),
+      });
+      // A row with NO target and NO metadata (the polymorphic pointer may be absent) — a
+      // non-owner-scoped read must still return it, not silently drop it.
+      const nullTarget = await seedAudit({
+        actorId: actor,
+        action: 'account.freeze',
+        targetType: null,
+        targetId: null,
+        metadata: null,
+        createdAt: new Date('2026-03-01T00:01:00.000Z'),
+      });
+
+      const rows = await audit.listAudit({ actorId: actor, limit: 50, offset: 0 });
+      const byId = new Map(rows.map((r: any) => [r.id, r]));
+
+      const metaRow: any = byId.get(withMeta.id);
+      expect(metaRow).toBeTruthy();
+      expect(metaRow.metadata).toEqual(metadata); // jsonb parsed back to the exact object
+
+      const nullRow: any = byId.get(nullTarget.id);
+      expect(nullRow).toBeTruthy();
+      expect(nullRow.targetType).toBeNull();
+      expect(nullRow.targetId).toBeNull();
+      expect(nullRow.metadata).toBeNull();
     }, 30_000);
   },
 );

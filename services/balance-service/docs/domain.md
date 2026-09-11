@@ -68,11 +68,11 @@ per step:
   atomically) or `/reject`s it. Approve runs two guarded gates (approval `PENDING → EXECUTED` +
   original `POSTED → REVERSED`) then a FORCED compensating post through the reducer, all in one tx.
 - **Admin read surface — list endpoints**
-  ([below](#admin-read-surface--list-endpoints)): three companion `/admin` LIST reads —
-  `GET /admin/accounts`, `GET /admin/limits`, `GET /admin/approvals` — mirroring the existing
-  `GET /admin/transactions`. Each is a NON-owner-scoped, role-gated read that writes NO audit row
-  and uses NO transaction: a `.strict()` zod query → a delegating service method (clamp/default
-  here) → a parameterized repo query.
+  ([below](#admin-read-surface--list-endpoints)): four companion `/admin` LIST reads —
+  `GET /admin/accounts`, `GET /admin/limits`, `GET /admin/approvals`, and `GET /admin/audit`
+  (browse the audit log) — mirroring the existing `GET /admin/transactions`. Each is a
+  NON-owner-scoped, role-gated read that writes NO audit row and uses NO transaction: a `.strict()`
+  zod query → a delegating service method (clamp/default here) → a parameterized repo query.
 
 ## Module structure
 
@@ -2073,7 +2073,7 @@ post through the same reducer with `reversesTransactionId` set on the command.
 
 ## Admin read surface — list endpoints
 
-Three companion `/admin` **LIST reads**, added alongside the single-item admin ops so an admin/auditor
+Four companion `/admin` **LIST reads**, added alongside the single-item admin ops so an admin/auditor
 can browse the plane, not just act on one id at a time. Each **mirrors the existing
 [`GET /admin/transactions`](#get-transactions--view-any-transaction-transfers-feature) read exactly**:
 role-gated by the `GatewayIdentityGuard` (`X-User-Id` + the `admin` role, else 403), **DELIBERATELY NOT
@@ -2089,16 +2089,19 @@ and the flow is always the same three hops:
    that appends a **bound** predicate per optional filter (never string interpolation) and orders
    `created_at DESC, id DESC` (deterministic tiebreak).
 
-The controller returns the **named-array envelope** built from the **reused, unchanged** whitelist
-serializer for that entity (the anti-leak boundary — internal columns like `systemKey`, the spend
-counters, and the approval `payload` blob stay off the wire). No `admin.module.ts` change — all three
-controllers were already declared on the `/admin` surface registry.
+The controller returns the **named-array envelope** built from a whitelist serializer for that entity
+(the anti-leak boundary — internal columns like `systemKey`, the spend counters, and the approval
+`payload` blob stay off the wire). The first three controllers were already declared on the `/admin`
+surface registry (no `admin.module.ts` change); `GET /admin/audit` adds a NEW controller
+(`AuditAdminController`), so `AdminModule` now also declares it (`AuditModule` was already imported for
+the simulated-inbound controller, so `AUDIT_SERVICE` is already available — no new import).
 
 | Route | Query (`.strict()`) | Envelope | Service | Repo |
 |---|---|---|---|---|
 | `GET /admin/accounts` | `{ ownerId?, limit?, offset? }` (limit/offset coerced non-neg ints, unbounded) | `{ accounts: AdminAccountDto[] }` | `IAccountsService.listAccounts` | `IAccountRepository.queryAccounts` |
 | `GET /admin/limits` | `{ scope? ('global'\|'customer'), ownerId? }` (no paging) | `{ limits: LimitsDto[] }` | `ILimitsService.listLimits` | `IUserLimitsRepository.list` |
 | `GET /admin/approvals` | `{ status? (ApprovalStatus) }` (no paging) | `{ approvals: ApprovalRequestDto[] }` | `IApprovalService.listApprovals` | `IApprovalRequestRepository.listByStatus` |
+| `GET /admin/audit` | `{ actorId?, action?, targetType?, targetId?, limit?, offset? }` (string exact-match filters; limit/offset coerced non-neg ints, unbounded) | `{ entries: AuditLogDto[] }` | `IAuditService.listAudit` | `IAuditLogRepository.queryAuditLog` |
 
 **`GET /admin/accounts`** — clamps the requested paging in the service (default 50, max 200, offset ≥ 0,
 mirroring the transfers admin list) so the account table is never scanned unbounded, then delegates to
@@ -2118,6 +2121,20 @@ discovering pending reversals to decide (the natural companion to
 [`POST /admin/approvals/:id/approve|reject`](#endpoints-1)). Delegates to `listByStatus`
 (`find({ where: { status }, order: { createdAt: 'DESC', id: 'DESC' } })`). No paging — approval rows
 are few. Reuses `serializeApprovalRequest` unchanged (the free-form `payload` blob is not surfaced).
+
+**`GET /admin/audit`** — the READ companion to the write-only audit paths every mutating admin op
+already uses (`recordInTx` / `record`); this is the browse endpoint the admin app's audit view consumes.
+Filters `actorId` / `action` / `targetType` / `targetId` are optional EXACT-match string predicates
+(each bound, never interpolated); `limit`/`offset` are clamped in the service (default 50, max 200,
+offset ≥ 0 — the audit log grows unbounded over time, so it is never scanned whole). Delegates to
+`queryAuditLog` (`createQueryBuilder('a')`, a bound `a.<field> = :<field>` per present filter,
+`ORDER BY a.createdAt DESC, a.id DESC` — the `bigint` identity `id` gives a numeric newest-first
+tiebreak). Unlike the other admin reads its serializer (`serializeAuditLog` → `AuditLogDto`) is NEW,
+and it **DELIBERATELY surfaces the free-form `metadata` before/after blob** passed through as-is: on
+the audit log that metadata IS the content the auditor needs (who changed what, from/to), and this is
+an admin-only, role-gated view. It is still an explicit hand-listed whitelist (never an entity spread);
+`id` is the bigint identity as a string and `createdAt` is rendered ISO-8601 UTC. This is the only one
+of the four reads that also required an `admin.module.ts` change (registering `AuditAdminController`).
 
 ## Not in this slice (later)
 
