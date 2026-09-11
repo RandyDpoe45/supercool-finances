@@ -239,6 +239,88 @@ export function getTransactionsRepositoryToken(): symbol {
 }
 
 /**
+ * Spec-05 stream-consumer layer (step A2) seams. Same coordination discipline as the
+ * A1 resolvers above: called LAZILY (inside opted-in integration `beforeAll`, or the
+ * projection unit suite's own `beforeAll`), so the default `npm test` never touches
+ * them — if the consumer layer is absent the suites SKIP (integration) or fail with a
+ * single actionable message (the pure projection unit), never mask a missing seam.
+ *
+ * Candidate module paths are guesses at the A2 layout (the consumer feature module);
+ * the STABLE contract is the EXPORT NAMES — `projectEvent`, `STREAM_CONSUMER_SERVICE`,
+ * `REDIS_CLIENT`. If the implementor lands them under a different path/name, THIS file
+ * is the single edit point (see tests/README.md "Seam contract").
+ */
+
+/**
+ * The pure projection function: `projectEvent(eventId, eventType, payloadJson)` →
+ * `TransactionReadModel`. No Redis/Mongo — it parses the wire payload (camelCase,
+ * money as int64 STRINGS) into the stored shape (money as `bigint`). Throws on a
+ * malformed payload so the consumer can leave the entry unacked.
+ */
+export function getProjectEvent(): (
+  eventId: string,
+  eventType: string,
+  payloadJson: string,
+) => any {
+  return resolveOrThrow(
+    'the pure projectEvent projection',
+    [
+      `${SRC}/modules/consumer/service/project-event`,
+      `${SRC}/modules/consumer/service/projection`,
+      `${SRC}/modules/consumer/projection/project-event`,
+      `${SRC}/modules/consumer/service/impl/project-event`,
+      `${SRC}/modules/consumer/project-event`,
+      `${SRC}/modules/stream-consumer/service/project-event`,
+      `${SRC}/modules/stream/service/project-event`,
+      `${SRC}/consumer/project-event`,
+    ],
+    ['projectEvent'],
+  );
+}
+
+/**
+ * DI token for the stream-consumer service (interface-behind-token). Resolved from a
+ * booted app via `app.get(token, { strict: false })`. The service exposes
+ * `ensureGroup(): Promise<void>` and `consumeOnce(options?): Promise<number>`.
+ */
+export function getStreamConsumerToken(): symbol {
+  return resolveOrThrow(
+    'the stream-consumer service DI token',
+    [
+      `${SRC}/modules/consumer/service/interfaces/stream-consumer.service.interface`,
+      `${SRC}/modules/consumer/service/interfaces/consumer.service.interface`,
+      `${SRC}/modules/consumer/service/interfaces/stream-consumer.service`,
+      `${SRC}/modules/consumer/consumer.tokens`,
+      `${SRC}/modules/stream-consumer/service/interfaces/stream-consumer.service.interface`,
+      `${SRC}/modules/stream/service/interfaces/stream-consumer.service.interface`,
+    ],
+    ['STREAM_CONSUMER_SERVICE'],
+  );
+}
+
+/**
+ * DI token for the global ioredis client. Resolved from a booted app via
+ * `app.get(token, { strict: false })`; the integration suite reuses this REAL client
+ * to `XADD` events + inspect the PEL (`XPENDING`), so the test drives the exact same
+ * Redis the consumer reads (one connection, loop disabled, sequential ops).
+ */
+export function getRedisClientToken(): symbol {
+  return resolveOrThrow(
+    'the REDIS_CLIENT DI token',
+    [
+      `${SRC}/redis/redis.tokens`,
+      `${SRC}/redis/redis.constants`,
+      `${SRC}/redis/redis.module`,
+      `${SRC}/common/redis/redis.tokens`,
+      `${SRC}/database/redis/redis.tokens`,
+      `${SRC}/modules/redis/redis.tokens`,
+      `${SRC}/modules/redis/redis.module`,
+    ],
+    ['REDIS_CLIENT'],
+  );
+}
+
+/**
  * Best-effort TCP reachability probe for the honest-SKIP integration gate. Resolves
  * true iff a TCP connection to host:port opens within `timeoutMs`. Never throws.
  */

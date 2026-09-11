@@ -520,6 +520,7 @@ reversal are two documents — a faithful money history).
   "currency":       "MXN",
   "initiatedBy":    "sub",
   "reversesTransactionId": null,
+  "failureReason":  null,                 // domain error code on a transaction.failed; null otherwise
   "payee":          { "id": "uuid", "displayName": "ACME", "rail": "rail-outbound" },
   "legs":           [ /* as in the event — camelCase; delta/balanceAfter are Mongo Long (int64) */ ],
   "owners":         ["sub"],              // distinct customer owner_ids across legs (filter helper)

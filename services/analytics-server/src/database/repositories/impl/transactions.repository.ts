@@ -46,6 +46,7 @@ export class TransactionsRepository implements ITransactionsRepository {
       currency: doc.currency,
       initiatedBy: doc.initiatedBy,
       reversesTransactionId: doc.reversesTransactionId,
+      failureReason: doc.failureReason,
       payee: doc.payee
         ? { id: doc.payee.id, displayName: doc.payee.displayName, rail: doc.payee.rail }
         : null,

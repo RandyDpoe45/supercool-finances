@@ -62,6 +62,8 @@ export const TransactionSchema = new Schema<TransactionReadModel>(
     currency: { type: String, required: true },
     initiatedBy: { type: String, required: true },
     reversesTransactionId: { type: String, default: null },
+    // Domain error code on a transaction.failed (per-reason analytics); null on posted.
+    failureReason: { type: String, default: null },
     payee: { type: PayeeSchema, default: null },
     legs: { type: [LegSchema], default: [] },
     // Distinct customer ownerIds across legs — per-customer filter/index helper.

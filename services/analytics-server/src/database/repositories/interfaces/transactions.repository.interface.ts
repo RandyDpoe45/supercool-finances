@@ -41,6 +41,10 @@ export interface TransactionReadModel {
   currency: string;
   initiatedBy: string;
   reversesTransactionId: string | null;
+  /** The domain error `code` on a `transaction.failed` (e.g. `INSUFFICIENT_FUNDS`,
+   *  `ACCOUNT_FROZEN`, `LIMIT_EXCEEDED`); `null` on a `transaction.posted`. Carried
+   *  for per-reason failure analytics — the reason it rides the event header. */
+  failureReason: string | null;
   payee: TransactionPayeeReadModel | null;
   legs: TransactionLegReadModel[];
   owners: string[];

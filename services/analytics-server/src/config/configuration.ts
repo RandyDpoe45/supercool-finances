@@ -21,11 +21,19 @@ export interface RedisConfig {
   url: string;
 }
 
+/** Transaction-stream consumer knobs (spec 05, step A2). Only `enabled` is env-driven
+ *  (so tests can boot AppModule without spinning the live loop); the group/consumer
+ *  names + block/count/min-idle live as code constants in the consumer impl. */
+export interface ConsumerConfig {
+  enabled: boolean;
+}
+
 export interface AppConfig {
   nodeEnv: Env['NODE_ENV'];
   port: number;
   mongo: MongoConfig;
   redis: RedisConfig;
+  consumer: ConsumerConfig;
   internalServiceToken: string;
 }
 
@@ -58,11 +66,16 @@ export function buildConfig(env: Env): AppConfig {
     url: `redis://:${encodeURIComponent(env.REDIS_PASSWORD)}@${env.REDIS_HOST}:${env.REDIS_PORT}`,
   };
 
+  const consumer: ConsumerConfig = {
+    enabled: env.ANALYTICS_CONSUMER_ENABLED,
+  };
+
   return {
     nodeEnv: env.NODE_ENV,
     port: env.PORT,
     mongo,
     redis,
+    consumer,
     internalServiceToken: env.INTERNAL_SERVICE_TOKEN,
   };
 }
