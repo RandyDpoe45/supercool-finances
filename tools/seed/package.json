@@ -1,0 +1,18 @@
+{
+  "name": "supercool-seed",
+  "version": "0.1.0",
+  "description": "SuperCool Finances — idempotent demo-data seed (spec 08). Atomic tool (ADR-16): no balance-service imports; the balance schema is duplicated here and kept in sync via the spec.",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "src/seed.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/seed.js"
+  },
+  "dependencies": {
+    "pg": "8.23.0"
+  }
+}
