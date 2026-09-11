@@ -41,6 +41,7 @@ upsert, **not** an auto-generated ObjectId).
 | `currency` | `string` | ISO currency code. |
 | `initiatedBy` | `string` | Keycloak `sub` (customer) or admin `sub` that initiated it. |
 | `reversesTransactionId` | `string \| null` | For a reversal, the transaction it compensates; `null` otherwise. Default `null`. |
+| `failureReason` | `string \| null` | Domain error code on a `transaction.failed` (e.g. `INSUFFICIENT_FUNDS`, `ACCOUNT_FROZEN`, `LIMIT_EXCEEDED`); `null` on a `transaction.posted`. Carried for per-reason failure analytics — added with the A2 consumer (the first step failed events land). Default `null`. |
 | `payee` | `{ id; displayName; rail } \| null` | External beneficiary (external_outbound); `null` otherwise. Sub-doc, no own `_id`. Default `null`. |
 | `legs[]` | `array<object>` | Double-entry legs; `SUM(delta) == 0`. Sub-doc, no own `_id`. Each: `accountId` (string), `ownerId` (string\|null), `accountKind` (string), `systemKey` (string\|null), `delta` (**`bigint`→`Long`**), `balanceAfter` (**`bigint`→`Long`**), `currency` (string). |
 | `owners[]` | `array<string>` | Distinct customer `ownerId`s across the legs — per-customer filter/index helper. Default `[]`. |
@@ -96,11 +97,13 @@ never the concrete class.
 - **`findById(eventId)`** — reads one document back, mapped to `TransactionReadModel`
   (money as `bigint`), or `null`. Useful to A2/A3 and tests.
 
-### Consumer flow (A2, for context)
+### Consumer flow (A2)
 
-`XREADGROUP` → **`upsertByEventId`** → `XACK`. Stuck entries are recovered with
-`XPENDING` + `XCLAIM`. Standalone Mongo is sufficient: a single idempotent write,
-no rollups to keep consistent, no multi-document transaction needed.
+`XREADGROUP '>'` → project → **`upsertByEventId`** → `XACK` (write-then-ack). Idle
+un-acked entries are recovered with `XAUTOCLAIM`. Standalone Mongo is sufficient: a
+single idempotent write, no rollups to keep consistent, no multi-document transaction
+needed. The consumer that implements this is documented in
+[`consumer.md`](./consumer.md).
 
 ## Redis config (client lands in A2)
 
@@ -112,6 +115,7 @@ the connection config is **declared and required** — `REDIS_HOST` / `REDIS_POR
 the foundation's "Mongo-only / Redis absent" note. The compose service maps the
 root discrete creds into these names.
 
-The Redis **client**, the consumer group, and the `data`-network + `depends_on:
-redis` compose wiring arrive with the **A2 consumer** — A1 only makes the config
-present so the service still boots with the now-required vars.
+The Redis **client** (`src/redis/`), the consumer group, and the `depends_on: redis`
+compose wiring landed with the **A2 consumer** (the `data` network was already joined
+for Mongo, and redis sits on it) — see [`consumer.md`](./consumer.md). A1 made the
+config present so the service still boots with the now-required vars.

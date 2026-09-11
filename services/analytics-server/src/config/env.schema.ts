@@ -31,6 +31,18 @@ export const EnvSchema = z.object({
 
   // Shared secret for the `/internal` service-identity guard.
   INTERNAL_SERVICE_TOKEN: z.string().min(1),
+
+  // --- Transaction-stream consumer (spec 05, step A2) ---
+  // Whether the in-process stream-consumer poll loop runs. Env values are STRINGS, and JS
+  // `Boolean('false')` is truthy, so `z.coerce.boolean()` would read 'false' as true — parse the
+  // two literals EXPLICITLY (fail-fast on anything else), then map to a real boolean. Default
+  // true; e2e/integration fixtures set 'false' so booting AppModule doesn't spin the live loop.
+  // The group/consumer names + block/count/min-idle are code constants (see the consumer impl),
+  // not env: only this on/off toggle needs to be environment-controlled.
+  ANALYTICS_CONSUMER_ENABLED: z
+    .union([z.literal('true'), z.literal('false')])
+    .default('true')
+    .transform((v) => v === 'true'),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

@@ -50,6 +50,9 @@ Transactions:
     reversesTransactionId:
       type: "string (uuid) | null"
       description: "For a reversal event, the transaction it compensates; null otherwise."
+    failureReason:
+      type: "string | null"
+      description: "The domain error code on a transaction.failed (e.g. INSUFFICIENT_FUNDS, ACCOUNT_FROZEN, LIMIT_EXCEEDED); null otherwise (e.g. on a transaction.posted). Carried on the event header for per-reason failure analytics."
     payee:
       type: "object | null"
       description: "External beneficiary for external_outbound; null otherwise. Sub-fields: id (string uuid), displayName (string), rail (string)."
@@ -80,33 +83,44 @@ Transactions:
 # `transactions` document by the consumer). Contract of record: DATA-MODEL Part 2.
 # Duplicated producer (balance service) / consumer (here), kept in sync via the spec.
 #
+# The WIRE is camelCase (verified against the producer/relay). The three STREAM
+# fields (event_id, event_type, payload) sit OUTSIDE the payload; `payload` is the
+# JSON object below. Money is int64 MINOR UNITS carried as a STRING (parsed to a
+# bigint/Long on projection). A reversal is LINK-ONLY: a compensating
+# transaction.posted with reversesTransactionId — there is NO transaction.reversed.
+#
+#   -- stream fields --
 #   event_id       string(uuid)   = outbox_event.id; becomes _id (dedup key)
-#   event_type     string         transaction.posted | transaction.reversed | transaction.failed
-#   schema_version int            bump on any contract change (consumer branches on it)
-#   occurred_at    ISO-8601       -> occurredAt
+#   event_type     string         transaction.posted | transaction.failed
+#   payload        JSON string    the object below
+#   -- payload (camelCase) --
+#   schemaVersion  int            bump on any contract change (consumer branches on it)
+#   occurredAt     ISO-8601       -> occurredAt
 #   transaction:
 #     id                       string(uuid)
 #     type                     internal | external_outbound | external_inbound
-#     status                   POSTED | REVERSED | FAILED
-#     amount                   int64 (minor units)
+#     status                   POSTED (posted event) | FAILED (failed event)
+#     amount                   int64 STRING (minor units)
 #     currency                 string
-#     initiated_by             string (sub)
-#     reverses_transaction_id  string(uuid) | null
-#     payee                    { id, display_name, rail } | null
-#     created_at               ISO-8601
-#     posted_at                ISO-8601 | null
-#   legs[]:                    (SUM(delta) == 0)
-#     account_id     string(uuid)
-#     owner_id       string | null        (customer sub; null for system/clearing)
-#     account_kind   customer | system
-#     system_key     string | null        (e.g. clearing:rail-outbound)
-#     delta          int64 (signed minor units)
-#     balance_after  int64 (minor units)
+#     initiatedBy              string (sub)
+#     reversesTransactionId    string(uuid) | null
+#     payee                    { id, displayName, rail } | null   (external_outbound only)
+#     createdAt                ISO-8601
+#     postedAt                 ISO-8601 | null   (null on transaction.failed)
+#     failureReason            string | null     (domain error code on transaction.failed; null on posted)
+#   legs[]:                    (SUM(delta) == 0; EMPTY on transaction.failed)
+#     accountId      string(uuid)
+#     ownerId        string | null        (customer sub; null for system/clearing)
+#     accountKind    customer | system
+#     systemKey      string | null        (e.g. clearing:rail-outbound)
+#     delta          int64 STRING (signed minor units)
+#     balanceAfter   int64 STRING (minor units)
 #     currency       string
 #
-# Consumer flow: XREADGROUP -> upsert transactions by _id=event_id -> XACK.
-# Stuck entries recovered with XPENDING + XCLAIM. Standalone Mongo is sufficient
-# (single idempotent write; no multi-document transaction needed).
+# Consumer flow: XREADGROUP -> project -> upsert transactions by _id=event_id -> XACK
+# (write-then-ack). Idle un-acked entries recovered with XAUTOCLAIM (restart re-processes
+# only un-acked, no loss/no dupes). Standalone Mongo is sufficient (single idempotent
+# write; no multi-document transaction needed).
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------

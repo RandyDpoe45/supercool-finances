@@ -9,7 +9,9 @@ import { DatabaseModule } from './database/database.module';
 import { PersistenceModule } from './database/persistence.module';
 import { HealthModule } from './health/health.module';
 import { AdminModule } from './modules/admin/admin.module';
+import { ConsumerModule } from './modules/consumer/consumer.module';
 import { InternalModule } from './modules/internal/internal.module';
+import { RedisModule } from './redis/redis.module';
 
 /**
  * Root module. The identity guards and the error filter are bound GLOBALLY
@@ -25,11 +27,13 @@ import { InternalModule } from './modules/internal/internal.module';
 @Module({
   imports: [
     AppConfigModule,
+    RedisModule,
     DatabaseModule,
     PersistenceModule,
     HealthModule,
     AdminModule,
     InternalModule,
+    ConsumerModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: GatewayIdentityGuard },

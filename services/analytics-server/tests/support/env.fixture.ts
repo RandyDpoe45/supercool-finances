@@ -14,6 +14,12 @@
  * boots, and the Mongo integration boot all build on it and then DELETE or corrupt
  * individual keys to exercise the fail-fast paths — so every required key
  * (including the spec-05 Redis coordinates + secret) is present here by default.
+ *
+ * `ANALYTICS_CONSUMER_ENABLED` (spec-05 step A2 → `AppConfig.consumer.enabled`,
+ * default true) is set to `'false'` here so that booting `AppModule` in any test
+ * NEVER starts the live consumer poll loop — the stream-consumer integration suite
+ * drives `consumeOnce()` deterministically instead. The A1 env schema strips this
+ * unknown key harmlessly; the A2 schema reads it. It stays overridable.
  */
 export function completeRawEnv(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -28,6 +34,7 @@ export function completeRawEnv(overrides: Record<string, unknown> = {}): Record<
     REDIS_HOST: 'redis',
     REDIS_PORT: '6379',
     REDIS_PASSWORD: 'changeme-redis-local',
+    ANALYTICS_CONSUMER_ENABLED: 'false',
     INTERNAL_SERVICE_TOKEN: 'test-internal-service-token',
     ...overrides,
   };

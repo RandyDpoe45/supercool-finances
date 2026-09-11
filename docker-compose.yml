@@ -410,10 +410,11 @@ services:
       MONGO_USER: ${MONGO_APP_USER}
       MONGO_PASSWORD: ${MONGO_APP_PASSWORD}
       MONGO_AUTH_SOURCE: ${MONGO_DB}
-      # Redis: composed into a URL internally by the transaction-stream consumer.
-      # Config is present from the read-model storage step (spec 05, A1) so the
-      # service boots with the now-required vars; the consumer CLIENT + the `data`
-      # network + depends_on: redis arrive with the A2 consumer.
+      # Redis: composed into a URL internally by the transaction-stream consumer
+      # (spec 05, A2). The consumer group reads `events:transactions` over the `data`
+      # network (already joined below for Mongo; redis also sits on `data`). The
+      # consumer runs by default (ANALYTICS_CONSUMER_ENABLED defaults true — no env
+      # needed here); set it to 'false' only where a boot must not spin the loop.
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
@@ -433,14 +434,17 @@ services:
       retries: 5
       start_period: 30s
     depends_on:
-      # Startup chain (spec 00 §5): datastore + Keycloak healthy before the service
-      # boots. Mongo is its store; Keycloak gates the same chain as balance-service.
+      # Startup chain (spec 00 §5): datastores + Keycloak healthy before the service
+      # boots. Mongo is its store; redis carries the transaction stream the consumer
+      # reads (spec 05, A2); Keycloak gates the same chain as balance-service.
       mongo:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       keycloak:
         condition: service_healthy
     networks:
-      # app-internal (reached by the internal Kong) + data (Mongo) ONLY — NOT
+      # app-internal (reached by the internal Kong) + data (Mongo + redis) ONLY — NOT
       # app-public, NOT edge-* (spec 00 §2). Host-unpublished.
       - app-internal
       - data
