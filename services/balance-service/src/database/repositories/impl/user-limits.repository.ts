@@ -7,6 +7,7 @@ import {
   IUserLimitsRepository,
   ResolvedLimits,
   UpsertUserLimitsData,
+  UserLimitsListFilter,
 } from '../interfaces/user-limits.repository.interface';
 
 /** One raw resolution row: the three cap columns as Postgres returns them (bigint → string). */
@@ -46,6 +47,20 @@ export class UserLimitsRepository implements IUserLimitsRepository {
 
   findByOwner(ownerId: string): Promise<UserLimits[]> {
     return this.repo.find({ where: { ownerId } });
+  }
+
+  list(filter: UserLimitsListFilter): Promise<UserLimits[]> {
+    // A plain, DELIBERATELY-NOT-owner-scoped read for the role-gated admin surface. Each optional
+    // filter appends a bound predicate (never interpolated); newest-first with an id tiebreak for
+    // deterministic ordering. No LIMIT/OFFSET — limits rows are few (one global + per-customer).
+    const qb = this.repo.createQueryBuilder('l');
+    if (filter.scope !== undefined) {
+      qb.andWhere('l.scope = :scope', { scope: filter.scope });
+    }
+    if (filter.ownerId !== undefined) {
+      qb.andWhere('l.ownerId = :ownerId', { ownerId: filter.ownerId });
+    }
+    return qb.orderBy('l.createdAt', 'DESC').addOrderBy('l.id', 'DESC').getMany();
   }
 
   async resolveInTx(

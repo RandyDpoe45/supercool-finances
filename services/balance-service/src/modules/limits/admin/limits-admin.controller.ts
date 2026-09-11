@@ -1,8 +1,9 @@
-import { Body, Controller, HttpCode, HttpStatus, Inject, Put } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Put, Query } from '@nestjs/common';
 import { Identity } from '../../../common/identity/identity.decorator';
 import { RequestIdentity } from '../../../common/identity/request-identity';
 import { ZodValidationPipe } from '../../../common/validation/zod-validation.pipe';
 import { ILimitsService, LIMITS_SERVICE } from '../service/interfaces/limits.service.interface';
+import { ListLimitsQueryParams, listLimitsQuerySchema } from './dto/limits-query.schema';
 import { LimitsDto } from './dto/limits.dto';
 import { UpsertLimitsBody, upsertLimitsSchema } from './dto/limits.schema';
 import { serializeLimits } from './serializers/limits.serializer';
@@ -20,6 +21,16 @@ import { serializeLimits } from './serializers/limits.serializer';
 @Controller('admin/limits')
 export class LimitsAdminController {
   constructor(@Inject(LIMITS_SERVICE) private readonly limits: ILimitsService) {}
+
+  /** List limits rows with optional `scope` / `ownerId` filters. A NON-owner-scoped READ (any
+   * limits row) — writes NO audit row. 200, `{ limits: LimitsDto[] }`. */
+  @Get()
+  async listLimits(
+    @Query(new ZodValidationPipe(listLimitsQuerySchema)) query: ListLimitsQueryParams,
+  ): Promise<{ limits: LimitsDto[] }> {
+    const limits = await this.limits.listLimits({ scope: query.scope, ownerId: query.ownerId });
+    return { limits: limits.map(serializeLimits) };
+  }
 
   /** Upsert the global baseline or a per-customer override; writes ONE audit row in the same tx.
    * 200, the resulting limits row. */

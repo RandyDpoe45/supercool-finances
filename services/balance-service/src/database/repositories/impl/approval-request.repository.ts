@@ -39,6 +39,16 @@ export class ApprovalRequestRepository implements IApprovalRequestRepository {
     return this.repo.find({ where: { targetTransactionId } });
   }
 
+  listByStatus(status: ApprovalStatus): Promise<ApprovalRequest[]> {
+    // A plain read for the role-gated admin surface. Newest-first with an id tiebreak for
+    // deterministic ordering; no LIMIT/OFFSET (approval rows are few). The `status` is a bound
+    // parameter — the service resolved the default (PENDING) before calling.
+    return this.repo.find({
+      where: { status },
+      order: { createdAt: 'DESC', id: 'DESC' },
+    });
+  }
+
   async transitionToExecutedInTx(
     queryRunner: QueryRunner,
     id: string,

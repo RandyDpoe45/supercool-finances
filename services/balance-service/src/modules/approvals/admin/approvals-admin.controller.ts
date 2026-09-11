@@ -1,18 +1,22 @@
 import {
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Inject,
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
 } from '@nestjs/common';
 import { Identity } from '../../../common/identity/identity.decorator';
 import { RequestIdentity } from '../../../common/identity/request-identity';
+import { ZodValidationPipe } from '../../../common/validation/zod-validation.pipe';
 import {
   APPROVAL_SERVICE,
   IApprovalService,
 } from '../service/interfaces/approval.service.interface';
+import { ListApprovalsQueryParams, listApprovalsQuerySchema } from './dto/approvals-query.schema';
 import { ApprovalRequestDto } from './dto/approval-request.dto';
 import { serializeApprovalRequest } from './serializers/approval-request.serializer';
 
@@ -30,6 +34,16 @@ import { serializeApprovalRequest } from './serializers/approval-request.seriali
 @Controller('admin/approvals')
 export class ApprovalsAdminController {
   constructor(@Inject(APPROVAL_SERVICE) private readonly approvals: IApprovalService) {}
+
+  /** List approval requests by `status` (the service DEFAULTS to PENDING — the checker's queue). A
+   * NON-owner-scoped READ — writes NO audit row. 200, `{ approvals: ApprovalRequestDto[] }`. */
+  @Get()
+  async listApprovals(
+    @Query(new ZodValidationPipe(listApprovalsQuerySchema)) query: ListApprovalsQueryParams,
+  ): Promise<{ approvals: ApprovalRequestDto[] }> {
+    const approvals = await this.approvals.listApprovals({ status: query.status });
+    return { approvals: approvals.map(serializeApprovalRequest) };
+  }
 
   /** Approve a PENDING reversal — EXECUTES it (guarded PENDING→EXECUTED + POSTED→REVERSED + the
    * FORCED compensating post, all in one tx). `:id` (the approval) via `ParseUUIDPipe`. 200, the
