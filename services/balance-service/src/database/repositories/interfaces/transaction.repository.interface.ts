@@ -53,6 +53,15 @@ export interface ITransactionRepository {
    * already posted / is not pending. This single guarded write is the "money moves once"
    * gate behind a confirm. MUST run inside the given queryRunner's active transaction. */
   transitionToPostedInTx(queryRunner: QueryRunner, id: string): Promise<boolean>;
+  /** Guarded confirm-time `PENDING → FAILED` transition inside the caller's transaction:
+   * `UPDATE ... SET status = FAILED, failure_reason = :reason, failed_at = now() WHERE id = :id AND
+   * status = 'PENDING'`. Returns `true` iff exactly one row was flipped; `false` (0 rows) means the
+   * transfer was already moved off PENDING (a concurrent expiry/cancel), so the FAILED write is a
+   * NO-OP and the caller emits no `transaction.failed` event and releases no hold — it just rethrows
+   * the original domain error. `reason` is the raising domain error's stable `code`. Used to persist
+   * a confirm-time BUSINESS failure (insufficient funds / frozen / limit) after the money tx rolled
+   * back. MUST run inside the given queryRunner's active transaction. */
+  transitionToFailedInTx(queryRunner: QueryRunner, id: string, reason: string): Promise<boolean>;
   /** Lazy-expiry sweep for ALL of an initiator's overdue PENDING transfers, inside the caller's
    * transaction: `UPDATE ... SET status = EXPIRED, failed_at = now() WHERE initiated_by = :id AND
    * status = 'PENDING' AND expires_at IS NOT NULL AND expires_at <= now()`. The DB clock (`now()`)

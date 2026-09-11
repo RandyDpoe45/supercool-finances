@@ -571,6 +571,8 @@ function buildPostedPayload(
       payee: command.payee ?? null,
       createdAt: transaction.createdAt.toISOString(),
       postedAt: transaction.postedAt ? transaction.postedAt.toISOString() : null,
+      // Always null on a POSTED event — carried for shape uniformity with `transaction.failed`.
+      failureReason: transaction.failureReason ?? null,
     },
     legs,
   };

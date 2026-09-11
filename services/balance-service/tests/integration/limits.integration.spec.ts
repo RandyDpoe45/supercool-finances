@@ -339,6 +339,20 @@ suite('limits enforcement — DoD money-safety proofs (integration, needs Postgr
     return r[0]?.status;
   }
 
+  /** status + the terminal-failure fields — the seam the "confirm-time cap breach → FAILED" proofs
+   * read to assert the rejected transfer is now a terminal FAILED record (reason + failed_at set). */
+  async function txTerminal(
+    txId: string,
+  ): Promise<
+    { status: string; failure_reason: string | null; failed_at: Date | null } | undefined
+  > {
+    const r = await ds.query(
+      `SELECT status, failure_reason, failed_at FROM "transaction" WHERE id = $1`,
+      [txId],
+    );
+    return r[0];
+  }
+
   async function sumLedger(accountId: string): Promise<bigint> {
     const r = await ds.query(
       `SELECT COALESCE(SUM(delta), 0)::text AS s FROM ledger_entry WHERE account_id = $1`,
@@ -462,8 +476,12 @@ suite('limits enforcement — DoD money-safety proofs (integration, needs Postgr
 
     expect(res.ok).toBe(false);
     expect(codeOf(res.error)).toBe('LIMIT_EXCEEDED');
-    // No money moved, no legs, transfer stays PENDING; the spend counters never advanced.
-    expect(await txStatus(res.transferId)).toBe('PENDING');
+    // No money moved, no legs; the confirm-time cap breach is now TERMINAL — the transfer is FAILED
+    // (stamped with a reason + failed_at), not left PENDING. The spend counters never advanced.
+    const failed = await txTerminal(res.transferId);
+    expect(failed?.status).toBe('FAILED');
+    expect((failed?.failure_reason ?? '').length).toBeGreaterThan(0);
+    expect(failed?.failed_at).not.toBeNull();
     expect(await legsForTx(res.transferId)).toHaveLength(0);
     expect((await acct(src.id)).balance).toBe('100000');
     expect((await acct(dst.id)).balance).toBe('0');
@@ -500,7 +518,11 @@ suite('limits enforcement — DoD money-safety proofs (integration, needs Postgr
     const over = await transfer(owner, src.id, dst, 1);
     expect(over.ok).toBe(false);
     expect(codeOf(over.error)).toBe('LIMIT_EXCEEDED');
-    expect(await txStatus(over.transferId)).toBe('PENDING');
+    // Confirm-time cap breach is now terminal FAILED (not left PENDING); counter frozen at the cap.
+    const overFailed = await txTerminal(over.transferId);
+    expect(overFailed?.status).toBe('FAILED');
+    expect((overFailed?.failure_reason ?? '').length).toBeGreaterThan(0);
+    expect(overFailed?.failed_at).not.toBeNull();
     expect(await legsForTx(over.transferId)).toHaveLength(0);
     expect((await counters(src.id)).spent_today).toBe('10000'); // NOT 10001
 

@@ -381,14 +381,29 @@ Wire conventions:
   `balanceAfter`) — never a JS `number`: a value past 2^53 must survive verbatim.
 - **Reversal is link-only:** a reversal is itself a compensating `transaction.posted`
   event carrying `reversesTransactionId`; there is **no** separate `transaction.reversed`
-  event. **FAILED** persistence and a `transaction.failed` event are a **subsequent
-  step** — `event_type` reserves `transaction.failed` for forward-compat, but only
-  `transaction.posted` is emitted today.
+  event.
+- **`transaction.failed` (confirm-time business failure):** when a user transfer is
+  OTP-confirmed but the business rejects it under the account lock (funds dropped below
+  the amount between initiate and confirm, the source froze, a spend limit tripped, or —
+  external — the payee is not active / still cooling off), the transfer transitions
+  **PENDING → FAILED** (`failure_reason` = the domain error's `code`, `failed_at = now()`)
+  and emits **exactly one** `transaction.failed` event: the same header envelope with
+  `status: "FAILED"`, a non-null **`failureReason`**, `postedAt: null`, and an **empty
+  `legs`** array — no money moved, so the double-entry sum-zero invariant holds trivially.
+  For an `external_outbound` the transfer's hold is **released** in the same failure tx
+  (`PLACED → RELEASED`, `held -= amount`). `failureReason` is carried on the header of
+  **both** event kinds (`null` on a `transaction.posted`) so they share one shape. Only a
+  BUSINESS failure persists FAILED; a VALIDATION/STRUCTURAL error (`INVALID_POSTING_COMMAND`,
+  `ACCOUNT_NOT_FOUND`, `CURRENCY_MISMATCH`, `TRANSFER_NOT_PENDING`) propagates as a 4xx with
+  **nothing persisted**.
+- **A rail-settlement failure is different (unchanged):** an outbound already POSTED, so
+  the rail's FAILURE callback **reverses** it (`POSTED → REVERSED` + a compensating
+  `clearing → customer` `transaction.posted`) — it is **never** a `transaction.failed`.
 
 ```jsonc
 // STREAM fields (relay-emitted, NOT in the payload):
 //   event_id   = outbox_event.id — dedup key (unique)
-//   event_type = "transaction.posted"   (| "transaction.failed" — later step)
+//   event_type = "transaction.posted" | "transaction.failed"
 // payload (the jsonb object below):
 {
   "schemaVersion": 1,                       // bump on any contract change
@@ -396,16 +411,17 @@ Wire conventions:
   "transaction": {
     "id":                     "uuid",
     "type":                   "internal | external_outbound | external_inbound",
-    "status":                 "POSTED",                 // POSTED for this event
+    "status":                 "POSTED",                 // POSTED (posted event) | FAILED (failed event)
     "amount":                 "50000",                  // positive magnitude, minor units (int64 STRING)
     "currency":               "MXN",
     "initiatedBy":            "sub-or-admin",
     "reversesTransactionId":  "uuid | null",            // set on a reversal's compensating post
     "payee": { "id": "uuid", "displayName": "ACME", "rail": "rail-outbound" }, // or null (external_outbound only)
     "createdAt":              "2026-09-08T12:00:00Z",
-    "postedAt":               "2026-09-08T12:00:01Z"    // or null
+    "postedAt":               "2026-09-08T12:00:01Z",   // or null (null on transaction.failed)
+    "failureReason":          null                      // domain error code on transaction.failed; null on posted
   },
-  "legs": [                                 // the ledger entries; SUM(delta) == 0
+  "legs": [                                 // the ledger entries; SUM(delta) == 0 (EMPTY on transaction.failed)
     { "accountId": "uuid", "ownerId": "sub",  "accountKind": "customer",
       "systemKey": null,                    "delta": "-50000", "balanceAfter": "150000", "currency": "MXN" },
     { "accountId": "uuid", "ownerId": null,  "accountKind": "system",
@@ -414,10 +430,36 @@ Wire conventions:
 }
 ```
 
+A `transaction.failed` carries the SAME envelope, with `status: "FAILED"`, `postedAt: null`,
+a non-null `failureReason`, and **empty `legs`** (no money moved):
+
+```jsonc
+// event_type = "transaction.failed"
+{
+  "schemaVersion": 1,
+  "occurredAt":    "2026-09-08T12:00:03Z",
+  "transaction": {
+    "id":                     "uuid",
+    "type":                   "external_outbound",
+    "status":                 "FAILED",
+    "amount":                 "50000",
+    "currency":               "MXN",
+    "initiatedBy":            "sub",
+    "reversesTransactionId":  null,
+    "payee": { "id": "uuid", "displayName": "ACME", "rail": "rail-outbound" }, // or null (internal)
+    "createdAt":              "2026-09-08T12:00:00Z",
+    "postedAt":               null,
+    "failureReason":          "INSUFFICIENT_FUNDS"      // the domain error's stable code
+  },
+  "legs": []                                // empty — no money moved (sum-zero holds trivially)
+}
+```
+
 | Field | Why analytics needs it |
 |---|---|
 | `event_id` (stream) | Idempotent upsert / stream dedup ([ADR-5](../docs/DECISIONS.md#adr-5--transactional-outbox-postgres--redis-streams-transport)). |
-| `event_type` (stream) / `transaction.status` | Distinguish posted from failed in the history and rollups. A **reversal** is a posted event linked via `reversesTransactionId` (no separate `reversed` event); `transaction.failed` is a later step. |
+| `event_type` (stream) / `transaction.status` | Distinguish posted from failed in the history and rollups. A **reversal** is a posted event linked via `reversesTransactionId` (no separate `reversed` event); a **confirm-time business failure** is a `transaction.failed` (empty legs, `status: FAILED`, `failureReason` set). |
+| `transaction.failureReason` | The domain error `code` on a `transaction.failed` (e.g. `INSUFFICIENT_FUNDS`, `ACCOUNT_FROZEN`, `LIMIT_EXCEEDED`); `null` on a `transaction.posted`. |
 | `transaction.reversesTransactionId` | Ties a reversal's compensating posted event to the original it offsets — the **link-only** reversal record on the read side. |
 | `schemaVersion` | Consumer can evolve without a shared package (ADR-16). |
 | `legs[].ownerId` | **Per-customer** aggregation without a Postgres join — the whole reason it's on the event. |

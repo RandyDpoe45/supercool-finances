@@ -299,13 +299,17 @@ suite(
       return r[0].n;
     }
 
-    async function txRow(
-      txId: string,
-    ): Promise<
-      { status: string; failure_reason: string | null; expires_at: string | null } | undefined
+    async function txRow(txId: string): Promise<
+      | {
+          status: string;
+          failure_reason: string | null;
+          failed_at: Date | null;
+          expires_at: string | null;
+        }
+      | undefined
     > {
       const r = await ds.query(
-        `SELECT status, failure_reason, expires_at FROM "transaction" WHERE id = $1`,
+        `SELECT status, failure_reason, failed_at, expires_at FROM "transaction" WHERE id = $1`,
         [txId],
       );
       return r[0];
@@ -728,9 +732,9 @@ suite(
       expect(await outboxCount(transferId)).toBe(1);
     }, 30_000);
 
-    // ---- Confirm-time funds check: overdraft caught at confirm, transfer stays PENDING ------
+    // ---- Confirm-time funds check: overdraft caught at confirm, transfer marked FAILED ------
 
-    it('lets an over-available transfer stay PENDING at initiate, then rejects it at confirm with INSUFFICIENT_FUNDS (nothing posted)', async () => {
+    it('lets an over-available transfer stay PENDING at initiate, then rejects it at confirm with INSUFFICIENT_FUNDS → FAILED (nothing posted)', async () => {
       const owner = newOwner();
       const src = await mkCustomer(owner, { balance: 1000, held: 0 }); // available = 1000
       const dst = await mkCustomer(newOwner(), { balance: 0, held: 0 });
@@ -738,16 +742,22 @@ suite(
 
       const initiated = await initiate(owner, src.id, dst, AMOUNT);
       const transferId = idOf(initiated);
-      expect(await txStatus(transferId)).toBe('PENDING');
+      expect(await txStatus(transferId)).toBe('PENDING'); // initiate never checks funds
 
       const code = await generateOtp(owner);
       const res = await capture(confirm(owner, transferId, code));
 
       expect(res.ok).toBe(false);
       expect(codeOf(res.error)).toBe('INSUFFICIENT_FUNDS');
-      expect(await txStatus(transferId)).toBe('PENDING');
+      // A confirm-time BUSINESS failure is now TERMINAL: the transfer is FAILED (stamped with a
+      // reason + failed_at), not left PENDING. Money-safety is unchanged: nothing posted.
+      const failedRow = await txRow(transferId);
+      expect(failedRow?.status).toBe('FAILED');
+      expect((failedRow?.failure_reason ?? '').length).toBeGreaterThan(0);
+      expect(failedRow?.failed_at).not.toBeNull();
       expect(await legsForTx(transferId)).toHaveLength(0);
-      expect(await outboxCount(transferId)).toBe(0);
+      // The only outbox row for a failed confirm is the single transaction.failed event (no post).
+      expect(await outboxCount(transferId)).toBe(1);
       expect((await acct(src.id)).balance).toBe('1000');
       expect((await acct(dst.id)).balance).toBe('0');
     }, 30_000);
