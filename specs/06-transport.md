@@ -62,9 +62,12 @@ return to the macro (spec 00), not a workaround.**
 - [ ] Valid customer token → `/balance/api` reaches the balance service (as `/api`)
       with injected `X-User-Id`; missing/invalid token → 401 at Kong. Bare `/api` and
       `/balance/admin` → 404 on the public edge.
-- [ ] Customer token → `/balance/admin` → 403; admin token → `/balance/admin` works.
-- [ ] `/internal/*` is not routable from either edge.
-- [ ] A client-supplied `X-User-Id` header is stripped before the upstream.
+- [ ] Admin token → `/balance/admin` and `/analytics/admin` reach the services (as
+      `/admin`) via the internal edge; customer token → `/balance/admin` → 403; no
+      token → 401.
+- [ ] `/internal/*` is not routable from either edge — bare `/internal`,
+      `/balance/internal`, `/analytics/internal` all 404.
+- [ ] A client-supplied `X-User-Id` header is stripped before the upstream (both edges).
 - [ ] Rate limiting triggers on the auth/money routes.
 - [ ] **Vertical slice is green.**
 
@@ -97,3 +100,16 @@ skew), gates the `customer` realm role (**403** vs **401** per
 `cors` + `rate-limiting` are kept; default-deny (only the `/balance/api` route —
 service-namespaced per ADR-17, Kong strips `/balance` so balance-service still gets
 `/api`). See `infra/kong-public/README.md`.
+
+**Resolved (implementation, internal edge):** `internal-kong` reuses the public
+gateway's `pre-function` **verbatim except the role gate is `admin`** (same modern
+Kong 3.x, same JWKS RS256 verify, same `iss`/`aud`/`exp`/`nbf` checks, same
+strip-inbound + inject-from-token, same fail-closed). It declares **two**
+service-namespaced routes — `/balance/admin` → `balance-service` `/admin` and
+`/analytics/admin` → `analytics-server` `/admin` (each `strip_path: true` + `/admin`
+service path) — with the gate applied to both via a YAML anchor. Non-admin valid
+token → **403**; missing/invalid → **401**. `cors` (origin `http://localhost:8081`) +
+`rate-limiting` kept. **Default-deny, and `/internal/*` is NEVER routed** for any
+service (bare `/admin`, `/balance/api`, `/*/internal`, `/internal` all 404). Joins
+`edge-internal` + `app-internal` only; host-unpublished. See
+`infra/kong-internal/README.md`.

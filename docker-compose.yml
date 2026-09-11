@@ -5,12 +5,15 @@
 # it GROWS ONE SERVICE PER STEP as the specs are built (see specs/README.md).
 # It is NOT a final integration task — it exists from step 0 and accretes.
 #
-# Current state — Step 5 (spec 08, PUBLIC-PLANE FRONTENDS: client-app + otp-app,
-#   served by public-nginx as the router; builds on spec 06's public edge):
+# Current state — spec 08 PUBLIC-PLANE FRONTENDS (client-app + otp-app, served by
+#   public-nginx as the router) PLUS the spec 06 INTERNAL EDGE (internal-kong +
+#   internal-nginx on :8081), now landed. The internal front door is GATEWAY-ONLY
+#   for now: it fronts /balance/admin + /analytics/admin -> internal-kong; the admin
+#   SPA at its `/` root is deferred to the spec 08 admin step (placeholder 404 until):
 #   - The five networks (§2) are declared. `data` carries the datastores; `keycloak`
-#     also joins `app-public`, `app-internal` and `data` (spec 00 §2). `edge-public`
-#     + `app-public` now have members (the public gateway/front door below);
-#     `edge-internal` stays empty until the internal-edge half arrives (see below).
+#     also joins `app-public`, `app-internal` and `data` (spec 00 §2). All four edge
+#     nets now have members: `edge-public`/`app-public` (public gateway + front door)
+#     and `edge-internal`/`app-internal` (internal gateway + front door), below.
 #     Isolation is by network MEMBERSHIP + not publishing ports — so these are
 #     plain bridge networks (no `internal: true`).
 #   - `keycloak` (spec 02): quay.io/keycloak/keycloak, pinned tag (NOT :latest — a
@@ -70,8 +73,8 @@
 #     thin ROUTER that assembles them: `/` -> client-app, `/otp/` -> otp-app
 #     (prefix preserved; that bundle is built for base '/otp/'), `/balance/api/`
 #     -> public-kong (unchanged). See infra/nginx-public/nginx.conf + the two
-#     web/*/docs. (The admin SPA + internal edge are a LATER pass — spec 08 scope
-#     note; only :8080 + :8082 are published in this pass.)
+#     web/*/docs. (The internal edge — internal-kong + internal-nginx, :8081 — is
+#     now landed below, GATEWAY-ONLY; the admin SPA at its `/` root is a LATER pass.)
 #   - `seed` (spec 08, THIS step): a ONE-SHOT, PROFILE-GATED demo-data tool
 #     (profiles: ["seed"]) — NOT in the default `up` graph; run explicitly with
 #     `docker compose --profile seed up`. Atomic tool under tools/seed (its own
@@ -84,17 +87,24 @@
 #     balance-service (DB_* <- POSTGRES_BALANCE_* + POSTGRES_DB; composes its own
 #     connection, no *_URL var). Joins `data` ONLY; depends_on balance-service:
 #     service_healthy (migrations run on boot -> schema present before the seed runs).
+#   - `internal-kong` + `internal-nginx` (spec 06 internal edge, NOW LANDED): the
+#     admin plane's gateway + front door. internal-nginx (:8081, edge-internal) is the
+#     only host-published internal surface (demo convenience); it reverse-proxies the
+#     service-namespaced admin paths /balance/admin/* + /analytics/admin/* ->
+#     internal-kong (ADR-17 strips /<service> -> /admin/*), which fronts balance-service
+#     + analytics-server on app-internal and enforces admin auth (JWKS pre-function,
+#     realm role `admin`). GATEWAY-ONLY: internal-nginx's `/` web root is a placeholder
+#     404 until the spec 08 admin step wires the admin SPA. See infra/{kong,nginx}-internal.
 #
 # What arrives in later steps (do NOT add here early):
 #   - Step 3  (spec 04): `balance-service`     — EXTENDED with the money domain
 #                        (ledger, transfers, limits, OTP module, outbox relay).
 #   - Step 3  (spec 05): `analytics-server`    — EXTENDED with the stream consumer,
 #                        Mongo read model + reporting API (/admin) over it.
-#   - Step 4  (spec 06, INTERNAL EDGE half — separate PR): the private plane.
-#                        `internal-kong`       — joins edge-internal, app-internal.
-#                        `internal-nginx`      — joins edge-internal (host-published :8081, demo-only).
-#                        (The PUBLIC edge half — public-kong + public-nginx — is
-#                         already wired below.)
+#   - Step 6  (spec 08 admin): the ADMIN SPA bundle served at internal-nginx's `/`
+#                        root — placeholder 404 today; the internal gateway/routing
+#                        below is already complete. (The public client + otp bundles
+#                        are already served BY public-nginx, above.)
 #
 # Startup order (spec 00 §5) is enforced as services arrive via
 #   depends_on: { <dep>: { condition: service_healthy } }
@@ -583,3 +593,84 @@ services:
     ports:
       # The public HTTP edge (macro host-port contract, .env.example): 8080 -> 80.
       - "${PUBLIC_HTTP_PORT}:80"
+
+  # Internal API gateway (spec 06, internal edge) — the PEP for the ADMIN plane.
+  # Stock modern Kong 3.x (pinned), DB-LESS from the committed declarative kong.yml
+  # (config as code, spec 00 §4). The allowlist IS the exposed surface (ADR-12),
+  # service-namespaced (ADR-17): the ONLY routes are /balance/admin -> balance and
+  # /analytics/admin -> analytics (each strips /<service> so the upstream gets its
+  # built /admin surface). Default-deny everything else — bare /admin, /balance/api,
+  # and CRUCIALLY /*/internal + /internal all 404 (the internal edge NEVER routes
+  # /internal/*). The auth is the SAME JWKS `pre-function` as public-kong, but the
+  # role gate is `admin`: it STRIPS any client-supplied identity headers, verifies
+  # the token against Keycloak's JWKS (RS256 + iss + aud + exp + admin role) with
+  # vetted crypto, and INJECTS the trusted X-User-Id / X-Roles. Fails closed. Joins
+  # edge-internal (<- internal-nginx) + app-internal (-> balance-service,
+  # analytics-server, + keycloak alias) ONLY — NOT app-public, NOT data; NEVER
+  # host-published. See infra/kong-internal/README.md.
+  internal-kong:
+    # Pinned tag (NOT :latest) — reproducible-from-zero, same as the other pins.
+    image: kong:3.9.0
+    restart: unless-stopped
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      # Only the bundled plugins are used (pre-function, cors, rate-limiting).
+      KONG_PLUGINS: bundled
+      # The pre-function `require`s Kong core + crypto modules; the declarative Lua
+      # is OURS (committed + reviewed), so it runs trusted, not sandboxed.
+      KONG_UNTRUSTED_LUA: "on"
+      # HTTP-only on localhost: bind just the plaintext proxy on :8000.
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      # DB-less needs no runtime Admin API; keep it off (smaller attack surface).
+      KONG_ADMIN_LISTEN: "off"
+    volumes:
+      - ./infra/kong-internal/kong.yml:/kong/kong.yml:ro
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      # Both upstreams it fronts + the IdP it validates tokens against must be
+      # healthy before the gateway accepts traffic (spec 00 §5).
+      balance-service:
+        condition: service_healthy
+      analytics-server:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks:
+      - edge-internal
+      - app-internal
+
+  # Internal front door (spec 06, internal edge) — host-published on :8081 as a
+  # DEMO convenience (the internal plane would not be host-exposed in production).
+  # Reverse-proxies the service-namespaced admin paths (/balance/admin/*,
+  # /analytics/admin/*) -> internal-kong (ADR-17 strips /<service> to /admin/*), and
+  # will serve the admin SPA at / in spec 08 (placeholder root until then). Stock
+  # nginx image with a read-only mounted conf; no custom image. Plain HTTP on
+  # localhost (TLS not terminated here — spec 06 resolved). Joins edge-internal ONLY
+  # (it never reaches services directly). See infra/nginx-internal/README.md.
+  internal-nginx:
+    # Pinned tag (NOT :latest) — reproducible-from-zero, same as the other pins.
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./infra/nginx-internal/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      # The gateway it fronts must be healthy first (otherwise /*/admin -> 502).
+      internal-kong:
+        condition: service_healthy
+    networks:
+      - edge-internal
+    ports:
+      # The internal HTTP edge (macro host-port contract, .env.example): 8081 -> 80.
+      - "${INTERNAL_HTTP_PORT}:80"
