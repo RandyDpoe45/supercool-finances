@@ -30,9 +30,18 @@
 #   E2E_TRANSFER_MAJOR/MINOR           left at the 10.00 / 1000 defaults (Customer A is
 #                                      funded with 1,000,000.00 MXN).
 #
-# SCOPE: the PUBLIC plane only (spec 08 scope note). The admin plane — the admin SPA, the
-# internal front door :8081, and the admin maker-checker reversal e2e — is DEFERRED and is
-# NOT exercised here. Only :8080 (public-nginx) and :8082 (keycloak) are host-published.
+# SCOPE (Pass 2 — admin plane added). This harness now ALSO proves the ADMIN plane's
+# build & serve: internal-nginx / internal-kong / admin-app are in the DEFAULT up graph, so
+# `up --wait` brings them up all-healthy. After the stack is up it asserts the admin SPA is
+# served at :8081, the no-token admin API is a 401 at Kong (authenticated spine wired), a
+# real demo-admin bearer reaches /balance/admin/whoami -> 200 with the `admin` role, and it
+# ENABLES + runs the admin app's login.e2e.ts browser chain (PKCE at :8081). Only :8080
+# (public-nginx), :8081 (internal-nginx) and :8082 (keycloak) are host-published.
+#
+# KNOWN GAP (not proven here): the admin maker-checker reversal e2e (the reversal UI is not
+# built) and the admin /accounts + /limits screens (their GET /admin/accounts + GET
+# /admin/limits endpoints do not exist yet). So the admin browser chain runs ONLY
+# login.e2e.ts (the whoami landing) — never accounts.e2e.ts.
 #
 # Failure policy (the point of the step): a real SERVING or TRANSFER failure FAILs;
 # environmental blockers (no Docker daemon, offline/registry, host ports occupied, DNS for
@@ -47,6 +56,17 @@ COMPOSE="$REPO_ROOT/docker-compose.yml"
 ENV_EXAMPLE="$REPO_ROOT/.env.example"
 REALM_EXPORT="$REPO_ROOT/tools/keycloak/realm-export.json"
 WEB_CLIENT="$REPO_ROOT/web/client"
+WEB_ADMIN="$REPO_ROOT/web/admin"
+
+# Coordination contract for the admin-plane PKCE mint (spec 02 / spec 06).
+KC_REALM="supercool"
+ADMIN_ROLE="admin"
+PREFERRED_ADMIN_CLIENT="admin-app"   # the admin SPA's public client (:8081 redirect, aud=supercool-api)
+# Admin SPA index discriminator — from the committed web/admin/index.html
+# (<title>SuperCool Finances — Admin</title>); the ASCII-safe "Admin</title>" suffix
+# uniquely tells it apart from the client ("SuperCool Finances") and otp titles.
+ADMIN_TITLE_MARK='Admin</title>'
+SPA_ROOT_MARK='id="root"'
 
 # Isolated compose project (matches the other tests/* harnesses): a teardown with -v can
 # only ever remove THIS harness's containers/volumes/networks, never a real `docker compose
@@ -57,10 +77,10 @@ SEED_PROFILE="seed"
 
 # The DEFAULT up graph (no profile) — every service that a clean `docker compose up` starts.
 # All carry a healthcheck, so `--wait` proves all-healthy. `seed` is profile-gated and is
-# NOT here (it is run explicitly, twice, below).
-ALL_SERVICES="postgres redis mongo keycloak balance-service analytics-server public-kong client-app otp-app public-nginx"
-# The public-plane trio whose health the customer flow directly depends on (reported first).
-PUBLIC_PLANE_SVCS="postgres redis keycloak balance-service public-kong client-app otp-app public-nginx"
+# NOT here (it is run explicitly, twice, below). Pass 2 adds the internal-edge trio
+# (internal-kong, internal-nginx, admin-app) — now in the default graph, so `up --wait`
+# reaches all-healthy on them too.
+ALL_SERVICES="postgres redis mongo keycloak balance-service analytics-server public-kong client-app otp-app public-nginx internal-kong internal-nginx admin-app"
 
 # Seed <-> e2e contract (spec 08). DEST_ACCOUNT is Customer B's seeded account number — a
 # public account id, not a secret; it is the spec contract value and MUST override the
@@ -69,10 +89,14 @@ DEST_ACCOUNT="1000000002"
 
 # Loaded at runtime.
 PUBLIC_HTTP_PORT=""
+INTERNAL_HTTP_PORT=""
 KEYCLOAK_PORT=""
 KC_HOSTNAME=""
 POSTGRES_USER=""; POSTGRES_PASSWORD=""; BALANCE_DB=""
-E2E_USERNAME=""; E2E_PASSWORD=""     # read from realm-export.json (demo-customer)
+E2E_USERNAME=""; E2E_PASSWORD=""             # read from realm-export.json (demo-customer)
+E2E_ADMIN_USERNAME=""; E2E_ADMIN_PASSWORD="" # read from realm-export.json (demo-admin)
+ADMIN_TOKEN=""; ADMIN_SUB=""                 # minted demo-admin access token + its sub (black-box whoami slice)
+PKCE_SCRIPT=""                               # temp path of the scripted PKCE flow
 
 RUNTIME_ENVFILE=""                   # temp copy of .env.example used for every `dc` call
 UP_DONE=0                            # 1 if THIS harness brought the stack up (=> may tear down)
@@ -142,16 +166,20 @@ env_val() {
 }
 
 load_env_values() {
-  PUBLIC_HTTP_PORT="$(env_val PUBLIC_HTTP_PORT)"; [ -n "$PUBLIC_HTTP_PORT" ] || PUBLIC_HTTP_PORT="8080"
-  KEYCLOAK_PORT="$(env_val KEYCLOAK_PORT)";       [ -n "$KEYCLOAK_PORT" ]     || KEYCLOAK_PORT="8082"
-  KC_HOSTNAME="$(env_val KC_HOSTNAME)";           [ -n "$KC_HOSTNAME" ]       || KC_HOSTNAME="keycloak.localtest.me"
+  PUBLIC_HTTP_PORT="$(env_val PUBLIC_HTTP_PORT)";     [ -n "$PUBLIC_HTTP_PORT" ]   || PUBLIC_HTTP_PORT="8080"
+  INTERNAL_HTTP_PORT="$(env_val INTERNAL_HTTP_PORT)"; [ -n "$INTERNAL_HTTP_PORT" ] || INTERNAL_HTTP_PORT="8081"
+  KEYCLOAK_PORT="$(env_val KEYCLOAK_PORT)";           [ -n "$KEYCLOAK_PORT" ]      || KEYCLOAK_PORT="8082"
+  KC_HOSTNAME="$(env_val KC_HOSTNAME)";               [ -n "$KC_HOSTNAME" ]        || KC_HOSTNAME="keycloak.localtest.me"
   POSTGRES_USER="$(env_val POSTGRES_USER)"
   POSTGRES_PASSWORD="$(env_val POSTGRES_PASSWORD)"
   BALANCE_DB="$(env_val POSTGRES_DB)"; [ -n "$BALANCE_DB" ] || BALANCE_DB="balance"
 }
 
-edge_base()   { printf 'http://localhost:%s' "$PUBLIC_HTTP_PORT"; }
-issuer_base() { printf 'http://%s:%s/realms/supercool' "$KC_HOSTNAME" "$KEYCLOAK_PORT"; }
+edge_base()        { printf 'http://localhost:%s' "$PUBLIC_HTTP_PORT"; }
+internal_base()    { printf 'http://localhost:%s' "$INTERNAL_HTTP_PORT"; }
+admin_whoami_url() { printf '%s/balance/admin/whoami' "$(internal_base)"; }
+issuer_base()      { printf 'http://%s:%s/realms/supercool' "$KC_HOSTNAME" "$KEYCLOAK_PORT"; }
+alias_base()       { printf 'http://%s:%s' "$KC_HOSTNAME" "$KEYCLOAK_PORT"; }
 
 # Read the demo-customer login (the user carrying the `customer` realm role) straight from
 # realm-export.json — the project's existing demo credential of record. No credential literal
@@ -176,6 +204,198 @@ PY
   E2E_USERNAME="${out%%$'\t'*}"
   E2E_PASSWORD="${out#*$'\t'}"
   [ -n "$E2E_USERNAME" ] && [ -n "$E2E_PASSWORD" ]
+}
+
+# Read the demo-admin login (the user carrying the `admin` realm role) straight from
+# realm-export.json — same source of record as the customer login. Sets
+# E2E_ADMIN_USERNAME / E2E_ADMIN_PASSWORD.
+load_realm_admin_login() {
+  [ -n "$PYTHON" ] || return 1
+  [ -f "$REALM_EXPORT" ] || return 1
+  local out
+  out="$("$PYTHON" - "$REALM_EXPORT" "$ADMIN_ROLE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+role = sys.argv[2]
+for u in d.get('users', []):
+    if role in (u.get('realmRoles') or []):
+        pw = ''
+        for c in (u.get('credentials') or []):
+            if c.get('type') == 'password':
+                pw = c.get('value') or ''
+        print(f"{u.get('username','')}\t{pw}")
+        break
+PY
+)" || return 1
+  E2E_ADMIN_USERNAME="${out%%$'\t'*}"
+  E2E_ADMIN_PASSWORD="${out#*$'\t'}"
+  [ -n "$E2E_ADMIN_USERNAME" ] && [ -n "$E2E_ADMIN_PASSWORD" ]
+}
+
+# ----------------------------------------------------------------------------------
+# Admin-plane PKCE token mint — a REAL Authorization-Code + PKCE (S256) login for the
+# seeded demo-admin user, used for the BLACK-BOX admin whoami slice (browser-independent).
+# Same scripted choreography as tests/transport; no credential literal is baked in — the
+# user + client + redirect are recovered from realm-export.json. Needs the host to resolve
+# KC_HOSTNAME -> loopback (localtest.me does over public DNS); returns 1 (caller SKIPs) when
+# it cannot mint headlessly — never a false pass.
+# ----------------------------------------------------------------------------------
+host_resolves_alias() {
+  [ -n "$PYTHON" ] || return 1
+  "$PYTHON" - "$KC_HOSTNAME" <<'PY'
+import socket, sys
+try:
+    ip = socket.gethostbyname(sys.argv[1])
+except Exception:
+    sys.exit(1)
+sys.exit(0 if ip.startswith("127.") or ip == "0.0.0.0" else 1)
+PY
+}
+
+decode_jwt_sub() {  # $1 = access token -> prints the sub claim
+  [ -n "$PYTHON" ] || return 1
+  "$PYTHON" - "$1" <<'PY'
+import sys, json, base64
+parts = sys.argv[1].split('.')
+if len(parts) < 2: sys.exit(1)
+seg = parts[1]; seg += '=' * (-len(seg) % 4)
+try:
+    payload = json.loads(base64.urlsafe_b64decode(seg.encode()).decode('utf-8'))
+except Exception:
+    sys.exit(1)
+print(payload.get('sub',''))
+PY
+}
+
+write_pkce_script() {
+  [ -n "$PKCE_SCRIPT" ] && [ -f "$PKCE_SCRIPT" ] && return 0
+  PKCE_SCRIPT="$(mktemp)"
+  cat > "$PKCE_SCRIPT" <<'PY'
+import sys, json, base64, hashlib, secrets, re, html
+import urllib.parse, urllib.request, urllib.error, http.cookiejar
+
+base, realm, client_id, redirect_uri, username, password = sys.argv[1:7]
+
+def b64url(b): return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
+verifier = b64url(secrets.token_bytes(40))
+challenge = b64url(hashlib.sha256(verifier.encode()).digest())
+state = secrets.token_hex(8)
+
+auth_ep  = f"{base}/realms/{realm}/protocol/openid-connect/auth"
+token_ep = f"{base}/realms/{realm}/protocol/openid-connect/token"
+
+cj = http.cookiejar.CookieJar()
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+follow   = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+nofollow = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj), NoRedirect)
+
+q = urllib.parse.urlencode({
+    "client_id": client_id, "response_type": "code", "scope": "openid",
+    "redirect_uri": redirect_uri, "state": state,
+    "code_challenge": challenge, "code_challenge_method": "S256",
+})
+try:
+    page = follow.open(auth_ep + "?" + q, timeout=30).read().decode("utf-8", "replace")
+except urllib.error.URLError as e:
+    print(f"auth GET failed: {e}", file=sys.stderr); sys.exit(1)
+
+m = (re.search(r'id="kc-form-login"[^>]*\baction="([^"]+)"', page)
+     or re.search(r'\baction="([^"]+)"[^>]*id="kc-form-login"', page)
+     or re.search(r'action="([^"]*login-actions/authenticate[^"]*)"', page))
+if not m:
+    print("could not locate the Keycloak login form action", file=sys.stderr); sys.exit(1)
+action = html.unescape(m.group(1))
+
+form = urllib.parse.urlencode({"username": username, "password": password, "credentialId": ""}).encode()
+FORM_CT = {"Content-Type": "application/x-www-form-urlencoded"}
+try:
+    resp = nofollow.open(urllib.request.Request(action, data=form, headers=FORM_CT), timeout=30)
+    print("login POST did not redirect (HTTP %s) => bad credentials or a required action" % resp.getcode(), file=sys.stderr)
+    sys.exit(1)
+except urllib.error.HTTPError as e:
+    if e.code not in (301, 302, 303, 307, 308):
+        print(f"login POST error HTTP {e.code}: {e.read().decode('utf-8','replace')[:300]}", file=sys.stderr)
+        sys.exit(1)
+    location = e.headers.get("Location", "")
+
+params = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+if "code" not in params:
+    print(f"no 'code' in redirect Location: {location}", file=sys.stderr); sys.exit(1)
+code = params["code"][0]
+
+exch = urllib.parse.urlencode({
+    "grant_type": "authorization_code", "code": code,
+    "redirect_uri": redirect_uri, "client_id": client_id, "code_verifier": verifier,
+}).encode()
+try:
+    tok = urllib.request.urlopen(urllib.request.Request(token_ep, data=exch, headers=FORM_CT), timeout=30).read().decode()
+except urllib.error.HTTPError as e:
+    print(f"token exchange failed HTTP {e.code}: {e.read().decode('utf-8','replace')[:300]}", file=sys.stderr)
+    sys.exit(1)
+at = json.loads(tok).get("access_token")
+if not at:
+    print(f"token response had no access_token: {tok[:200]}", file=sys.stderr); sys.exit(1)
+print(at)
+PY
+}
+
+mint_admin_token() {
+  [ -n "$ADMIN_TOKEN" ] && return 0
+  [ -n "$PYTHON" ] || return 1
+  [ -f "$REALM_EXPORT" ] || return 1
+  host_resolves_alias || return 1
+  local trip user pass client redirect token errf
+  trip="$("$PYTHON" - "$REALM_EXPORT" "$ADMIN_ROLE" "$PREFERRED_ADMIN_CLIENT" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding='utf-8'))
+role, preferred = sys.argv[2], sys.argv[3]
+def plaintext_pw(u):
+    for c in (u.get("credentials") or []):
+        if c.get("type") == "password" and c.get("value") and not c.get("hashedSaltedValue"):
+            return c.get("value")
+    return None
+user = None
+for u in (doc.get("users") or []):
+    if role in (u.get("realmRoles") or []) and plaintext_pw(u) and u.get("enabled", True):
+        if u.get("requiredActions"): continue
+        user = u; break
+if not user:
+    print(""); sys.exit(0)
+clients = {c.get("clientId"): c for c in (doc.get("clients") or [])}
+order = [preferred] + [c for c in clients if c != preferred]
+redirect = chosen = None
+for cid in order:
+    c = clients.get(cid)
+    if not c or c.get("standardFlowEnabled") is False: continue
+    for ru in (c.get("redirectUris") or []):
+        r = ru
+        if r.endswith("/*"): r = r[:-1]
+        elif r.endswith("*"): r = r[:-1]
+        redirect = r; chosen = cid; break
+    if redirect: break
+if not redirect:
+    print(""); sys.exit(0)
+print("\t".join([user.get("username",""), plaintext_pw(user), chosen, redirect]))
+PY
+)"
+  [ -n "$trip" ] || return 1
+  IFS=$'\t' read -r user pass client redirect <<EOF
+$trip
+EOF
+  write_pkce_script
+  errf="$(mktemp)"
+  token="$("$PYTHON" "$PKCE_SCRIPT" "$(alias_base)" "$KC_REALM" "$client" "$redirect" "$user" "$pass" 2>"$errf")"
+  if [ -z "$token" ]; then
+    info "PKCE mint for '$user' did not yield a token: $(head -c 200 "$errf")"; rm -f "$errf"; return 1
+  fi
+  rm -f "$errf"
+  ADMIN_TOKEN="$token"
+  ADMIN_SUB="$(decode_jwt_sub "$token")"
+  return 0
 }
 
 # ----------------------------------------------------------------------------------
@@ -434,6 +654,144 @@ run_e2e() {
   fi
 }
 
+# --- Light black-box sanity on the ADMIN (internal) edge. Proves the internal front door is
+# live, the admin SPA is served at :8081, and the admin API reaches Kong (no-token -> 401,
+# NOT answered by the `/` SPA catch-all). Mirrors check_public_edge_sanity for the admin plane. ---
+check_admin_edge_sanity() {
+  section "Admin edge sanity — internal front door live, admin SPA served at :$INTERNAL_HTTP_PORT, admin API reaches Kong"
+  local c body
+  c="$(http_code "$(internal_base)/healthz")"
+  [ "$c" = "200" ] && pass "GET :$INTERNAL_HTTP_PORT/healthz -> 200 (internal-nginx live)" || fail "GET :$INTERNAL_HTTP_PORT/healthz -> ${c:-000} (internal front door not serving)"
+  # GET / must serve the admin SPA index (the `/` catch-all now routes to admin-app, not the 404 placeholder).
+  body="$(curl -s --max-time 15 "$(internal_base)/" 2>/dev/null)"
+  case "$body" in
+    *"$ADMIN_TITLE_MARK"*) pass "GET :$INTERNAL_HTTP_PORT/ -> the admin SPA index served (title contains 'Admin', root mount node)" ;;
+    *"$SPA_ROOT_MARK"*)    fail "GET :$INTERNAL_HTTP_PORT/ served a SPA index but NOT the admin one (no 'Admin' <title>) — the root is misrouted to the wrong bundle" ;;
+    *)                     fail "GET :$INTERNAL_HTTP_PORT/ did not serve the admin SPA index (still the 404 placeholder or admin-app down). Body head: $(printf '%s' "$body" | head -c 160)" ;;
+  esac
+  # No-token admin API must reach Kong and be rejected with 401 — NOT answered by the SPA
+  # catch-all, and NOT open. This is the authenticated-spine precondition for the admin flow.
+  c="$(http_code "$(admin_whoami_url)")"
+  if [ "$c" = "401" ]; then
+    pass "no-token GET /balance/admin/whoami -> 401 at internal-kong — the admin API is not shadowed by the / catch-all and the authenticated spine is wired"
+  else
+    fail "no-token GET /balance/admin/whoami -> ${c:-000} (expected 401 from Kong) — the admin API is misrouted, shadowed by the SPA catch-all, or the internal gateway is down"
+  fi
+}
+
+# --- The admin-plane PROOF (black-box, browser-independent): a REAL demo-admin bearer ->
+# GET /balance/admin/whoami -> 200 with { userId==sub, roles contains 'admin' }. Proves the
+# demo-admin login reaches balance-service through internal-nginx -> internal-kong (JWT
+# verified, admin gate, /balance stripped, identity injected). SKIPs if a token cannot be
+# minted headlessly (no *.localtest.me DNS / Keycloak down); FAILs on a 401/403 for a valid
+# admin, or a wrong echoed identity. ---
+check_admin_whoami_slice() {
+  section "Admin whoami slice — demo-admin bearer -> GET /balance/admin/whoami -> 200, userId==sub, roles has '$ADMIN_ROLE'"
+  if ! mint_admin_token; then
+    skip "could not mint a demo-admin token headlessly (Keycloak unreachable / no *.localtest.me DNS) — admin whoami slice skipped; the browser login.e2e.ts still proves it if it runs"
+    return
+  fi
+  local tmpd code body
+  tmpd="$(mktemp -d)"
+  code="$(curl -s --max-time 20 -o "$tmpd/body" -w '%{http_code}' -H "Authorization: Bearer $ADMIN_TOKEN" "$(admin_whoami_url)" 2>/dev/null)"
+  body="$(cat "$tmpd/body" 2>/dev/null)"; rm -rf "$tmpd"
+  case "$code" in
+    200)
+      if "$PYTHON" - "$ADMIN_SUB" "$ADMIN_ROLE" "$body" <<'PY'
+import sys, json
+sub, role, body = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.loads(body)
+except Exception as e:
+    print(f"  -> whoami body is not JSON: {e} | {body[:160]}"); sys.exit(1)
+bad = False
+if d.get("userId") == sub and sub:
+    print(f"  userId == token sub ('{sub}')")
+else:
+    print(f"  -> userId '{d.get('userId')}' != token sub '{sub}'"); bad = True
+roles = d.get("roles") or []
+if isinstance(roles, str): roles = [roles]
+if role in roles:
+    print(f"  roles contains '{role}' (roles: {roles})")
+else:
+    print(f"  -> roles does NOT contain '{role}' (got {roles})"); bad = True
+sys.exit(1 if bad else 0)
+PY
+      then pass "demo-admin bearer -> /balance/admin/whoami 200 with userId==sub and roles including '$ADMIN_ROLE' (reached balance-service through internal-nginx -> internal-kong)"
+      else fail "whoami 200 but the echoed identity is wrong (internal-kong injected the wrong X-User-Id/X-Roles, or the wrong upstream answered)"
+      fi
+      ;;
+    401|403)
+      fail "GET /balance/admin/whoami with a VALID demo-admin bearer -> HTTP $code — the internal edge rejected an admin (JWKS/iss/aud/admin-role gate misconfigured). Body: $(printf '%s' "$body" | head -c 160)" ;;
+    *)
+      fail "GET /balance/admin/whoami (admin bearer) -> HTTP ${code:-000} (expected 200) — the admin token did not reach balance-service. Body: $(printf '%s' "$body" | head -c 160)" ;;
+  esac
+}
+
+# --- Ensure web/admin deps + a Chromium are present for the admin Playwright chain (same
+# ignore-scripts handling as prepare_playwright; the Chromium download is shared, so it is
+# a no-op if the client prep already fetched it). Returns 0 ready, 1 SKIP. ---
+prepare_playwright_admin() {
+  section "Admin Playwright prep — web/admin deps + Chromium"
+  local err rc msg
+  if [ ! -d "$WEB_ADMIN/node_modules/@playwright/test" ]; then
+    info "installing web/admin deps (npm ci) — node_modules/@playwright/test absent"
+    err="$(mktemp)"
+    ( cd "$WEB_ADMIN" && npm ci ) >/dev/null 2>"$err"; rc=$?
+    msg="$(cat "$err")"; rm -f "$err"
+    if [ "$rc" -ne 0 ]; then
+      if is_env_failure "$msg"; then skip "npm ci failed (offline/registry) in web/admin — admin e2e skipped. First lines:"; printf '%s\n' "$msg" | head -6 >&2;
+      else fail "npm ci failed in web/admin — cannot run the admin e2e. First lines:"; printf '%s\n' "$msg" | head -12 >&2; fi
+      return 1
+    fi
+    info "web/admin deps installed"
+  else
+    info "web/admin deps already present"
+  fi
+  info "installing the Chromium browser (npx playwright install chromium)"
+  err="$(mktemp)"
+  ( cd "$WEB_ADMIN" && npx playwright install chromium ) >/dev/null 2>"$err"; rc=$?
+  msg="$(cat "$err")"; rm -f "$err"
+  if [ "$rc" -ne 0 ]; then
+    if is_env_failure "$msg"; then skip "could not download Chromium (offline) — admin e2e skipped. First lines:"; printf '%s\n' "$msg" | head -6 >&2;
+    else fail "playwright install chromium failed (web/admin). First lines:"; printf '%s\n' "$msg" | head -12 >&2; fi
+    return 1
+  fi
+  pass "Admin Playwright prep ready (web/admin deps + Chromium installed)"
+  return 0
+}
+
+# --- The admin-plane DoD spine: ENABLE + run the admin app's login.e2e.ts browser chain
+# (PKCE at :8081 -> whoami landing renders the gateway-resolved admin identity). This is the
+# admin analog of how 8-C enabled the client chain: flip E2E_ENABLED on and feed the demo-admin
+# creds + the :8081 origin. Only login.e2e.ts is run — accounts.e2e.ts is NOT (its GET
+# /admin/accounts + /admin/limits reads do not exist yet; that screen is not functional against
+# the real backend). A non-zero exit is a REAL serving/auth failure (or a test-code bug) -> FAIL. ---
+run_admin_e2e() {
+  section "Admin login e2e — PKCE at :$INTERNAL_HTTP_PORT -> whoami landing renders the admin identity (the admin-plane proof)"
+  if ! load_realm_admin_login; then
+    skip "could not read the demo-admin login from realm-export.json — admin e2e skipped"; return
+  fi
+  info "e2e env: E2E_ENABLED=1 E2E_BASE_URL=$(internal_base)/ E2E_USERNAME=$E2E_ADMIN_USERNAME E2E_PASSWORD=****"
+  info "spec: tests/e2e/login.e2e.ts (admin PKCE login + GET /balance/admin/whoami renders 'Admin console' + admin role)"
+  info "(accounts.e2e.ts is NOT run: its GET /admin/accounts + /admin/limits reads do not exist yet — the screen is not functional against the real backend)"
+  local rc
+  (
+    cd "$WEB_ADMIN" && \
+    E2E_ENABLED=1 \
+    E2E_BASE_URL="$(internal_base)/" \
+    E2E_USERNAME="$E2E_ADMIN_USERNAME" \
+    E2E_PASSWORD="$E2E_ADMIN_PASSWORD" \
+    npx playwright test tests/e2e/login.e2e.ts
+  )
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    pass "ADMIN LOGIN passed: demo-admin PKCE login at :$INTERNAL_HTTP_PORT -> GET /balance/admin/whoami 200 through internal-nginx -> internal-kong -> balance-service -> the admin identity (role 'admin') renders on 'Admin console'"
+  else
+    fail "the admin login e2e exited $rc — a real serving/auth failure (or a test-code bug). Re-run verbosely: (cd web/admin && E2E_ENABLED=1 E2E_BASE_URL=$(internal_base)/ E2E_USERNAME=$E2E_ADMIN_USERNAME E2E_PASSWORD=**** npx playwright test tests/e2e/login.e2e.ts --reporter=list)"
+  fi
+}
+
 # ----------------------------------------------------------------------------------
 # Orchestration
 # ----------------------------------------------------------------------------------
@@ -452,13 +810,21 @@ run_all() {
   check_all_healthy
   run_seed
 
-  if check_browser_issuer_reachable; then
-    check_public_edge_sanity
-    if prepare_playwright; then
-      run_e2e
-    fi
-  else
-    check_public_edge_sanity   # still prove the edge/API wiring even if the browser login can't run
+  # The browser issuer must resolve for EITHER browser chain (client + admin) to run; check once.
+  local issuer_ok=1
+  check_browser_issuer_reachable || issuer_ok=0
+
+  # --- PUBLIC plane (transfer-with-OTP) ---
+  check_public_edge_sanity
+  if [ "$issuer_ok" -eq 1 ] && prepare_playwright; then
+    run_e2e
+  fi
+
+  # --- ADMIN plane (whoami landing reached through internal-nginx -> internal-kong) ---
+  check_admin_edge_sanity
+  check_admin_whoami_slice
+  if [ "$issuer_ok" -eq 1 ] && prepare_playwright_admin; then
+    run_admin_e2e
   fi
 }
 
@@ -484,6 +850,7 @@ global_cleanup() {
       "$C_CYAN" "$C_RESET" "$PROJECT" "$(edge_base)" "tests/e2e-fullrun/run.sh"
   fi
   [ -n "${RUNTIME_ENVFILE:-}" ] && rm -f "$RUNTIME_ENVFILE" 2>/dev/null
+  [ -n "${PKCE_SCRIPT:-}" ]     && rm -f "$PKCE_SCRIPT" 2>/dev/null
 }
 
 print_summary() {

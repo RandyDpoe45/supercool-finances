@@ -1,36 +1,47 @@
-# Full-run + transfer-with-OTP e2e — PUBLIC-PLANE harness (Spec 08, step 8-C)
+# Full-run e2e — PUBLIC + ADMIN plane harness (Spec 08, step 8-C + Pass 2)
 
 The reproducible **clean-machine** proof of the spec-08
-[`Full run`](../../specs/08-build-and-serve.md) + **Definition of Done** for the
-**public plane**: one command brings the whole stack up all-healthy, loads the seed,
-and drives the headline **transfer-with-OTP** flow end to end from the real client app.
+[`Full run`](../../specs/08-build-and-serve.md) + **Definition of Done**: one command
+brings the whole stack up all-healthy, loads the seed, drives the headline
+**transfer-with-OTP** flow from the real client app (public plane), and proves the
+**admin whoami landing** through the internal front door (admin plane, Pass 2).
 
 It orchestrates the existing pieces — it does **not** re-implement them:
 
-1. `docker compose up -d --build --wait` the **default graph** → **all-healthy** (DoD #1).
+1. `docker compose up -d --build --wait` the **default graph** → **all-healthy** (DoD #1) —
+   now including the internal edge (`internal-kong`, `internal-nginx`, `admin-app`).
 2. `docker compose --profile seed run … seed` → demo data loaded, then **run again** and
    prove the counts are unchanged (DoD #4, idempotency).
-3. The demo-customer logs in through the **real** Keycloak → public-nginx → public-Kong
-   (JWT verify + identity inject) → balance-service chain and the seeded account renders
-   (DoD #3), then the **transfer-with-OTP** flow runs from `web/client`'s Playwright e2e:
-   confirmation-of-payee → initiate (pending) → **code revealed via the real otp-app in a
-   second browser context** → confirm → the source balance is debited by **exactly** the
-   transfer amount (DoD #2, public half).
+3. **Public plane:** the demo-customer logs in through the **real** Keycloak → public-nginx
+   → public-Kong → balance-service chain and the seeded account renders (DoD #3), then the
+   **transfer-with-OTP** flow runs from `web/client`'s Playwright e2e: confirmation-of-payee
+   → initiate (pending) → **code revealed via the real otp-app in a second browser context**
+   → confirm → the source balance is debited by **exactly** the transfer amount (DoD #2,
+   public half).
+4. **Admin plane (Pass 2):** the admin SPA is served at **`:8081`**, a no-token
+   `/balance/admin/whoami` is a **401 at Kong**, a **real demo-admin bearer** reaches
+   `/balance/admin/whoami` → **200** with the `admin` role (black-box, through
+   internal-nginx → internal-kong → balance-service), and the admin app's `login.e2e.ts`
+   browser chain runs for real (PKCE at `:8081` → the whoami landing renders "Admin console").
 
-The Playwright specs (`web/client/tests/e2e/**`, `web/otp/tests/e2e/**`) are the
-**test-writer's artifact** and are **not** edited here. This harness only supplies the
-**seed-aligned env** those specs read (`tests/e2e/fixtures/env.ts`) and the running stack.
+The Playwright specs (`web/client/tests/e2e/**`, `web/otp/tests/e2e/**`,
+`web/admin/tests/e2e/**`) are the **test-writer's artifact** and are **not** edited here.
+This harness only supplies the env those specs read and the running stack.
 
-> **Scope (spec 08 scope note — public plane only).** The admin plane is deferred: the
-> admin SPA, the internal front door **`:8081`**, and the **admin maker-checker reversal**
-> e2e are **not** exercised here. Only **`:8080`** (public-nginx) and **`:8082`**
-> (keycloak) are host-published.
+> **Scope.** Public plane end to end **plus** the admin plane's build & serve + the whoami
+> landing. Host-published: **`:8080`** (public-nginx), **`:8081`** (internal-nginx),
+> **`:8082`** (keycloak).
+>
+> **Known gap (not proven here).** The **admin maker-checker reversal** e2e (the reversal UI
+> is not built) and the admin **`/accounts` + `/limits`** screens (their `GET /admin/accounts`
+> + `GET /admin/limits` reads do not exist yet). The admin browser chain runs **only**
+> `login.e2e.ts` (the whoami landing), never `accounts.e2e.ts`.
 
 ## Layout
 
 | File | Purpose |
 |---|---|
-| `run.sh` | Orchestrator: up → healthy → seed → browser-reach → edge sanity → Chromium → e2e → teardown. |
+| `run.sh` | Orchestrator: up → healthy → seed → browser-reach → public edge + e2e → admin edge + whoami + admin login e2e → teardown. |
 | `lib.sh` | All phases + helpers (sourced by `run.sh`; never run directly). |
 | `README.md` | This file. |
 
@@ -47,8 +58,8 @@ bash tests/e2e-fullrun/run.sh down     # tear down this harness's isolated proje
 - Needs the **Docker daemon**, **node/npm/npx** (≥ 24), **curl**, and **python**.
 - Uses an **isolated compose project** (`scfin-e2e-fullrun`) and an `--env-file` temp copy
   of `.env.example`, so it **never touches your real `.env`** and a teardown can only
-  remove what it created. (A foreign stack already holding `:8080`/`:8082` makes bring-up
-  **SKIP** with guidance — it is never clobbered.)
+  remove what it created. (A foreign stack already holding `:8080`/`:8081`/`:8082` makes
+  bring-up **SKIP** with guidance — it is never clobbered.)
 - The hardened `.npmrc` sets `ignore-scripts=true`, so the harness installs the browser
   explicitly (`npx playwright install chromium`) after `npm ci` — the post-install
   auto-download is deliberately skipped by the repo.
@@ -77,6 +88,9 @@ The specs read everything infrastructure-specific from the environment; the harn
 | **Public edge sanity** | `GET /healthz` → 200, `GET /` → 200 (client SPA), `GET /balance/api/accounts` **no token** → **401 at Kong** — the authenticated spine the e2e needs. |
 | **Playwright prep** | `web/client` deps installed + **Chromium** installed (explicit, because `ignore-scripts`). Offline **SKIPs**. |
 | **Transfer-with-OTP e2e** | the headline **DoD #2 (public half)**: `internal-transfer.e2e.ts` drives the full chain (client → real otp-app reveal → confirm → exact debit) and `login.e2e.ts` proves the seeded account renders (DoD #3). A non-zero exit is a **real** serving/transfer failure (or a test-code bug) → **FAIL**. |
+| **Admin edge sanity** | `GET :8081/healthz` → 200, `GET :8081/` → 200 the **admin** SPA index (title contains `Admin`, not the client/otp bundle), `GET /balance/admin/whoami` **no token** → **401 at Kong** — the admin `/` catch-all does not shadow the admin API, and the authenticated admin spine is wired. |
+| **Admin whoami slice** | black-box (browser-independent): a **real demo-admin bearer** (PKCE via the `admin-app` client) → `GET /balance/admin/whoami` → **200** with `userId == token sub` and `roles` containing `admin` — the demo-admin login reaches balance-service through `internal-nginx → internal-kong`. **FAILs** on a 401/403 for a valid admin or a wrong echoed identity; **SKIPs** if a token can't be minted (no `*.localtest.me` DNS). |
+| **Admin login e2e** | the admin-plane spine: the admin app's `login.e2e.ts` runs for real (E2E enabled, demo-admin creds, origin `:8081`) — PKCE login through internal-nginx/Kong and `GET /balance/admin/whoami` renders the gateway-resolved admin identity ("Admin console", role `admin`). A non-zero exit is a **real** serving/auth failure (or a test-code bug) → **FAIL**. `accounts.e2e.ts` is **not** run (its reads don't exist yet). |
 
 ### Why `external-transfer.e2e.ts` is not run here
 
@@ -88,16 +102,19 @@ proof and exercises the identical OTP out-of-band chain.
 
 ## Deliberately out of scope (other spec-08 slices / later passes)
 
-- **Build-and-serve** serving contract (router, `/otp/` base, port contract) — `tests/build-serve`.
+- **Build-and-serve** serving contract — public plane in `tests/build-serve`, admin plane in
+  `tests/build-serve-admin` (router, port contract, catch-all-not-shadow, static self-up).
 - **Seed** dataset exactness, sub-alignment, no-collateral, deep idempotency — `tests/seed`.
-- **Kong auth** semantics (401/403/anti-spoof/rate-limit) — `tests/transport`.
-- **Admin plane** — the admin SPA, `internal-nginx` (`:8081`), and the admin maker-checker
-  reversal e2e are **deferred** (spec 08 scope note).
+- **Kong auth** semantics (401/403/anti-spoof/rate-limit, both edges) — `tests/transport`.
+- **Admin maker-checker reversal** e2e (reversal UI not built) and the admin
+  **`/accounts` + `/limits`** screens (their reads don't exist yet) — later work.
 
 ## Skips you may see (never false passes)
 
-- **Bring up SKIP** — no Docker daemon, offline/registry, or `:8080`/`:8082` already held
-  by a foreign stack (stop it, then re-run).
+- **Bring up SKIP** — no Docker daemon, offline/registry, or `:8080`/`:8081`/`:8082` already
+  held by a foreign stack (stop it, then re-run).
 - **Browser reachability SKIP** — `*.localtest.me` does not resolve to `127.0.0.1` on this
   host. Add `127.0.0.1 keycloak.localtest.me` to the hosts file and re-run.
 - **Playwright prep SKIP** — Chromium could not be downloaded (offline).
+- **Admin whoami slice SKIP** — a demo-admin token could not be minted headlessly (Keycloak
+  unreachable / no `*.localtest.me` DNS); the admin `login.e2e.ts` still proves it if it runs.

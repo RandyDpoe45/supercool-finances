@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# run.sh — PUBLIC-PLANE FULL-RUN + TRANSFER-WITH-OTP end-to-end harness for spec 08
-# (step 8-C). The reproducible clean-machine proof of the spec-08 "Full run" + Definition
-# of Done for the public plane:
+# run.sh — FULL-RUN end-to-end harness for spec 08 (step 8-C + Pass 2). The reproducible
+# clean-machine proof of the spec-08 "Full run" + Definition of Done across BOTH planes:
 #
-#   up (all-healthy) -> seed (+ idempotency) -> browser reaches Keycloak -> public-edge
-#   sanity -> install Chromium -> run the client TRANSFER-WITH-OTP e2e -> teardown.
+#   up (all-healthy) -> seed (+ idempotency) -> browser reaches Keycloak ->
+#     PUBLIC: public-edge sanity -> Chromium -> client TRANSFER-WITH-OTP e2e
+#     ADMIN : admin-edge sanity -> demo-admin bearer whoami 200 -> admin login.e2e.ts
+#   -> teardown.
 #
 # It uses an ISOLATED compose project and an --env-file temp copy of .env.example, so it
 # never reads or writes your real `.env` and a teardown can only remove what it created.

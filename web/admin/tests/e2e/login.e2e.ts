@@ -46,7 +46,10 @@ e2eDescribe('admin-app · PKCE login and authenticated whoami', () => {
     expect(body.roles).toContain('admin');
 
     // The rendered view must reflect the real payload: the resolved userId and the admin role.
-    await expect(page.getByText(body.userId, { exact: false })).toBeVisible();
+    // Match exactly: the Home identity `<dd>` is exactly the userId, whereas the AppShell header
+    // renders "— signed in as {userId}" (also contains the userId) — an inexact match would hit
+    // both and trip Playwright strict mode. Exact pins it to the identity value row.
+    await expect(page.getByText(body.userId, { exact: true })).toBeVisible();
     await expect(page.getByText('admin', { exact: true })).toBeVisible();
   });
 });
