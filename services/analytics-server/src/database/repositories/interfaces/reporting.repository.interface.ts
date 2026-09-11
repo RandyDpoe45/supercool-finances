@@ -46,7 +46,9 @@ export interface AccountSummariesFilter {
 }
 
 /** Repo-level filter for {@link IReportingRepository.dailyAggregates}. Already
- *  clamped/normalized by the service — `limit`/`offset` are required, bounded values. */
+ *  clamped/normalized by the service — `limit`/`offset` are required, bounded values.
+ *  `from`/`to` are treated as INCLUSIVE UTC calendar days: the repo snaps `from` to the
+ *  start of its UTC day and includes the whole `to` day (see the impl's `occurredAt` block). */
 export interface DailyAggregatesFilter {
   currency?: string;
   type?: string;
