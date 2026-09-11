@@ -89,7 +89,7 @@ function pendingExpiringInMs(ms: number): PendingAuthorizationDto {
 }
 
 beforeAll(async () => {
-  vi.stubEnv('VITE_API_BASE_URL', `${API_ORIGIN}/api`);
+  vi.stubEnv('VITE_API_BASE_URL', `${API_ORIGIN}/balance/api`);
   baseApiMod = await import('../src/services/api/baseApi');
   codeRevealMod = await import('../src/components/organisms/CodeRevealPanel');
   homePageMod = await import('../src/components/pages/HomePage');

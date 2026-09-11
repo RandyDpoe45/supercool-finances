@@ -11,7 +11,7 @@ import { server } from '../src/mocks/node';
  * app is validated against a fiction — these tests fail on exactly that.
  */
 
-const ENDPOINT = `${window.location.origin}/api/pending-authorization`;
+const ENDPOINT = `${window.location.origin}/balance/api/pending-authorization`;
 
 // The EXACT whitelist from serializePendingAuthorization — no more, no less.
 const WHITELISTED_KEYS = [
@@ -31,7 +31,7 @@ function getWithBearer() {
   return fetch(ENDPOINT, { headers: { Authorization: 'Bearer test-token' } });
 }
 
-describe('GET /api/pending-authorization stub — contract of record', () => {
+describe('GET /balance/api/pending-authorization stub — contract of record', () => {
   it('returns the { authorization } envelope with EXACTLY the whitelisted DTO keys (no internal field leaks)', async () => {
     const res = await getWithBearer();
     expect(res.status).toBe(200);
@@ -75,7 +75,7 @@ describe('GET /api/pending-authorization stub — contract of record', () => {
 
   it('wraps the no-pending case as { authorization: null }', async () => {
     server.use(
-      http.get('/api/pending-authorization', () =>
+      http.get('/balance/api/pending-authorization', () =>
         HttpResponse.json({ authorization: fixtureNoPendingAuthorization }),
       ),
     );

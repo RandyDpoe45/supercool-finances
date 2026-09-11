@@ -3,11 +3,11 @@ import { User } from 'oidc-client-ts';
 import type { AuthContextProps } from 'react-oidc-context';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// See bearer.test.ts: make same-origin `/api` explicit/absolute against the test
+// See bearer.test.ts: make same-origin `/balance/api` explicit/absolute against the test
 // origin for the node fetch, before baseApi (via App → store) captures the env at
 // import. MSW resolves its relative handler paths against the same origin, so it matches.
 vi.hoisted(() => {
-  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/api`);
+  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/balance/api`);
 });
 
 import { App } from '../src/App';
@@ -17,7 +17,7 @@ import { fixtureAccounts } from '../src/mocks/fixtures/accounts';
 /**
  * End-to-end spine (happy path). One focused proof that the whole pipe works:
  * a signed-in session (real access token in the shared UserManager) → RTK Query
- * attaches the bearer → MSW `/api/accounts` stub answers → the home view renders the
+ * attaches the bearer → MSW `/balance/api/accounts` stub answers → the home view renders the
  * accounts. The OIDC provider state is mocked at the `useAuth` boundary so the gate
  * opens, but the API bearer still comes from the REAL token source — so a broken
  * bearer would surface as the 401 error view instead of the accounts, failing here.
@@ -86,7 +86,7 @@ describe('client-app spine', () => {
     expect(items).toHaveLength(fixtureAccounts.length);
 
     // Every stub account reaches the DOM with its identifier, its FORMATTED available, and
-    // currency — proving token → bearer → /api/accounts → transform → render end to end.
+    // currency — proving token → bearer → /balance/api/accounts → transform → render end to end.
     // F2 formats money at the edge, so the DOM shows the grouped human amount, and the raw
     // minor-unit string must NOT be present (raw units must never be visible/SR text).
     for (const account of fixtureAccounts) {

@@ -3,14 +3,14 @@ import { http, HttpResponse } from 'msw';
 import { User } from 'oidc-client-ts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// jsdom's global fetch (node/undici) cannot parse the app's relative `/api` base — a
+// jsdom's global fetch (node/undici) cannot parse the app's relative `/balance/api` base — a
 // browser resolves it against the origin, undici does not. Make the SAME same-origin
-// `/api` explicit/absolute against the test origin before baseApi captures the env at
+// `/balance/api` explicit/absolute against the test origin before baseApi captures the env at
 // import, so RTK Query's requests are parseable and still match the MSW handlers
 // (which resolve their relative paths against that same origin). This changes nothing
 // about what is asserted (the outgoing Authorization header).
 vi.hoisted(() => {
-  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/api`);
+  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/balance/api`);
 });
 
 import { accountsApi } from '../src/services/api/accountsApi';
@@ -23,7 +23,7 @@ import { server } from '../src/mocks/node';
  *
  * We drive the REAL `UserManager` (the single source of truth `prepareHeaders`
  * reads via `getAccessToken`) and assert the ACTUAL `Authorization` header on the
- * outgoing `/api` request, intercepted by MSW. Nothing here mocks the token source,
+ * outgoing `/balance/api` request, intercepted by MSW. Nothing here mocks the token source,
  * so the tests exercise the real "attach the live session token, but never a stale
  * one" logic. A regression that dropped the bearer, attached a hardcoded value, or
  * leaked an expired token would fail here.
@@ -63,7 +63,7 @@ function makeStore() {
 async function capturedAuthHeader(): Promise<string | null> {
   let seen: string | null = null;
   server.use(
-    http.get('/api/accounts', ({ request }) => {
+    http.get('/balance/api/accounts', ({ request }) => {
       seen = request.headers.get('authorization');
       return HttpResponse.json({ accounts: [] });
     }),

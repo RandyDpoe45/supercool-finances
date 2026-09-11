@@ -31,7 +31,7 @@ export const oidcSettings: UserManagerSettings = {
 /**
  * The single UserManager instance. The `<AuthProvider>` drives it (login, silent
  * renew, logout) and the RTK Query base query reads the live access token from it —
- * one source of truth, so the bearer attached to `/api` calls always reflects the
+ * one source of truth, so the bearer attached to `/balance/api` calls always reflects the
  * current session.
  */
 export const userManager = new UserManager(oidcSettings);

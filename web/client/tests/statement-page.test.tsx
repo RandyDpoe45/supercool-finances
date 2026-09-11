@@ -6,12 +6,12 @@ import { Provider } from 'react-redux';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// jsdom's node fetch cannot resolve the app's relative `/api` base; make the SAME
+// jsdom's node fetch cannot resolve the app's relative `/balance/api` base; make the SAME
 // same-origin base absolute against the test origin before baseApi captures the env at
 // import (identical to bearer/spine tests). MSW resolves its relative handlers against
 // the same origin, so requests still match.
 vi.hoisted(() => {
-  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/api`);
+  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/balance/api`);
 });
 
 // Importing the page also registers accountsApi's injected endpoints on baseApi.
@@ -118,7 +118,7 @@ describe('AccountStatementPage — empty state', () => {
   it('shows a sensible empty state (no table) when the account has no legs', async () => {
     const emptyId = '44444444-4444-4444-8444-444444444444';
     server.use(
-      http.get('/api/accounts/:id/transactions', () =>
+      http.get('/balance/api/accounts/:id/transactions', () =>
         HttpResponse.json({ accountId: emptyId, entries: [] }),
       ),
     );

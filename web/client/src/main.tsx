@@ -4,7 +4,7 @@ import { App } from './App';
 import './index.css';
 
 /**
- * Start the MSW browser stub before rendering, so the first `/api` call in dev is
+ * Start the MSW browser stub before rendering, so the first `/balance/api` call in dev is
  * intercepted. Dev-only (never in a production build); `onUnhandledRequest: 'bypass'`
  * lets real OIDC traffic to Keycloak pass through untouched.
  */

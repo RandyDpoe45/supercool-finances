@@ -6,10 +6,10 @@ import { Provider } from 'react-redux';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Make the same-origin `/api` base absolute before baseApi captures the env (identical to the other
+// Make the same-origin `/balance/api` base absolute before baseApi captures the env (identical to the other
 // page tests); MSW still matches its relative handlers against the same origin.
 vi.hoisted(() => {
-  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/api`);
+  vi.stubEnv('VITE_API_BASE_URL', `${window.location.origin}/balance/api`);
 });
 
 import { PayeesPage } from '../src/components/pages/PayeesPage';
@@ -87,7 +87,7 @@ function solveCaptcha() {
 }
 
 async function readSource(): Promise<AccountDto> {
-  const res = await fetch(url('/api/accounts'), { headers: AUTH });
+  const res = await fetch(url('/balance/api/accounts'), { headers: AUTH });
   const { accounts } = (await res.json()) as AccountsResponse;
   const source = accounts.find((a) => a.id === SOURCE_ID);
   if (!source) {
@@ -147,7 +147,7 @@ describe('PayeesPage — cooling-off gating (hint) + enrollment', () => {
   it('captcha-gates enrollment, sends ONLY {displayName, destinationRef}, and shows the cooling-off window', async () => {
     let captured: Record<string, unknown> | undefined;
     server.use(
-      http.post('/api/payees', async ({ request }) => {
+      http.post('/balance/api/payees', async ({ request }) => {
         captured = (await request.json()) as Record<string, unknown>;
         return HttpResponse.json(
           {
@@ -297,7 +297,7 @@ describe('ExternalTransferPage — the server, not the hint, is authoritative on
     // The list falsely hints the still-cooling payee is usable (a stale `usable: true`), so the form
     // offers it — but the server re-checks the gate on the real clock and rejects it.
     server.use(
-      http.get('/api/payees', () =>
+      http.get('/balance/api/payees', () =>
         HttpResponse.json({
           payees: [
             {

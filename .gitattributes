@@ -24,3 +24,13 @@ infra/**/init/*.js text eol=lf
 *.mjs   text eol=lf
 *.cjs   text eol=lf
 *.json  text eol=lf
+
+# Frontend source/docs (SPAs, spec 07). Same rationale as *.ts above: these are
+# all covered by the prettier gate (endOfLine=lf), so a native CRLF checkout on
+# Windows would fail lint/format:check. The backend is *.ts-only, so these
+# extensions were absent when the rules above were written — pin them too.
+*.tsx   text eol=lf
+*.jsx   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf

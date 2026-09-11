@@ -4,7 +4,7 @@ import { App } from './App';
 import './index.css';
 
 /**
- * Start the MSW browser stub before rendering, so the first `/api` call in dev is
+ * Start the MSW browser stub before rendering, so the first `/balance/api` call in dev is
  * intercepted. Dev-only (never in a production build); `onUnhandledRequest: 'bypass'`
  * lets real OIDC traffic to Keycloak pass through untouched. The worker is served
  * from the `/otp` base, so its scope covers this app only.
@@ -15,7 +15,7 @@ async function enableApiMocks(): Promise<void> {
   }
   const { worker } = await import('./mocks/browser');
   // The worker script is served from the `/otp/` base, but it must intercept
-  // origin-root `/api` calls — hence the explicit URL plus root scope (the dev server
+  // origin-root `/balance/api` calls — hence the explicit URL plus root scope (the dev server
   // sends `Service-Worker-Allowed: /`; see vite.config.ts).
   await worker.start({
     onUnhandledRequest: 'bypass',
