@@ -54,6 +54,7 @@ discrete-credentials contract — see
 | `MONGO_HOST` / `MONGO_PORT` / `MONGO_DB` | Mongo coordinates (`analytics` DB) | port `27017` |
 | `MONGO_USER` / `MONGO_PASSWORD` | least-privilege `analytics` app user | — |
 | `MONGO_AUTH_SOURCE` | DB the app user authenticates against | `analytics` |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | transaction-stream Redis (spec 05); composed into a `redis://` URL | port `6379` |
 | `INTERNAL_SERVICE_TOKEN` | shared secret for the `/internal` guard | — |
 
 - **Validation is zod, at boot, fail-fast.** `parseEnv` (`config/env.schema.ts`)
@@ -66,9 +67,13 @@ discrete-credentials contract — see
 - The config is exposed via DI under the `APP_CONFIG` token
   (`config/config.module.ts`, `@Global`); components inject the token, not a
   concrete config source.
-- **Redis is intentionally absent.** The transaction-stream consumer is spec 05, so
-  the foundation's required-config surface is Mongo-only — it never demands config
-  it doesn't yet use.
+- **Redis config is declared (spec 05 storage layer).** `REDIS_HOST` / `REDIS_PORT`
+  / `REDIS_PASSWORD` are now required and composed into a `RedisConfig` (`url`
+  included) — the transaction-stream consumer's connection. This supersedes the
+  earlier foundation "Mongo-only / Redis absent" note. The Redis **client** + the
+  `data`-network compose wiring arrive with the A2 consumer; the config is present
+  first so the service boots with the now-required vars. See
+  [`read-model.md`](./read-model.md).
 - **Env sources.** In Docker the vars come from the compose `environment:` block.
   For a standalone run, copy `.env.example` → `.env`; `main.ts` calls Node's native
   `process.loadEnvFile()` on boot (and `node --env-file=.env` also works).

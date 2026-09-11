@@ -345,6 +345,13 @@ services:
       MONGO_USER: ${MONGO_APP_USER}
       MONGO_PASSWORD: ${MONGO_APP_PASSWORD}
       MONGO_AUTH_SOURCE: ${MONGO_DB}
+      # Redis: composed into a URL internally by the transaction-stream consumer.
+      # Config is present from the read-model storage step (spec 05, A1) so the
+      # service boots with the now-required vars; the consumer CLIENT + the `data`
+      # network + depends_on: redis arrive with the A2 consumer.
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       # Shared secret for the /internal service-identity guard.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN}
     healthcheck:

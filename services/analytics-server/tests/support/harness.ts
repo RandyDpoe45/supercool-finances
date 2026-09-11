@@ -10,7 +10,8 @@
  * ./env.fixture; a TCP reachability probe for the honest-SKIP integration gate).
  *
  * The candidate module paths mirror the just-merged balance-service layout (the
- * template), adjusted for analytics: Mongo (not Postgres), no Redis, no `/api`.
+ * template), adjusted for analytics: Mongo (not Postgres), no `/api`. Redis is
+ * config-only here in spec 05's storage step (the stream consumer arrives in A2).
  */
 
 import * as net from 'net';
@@ -185,6 +186,56 @@ export function getRequestId(): {
 /** The root NestJS module — only the Docker-gated integration suite needs it. */
 export function getAppModule(): any {
   return resolveOrThrow('the root AppModule', [`${SRC}/app.module`], ['AppModule']);
+}
+
+/**
+ * Spec-05 storage layer (step A1) seams. Kept behind the single coordination point:
+ * if the implementor renames a module/token, only this file changes. Resolvers are
+ * called lazily (inside the opted-in integration `beforeAll`) so the suite still
+ * SKIPS cleanly — never errors on import — when the storage layer is absent.
+ */
+
+/** The global config module (provides + exports the APP_CONFIG token from process.env). */
+export function getConfigModule(): any {
+  return resolveOrThrow(
+    'the global config module',
+    [`${SRC}/config/config.module`],
+    ['AppConfigModule'],
+  );
+}
+
+/** The Mongoose root-connection module (wires the composed Mongo DSN). */
+export function getDatabaseModule(): any {
+  return resolveOrThrow(
+    'the database module',
+    [`${SRC}/database/database.module`],
+    ['DatabaseModule'],
+  );
+}
+
+/** The persistence module — registers the `transactions` model + the repository provider. */
+export function getPersistenceModule(): any {
+  return resolveOrThrow(
+    'the persistence module (spec 05 read-model wiring)',
+    [`${SRC}/database/persistence.module`],
+    ['PersistenceModule'],
+  );
+}
+
+/**
+ * DI token for the transactions read-model repository (interface-behind-token). The
+ * concrete impl is bound to this token in the persistence module; consumers (and the
+ * integration test) resolve the repo through it, never the concrete class.
+ */
+export function getTransactionsRepositoryToken(): symbol {
+  return resolveOrThrow(
+    'the transactions repository DI token',
+    [
+      `${SRC}/database/repositories/interfaces/transactions.repository.interface`,
+      `${SRC}/database/repositories/interfaces/transactions.repository`,
+    ],
+    ['TRANSACTIONS_REPOSITORY'],
+  );
 }
 
 /**

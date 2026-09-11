@@ -4,10 +4,15 @@ import { z } from 'zod';
  * The analytics server defines its OWN env var names (it is a self-contained
  * component — ADR-16). docker-compose maps the root discrete credentials into
  * these names; the service never reads a pre-assembled `*_URL` string and
- * composes its own MongoDB DSN from these discrete parts (see configuration.ts).
+ * composes its own MongoDB DSN + Redis URL from these discrete parts (see
+ * configuration.ts).
  *
- * The foundation's required-config surface is intentionally Mongo-only. Redis
- * (the transaction stream consumer) belongs to spec 05 and is NOT declared here.
+ * Redis (the transaction-stream consumer's connection) belongs to spec 05 and IS
+ * declared here as of the read-model storage layer — it is now a required part of
+ * the config surface (the earlier foundation "Mongo-only" note is superseded). The
+ * consumer's Redis CLIENT + `data`-network wiring land with the A2 consumer; this
+ * schema only makes the connection config present so the service still boots with
+ * the now-required vars.
  */
 export const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -19,6 +24,10 @@ export const EnvSchema = z.object({
   MONGO_USER: z.string().min(1),
   MONGO_PASSWORD: z.string().min(1),
   MONGO_AUTH_SOURCE: z.string().min(1).default('analytics'),
+
+  REDIS_HOST: z.string().min(1),
+  REDIS_PORT: z.coerce.number().int().positive().default(6379),
+  REDIS_PASSWORD: z.string().min(1),
 
   // Shared secret for the `/internal` service-identity guard.
   INTERNAL_SERVICE_TOKEN: z.string().min(1),
