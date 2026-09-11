@@ -4,6 +4,12 @@ dist-ssr/
 coverage/
 *.local
 
+# Playwright (end-to-end) run artifacts
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # Local env — commit only the *.example template (no secrets in the repo).
 .env
 .env.*

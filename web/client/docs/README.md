@@ -435,3 +435,12 @@ to the still-cooling payee is blocked with a clear cooling-off message.
 
 Other scripts: `npm run build`, `npm run typecheck`, `npm run lint`,
 `npm run format` / `npm run format:check`, `npm test`.
+
+## End-to-end tests (Playwright, PENDING)
+
+Real-chain browser → nginx → Kong → balance-service e2e suites live in
+[`tests/e2e/`](../tests/e2e/README.md) (`npm run test:e2e`). They cover the spec-07 DoD flows
+(PKCE login, internal + external transfers with the out-of-band OTP read from the otp-app) and
+are **PENDING (skipped via `describe.fixme`) until spec 08** provides the running stack, seed
+data, and Keycloak login users. They are kept separate from the Vitest suites by the `*.e2e.ts`
+naming and Playwright's `testDir`, so `npm test` never runs them.
