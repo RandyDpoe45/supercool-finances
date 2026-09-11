@@ -417,9 +417,12 @@ carrying `reversesTransactionId` — there is **no** separate `transaction.rever
 **`transaction.failed` (confirm-time business failure).** When a user transfer is OTP-confirmed
 but the business rejects it under the account lock, the transfer is persisted **PENDING → FAILED**
 and a single `transaction.failed` event is emitted (`status: FAILED`, `failureReason` = the domain
-error's `code`, `postedAt: null`, **empty legs**). The **exported pure builder** `buildFailedPayload`
-lives in `service/interfaces/transaction-event.ts` (NOT in posting `impl/`, whose `buildPostedPayload`
-is private) so the **transfers layer** can emit the event without importing from posting impl — see
+error's `code`, `postedAt: null`, **empty legs**). **The posting reducer is the SOLE emitter of
+transaction events**, so this FAILED write + event is owned by `IPostingService.recordFailedInTx`
+(the transfers layer delegates to it — it never emits an event itself). The **exported pure builder**
+`buildFailedPayload` lives in `service/interfaces/transaction-event.ts` (beside the contract types,
+NOT in posting `impl/` where `buildPostedPayload` is private) so the reducer's several FAILED-emit
+call sites reuse ONE builder — see
 [Confirm-time FAILED persistence](#confirm-time-failed-persistence-business-vs-validation) below.
 
 The payload types are declared as `type` aliases (not interfaces) so they satisfy the entity's
@@ -746,18 +749,20 @@ committed tx** — does:
 1. lock the SOURCE `FOR UPDATE` (external only) FIRST — the single **source → transaction → hold**
    order every hold-mutating path uses, so the FAILED write can never deadlock against a concurrent
    settle/expire/cancel on the same transfer;
-2. guarded `transitionToFailedInTx` — `UPDATE transaction SET status = FAILED, failure_reason =
-   :code, failed_at = now() WHERE id = :id AND status = 'PENDING'`. **0 rows** → a concurrent
-   expiry/cancel already moved it off PENDING (and released any hold), so it emits **nothing**,
-   releases **nothing**, and just rethrows (race-safe);
-3. for `external_outbound`, RELEASE the hold via the shared `releaseHoldForTransactionInTx`
-   (guarded `PLACED → RELEASED`, `held -= amount`) — **no ledger entry** (releasing returns the
-   reservation, it moves no money);
-4. emit **exactly one** `transaction.failed` outbox row (FK-bound to the now-FAILED header, built
-   with `buildFailedPayload` → **empty legs**), so the relay ships it to analytics;
+2. delegate the FAILED header write + event to `posting.recordFailedInTx(qr, id, code, payee)` — the
+   reducer (the **sole emitter** of transaction events) runs the guarded `transitionToFailedInTx`
+   (`UPDATE transaction SET status = FAILED, failure_reason = :code, failed_at = now() WHERE id = :id
+   AND status = 'PENDING'`) and, on a 1-row flip, emits the SINGLE `transaction.failed` outbox row
+   (`buildFailedPayload` → **empty legs**, FK-bound to the now-FAILED header). It returns `false` on
+   **0 rows** (a concurrent expiry/cancel already moved it off PENDING) — a guarded no-op: nothing
+   emitted;
+3. for `external_outbound`, and **only when the reducer returned `true`**, RELEASE the hold via the
+   shared `releaseHoldForTransactionInTx` (guarded `PLACED → RELEASED`, `held -= amount`) — **no
+   ledger entry** (releasing returns the reservation, it moves no money);
 
 then **rethrow the ORIGINAL domain error**, so the controller returns the SAME 4xx as before. The
-transfer is now **TERMINAL** — a re-confirm hits `TRANSFER_NOT_PENDING`.
+transfer is now **TERMINAL** — a re-confirm hits `TRANSFER_NOT_PENDING`. Because the reducer owns
+BOTH the header write and the event, `transfers` no longer emits any transaction event.
 
 The **taxonomy is explicit and centralized** (one predicate, keyed by the domain `code`):
 **BUSINESS → persist FAILED** = `INSUFFICIENT_FUNDS`, `ACCOUNT_FROZEN`, `LIMIT_EXCEEDED`,

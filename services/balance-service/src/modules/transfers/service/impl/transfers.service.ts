@@ -33,10 +33,6 @@ import {
   IHoldRepository,
 } from '../../../../database/repositories/interfaces/hold.repository.interface';
 import {
-  IOutboxEventRepository,
-  OUTBOX_EVENT_REPOSITORY,
-} from '../../../../database/repositories/interfaces/outbox-event.repository.interface';
-import {
   ITransactionRepository,
   TRANSACTION_REPOSITORY,
 } from '../../../../database/repositories/interfaces/transaction.repository.interface';
@@ -57,11 +53,7 @@ import {
   IPostingService,
   POSTING_SERVICE,
 } from '../../../posting/service/interfaces/posting.service.interface';
-import {
-  buildFailedPayload,
-  TRANSACTION_FAILED_EVENT,
-  TransactionEventPayee,
-} from '../../../posting/service/interfaces/transaction-event';
+import { TransactionEventPayee } from '../../../posting/service/interfaces/transaction-event';
 import {
   DestinationNotConfirmedError,
   InvalidOtpError,
@@ -186,7 +178,6 @@ export class TransfersService implements ITransfersService {
     @Inject(CUSTOMER_REPOSITORY) private readonly customers: ICustomerRepository,
     @Inject(TRANSACTION_REPOSITORY) private readonly transactions: ITransactionRepository,
     @Inject(HOLD_REPOSITORY) private readonly holds: IHoldRepository,
-    @Inject(OUTBOX_EVENT_REPOSITORY) private readonly outbox: IOutboxEventRepository,
     @Inject(EXTERNAL_PAYEE_REPOSITORY) private readonly externalPayees: IExternalPayeeRepository,
     @Inject(IDEMPOTENCY_SERVICE) private readonly idempotency: IIdempotencyService,
     @Inject(OTP_SERVICE) private readonly otp: IOtpService,
@@ -609,13 +600,14 @@ export class TransfersService implements ITransfersService {
    * 1. locks the SOURCE `FOR UPDATE` (external only) FIRST — the single source→transaction→hold
    *    order every hold-mutating path uses, so the FAILED write can never deadlock against a
    *    concurrent settle/expire/cancel on the same transfer;
-   * 2. runs the guarded `PENDING → FAILED` transition (stamps the domain error `code` as
-   *    `failure_reason` + `failed_at`). A 0-row flip means a concurrent expiry/cancel already moved
-   *    the row off PENDING (and released any hold): NO event, NO hold release — just the rethrow;
-   * 3. for external_outbound, RELEASES the hold (guarded PLACED → RELEASED, `held -= amount`) via the
-   *    shared primitive, returning the reservation exactly once — NO ledger entry (no money moves);
-   * 4. emits EXACTLY ONE `transaction.failed` outbox row (FK-bound to the now-FAILED header, EMPTY
-   *    legs) so the relay ships it to analytics.
+   * 2. delegates the FAILED HEADER WRITE + the SINGLE `transaction.failed` EVENT to the posting
+   *    reducer (`recordFailedInTx`) — the reducer is the sole emitter of transaction events, so the
+   *    guarded `PENDING → FAILED` transition and the outbox row are owned there, atomically in this
+   *    tx and moving no money. It returns `false` on a 0-row transition (a concurrent expiry/cancel
+   *    already moved the row off PENDING): a guarded no-op — nothing emitted, no hold released;
+   * 3. for external_outbound, and ONLY when the reducer actually recorded the failure, RELEASES the
+   *    hold (guarded PLACED → RELEASED, `held -= amount`) via the shared primitive — returning the
+   *    reservation exactly once, NO ledger entry (no money moves).
    *
    * Then it rethrows the ORIGINAL domain error, so the controller returns the SAME 4xx (the client
    * sees the failure reason). The transfer is now TERMINAL — a re-confirm hits `TRANSFER_NOT_PENDING`.
@@ -639,15 +631,15 @@ export class TransfersService implements ITransfersService {
         if (isExternal && sourceId) {
           await this.accounts.lockByIdForUpdate(queryRunner, sourceId);
         }
-        const failed = await this.transactions.transitionToFailedInTx(
+        // The posting reducer owns the FAILED header write AND the single `transaction.failed` event
+        // (sole emitter). `false` = guarded no-op (already expired/cancelled) → release no hold.
+        const recorded = await this.posting.recordFailedInTx(
           queryRunner,
           transfer.id,
           error.code,
+          command.payee ?? null,
         );
-        if (!failed) {
-          return;
-        }
-        if (isExternal && sourceId) {
+        if (recorded && isExternal && sourceId) {
           await this.releaseHoldForTransactionInTx(
             queryRunner,
             sourceId,
@@ -655,21 +647,6 @@ export class TransfersService implements ITransfersService {
             HoldStatus.Released,
           );
         }
-        // Re-read the now-FAILED header WITHIN this tx so the event carries the persisted state.
-        const header = await this.transactions.findByIdInTx(queryRunner, transfer.id);
-        if (!header) {
-          // Unreachable: the row was just transitioned under this same transaction.
-          throw new Error(`Transaction ${transfer.id} vanished after its FAILED transition`);
-        }
-        await this.outbox.insertInTx(queryRunner, {
-          transactionId: transfer.id,
-          eventType: TRANSACTION_FAILED_EVENT,
-          payload: buildFailedPayload(header, {
-            reason: error.code,
-            payee: command.payee ?? null,
-            occurredAt: new Date().toISOString(),
-          }),
-        });
       });
     } catch (persistError) {
       // Best-effort: swallow the persistence failure so the ORIGINAL business error (rethrown below)

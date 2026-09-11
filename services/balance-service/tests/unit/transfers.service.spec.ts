@@ -51,6 +51,7 @@ import {
   getRedisClientToken,
   getAppConfigToken,
   getDomainErrors,
+  getDomainErrorBase,
 } from '../support/harness';
 
 const TransfersService = getTransfersService();
@@ -58,6 +59,23 @@ const TransfersService = getTransfersService();
 // (TransferExpiredError / PendingTransferConflictError) without a compile-time coupling — these
 // classes are used only for a secondary `instanceof` signal; the primary assertion is the `.code`.
 const de: any = getDomainErrors();
+const DomainErrorBase: any = getDomainErrorBase();
+
+/** A concrete DomainError carrying the INSUFFICIENT_FUNDS business code — a confirm-time BUSINESS
+ * failure (`isBusinessFailure` ⇒ true), so the confirm catch delegates to `posting.recordFailedInTx`.
+ * Prefers the real reducer error class; falls back to a synthetic DomainError with the same code so
+ * the delegation branch is driven even if the concrete class is not resolvable. */
+class SyntheticInsufficientFundsError extends DomainErrorBase {
+  readonly code = 'INSUFFICIENT_FUNDS';
+  constructor() {
+    super('insufficient funds (synthetic business failure)');
+  }
+}
+function insufficientFundsError(): any {
+  return typeof de.InsufficientFundsError === 'function'
+    ? new de.InsufficientFundsError('src-1')
+    : new SyntheticInsufficientFundsError();
+}
 
 const OWNER = 'sub-alice';
 
@@ -177,6 +195,14 @@ function makeMocks(): Mocks {
       return state.postingResult ?? { id: transactionId, status: 'POSTED' };
     }),
     postTransaction: jest.fn(async () => ({ id: 'tx-op', status: 'POSTED' })),
+    // P2a: the reducer OWNS the confirm-time FAILED-header write + the single `transaction.failed`
+    // event (sole emitter). transfers now DELEGATES to this on a business failure, then (external
+    // only, when it returns true) releases the hold and rethrows. Returns true = it flipped
+    // PENDING→FAILED and emitted. The OUTBOX_EVENT_REPOSITORY injection was removed from transfers.
+    recordFailedInTx: jest.fn(async () => {
+      callLog.push('recordFailedInTx');
+      return true;
+    }),
   };
 
   const otp = {
@@ -716,6 +742,51 @@ describe('TransfersService.confirmTransfer — OTP gating, ordering, and lifecyc
     const postIdx = mocks.callLog.indexOf('postPendingInTx');
     expect(consumeIdx).toBeGreaterThanOrEqual(0);
     expect(postIdx).toBeGreaterThan(consumeIdx); // consume happened first
+    // TAXONOMY at the unit level: this failure is a RAW Error (NOT a DomainError), so it is NOT a
+    // business failure — no FAILED persistence is delegated. Guards against an over-eager "persist
+    // FAILED on any caught error" regression (a raw 500-class fault must propagate untouched).
+    expect(mocks.posting.recordFailedInTx).not.toHaveBeenCalled();
+  });
+
+  it('a confirm-time BUSINESS failure (funds dropped) DELEGATES the terminal FAILED persistence to posting.recordFailedInTx and RETHROWS the same error (OTP burned once, no double-processing)', async () => {
+    const { service, mocks } = await setup();
+    const transfer = pendingTransfer(); // internal → no hold; the FAILED write is delegated, not local
+    mocks.transactionRepo.findById.mockResolvedValue(transfer);
+    mocks.state.consumeResult = { ok: true, remainingAttempts: 3, lockedOut: false };
+    // A REAL DomainError business rejection at post time (isBusinessFailure ⇒ true).
+    const businessError = insufficientFundsError();
+    mocks.state.postingError = businessError;
+
+    const res = await capture(service.confirmTransfer(confirmParams()));
+
+    // The SAME business error propagates — the client still gets the correct 4xx, never a 500 and
+    // never a swallowed error.
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe(businessError);
+    expect(res.error.code).toBe('INSUFFICIENT_FUNDS');
+
+    // Money-safety invariants that must survive the P2a refactor: the post was attempted once and
+    // the single-use OTP was consumed exactly once (burned — a replay cannot re-drive it).
+    expect(mocks.posting.postPendingInTx).toHaveBeenCalledTimes(1);
+    expect(mocks.otp.consume).toHaveBeenCalledTimes(1);
+
+    // The FAILED-header write + the single `transaction.failed` event are now DELEGATED to the
+    // reducer (transfers no longer flips the header / writes the outbox itself). Called EXACTLY ONCE
+    // (no double-processing), keyed to THIS transfer, carrying the error's code as the reason and a
+    // null payee (internal has none) — per recordFailedInTx(queryRunner, transactionId, reason, payee).
+    expect(mocks.posting.recordFailedInTx).toHaveBeenCalledTimes(1);
+    const call = mocks.posting.recordFailedInTx.mock.calls[0];
+    expect(call[1]).toBe(transfer.id);
+    expect(call[2]).toBe('INSUFFICIENT_FUNDS');
+    expect(call[3] ?? null).toBeNull();
+
+    // Ordering: the delegation happens AFTER the post failed (it is a compensating persist, not a
+    // pre-emptive one) and after the OTP was consumed.
+    const consumeIdx = mocks.callLog.indexOf('consume');
+    const postIdx = mocks.callLog.indexOf('postPendingInTx');
+    const failIdx = mocks.callLog.indexOf('recordFailedInTx');
+    expect(postIdx).toBeGreaterThan(consumeIdx);
+    expect(failIdx).toBeGreaterThan(postIdx);
   });
 });
 

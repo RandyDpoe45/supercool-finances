@@ -1,6 +1,7 @@
 import { QueryRunner } from 'typeorm';
 import { Transaction } from '../../../../database/entities/transaction.entity';
 import { PostTransactionCommand } from './post-transaction.command';
+import { TransactionEventPayee } from './transaction-event';
 
 /** DI token for {@link IPostingService}. Consumers depend on the interface via this token,
  * never the concrete reducer class. */
@@ -51,4 +52,27 @@ export interface IPostingService {
    * caller re-generates its id-stable closure and re-runs.
    */
   postFreshInTx(queryRunner: QueryRunner, command: PostTransactionCommand): Promise<Transaction>;
+
+  /**
+   * Record a confirm-time BUSINESS failure of an EXISTING pending transfer, running INSIDE the
+   * caller's transaction (no new tx) and moving NO money (no balance/ledger touch). The reducer is
+   * the SOLE emitter of transaction events, so it owns BOTH halves atomically:
+   *
+   * 1. a guarded `PENDING → FAILED` header write (`transitionToFailedInTx`, stamping `reason` as
+   *    `failure_reason` + `failed_at`). If it flips **0 rows** (the transfer was already moved off
+   *    PENDING by a concurrent expiry/cancel) it returns `false` — a guarded NO-OP that emits nothing;
+   * 2. on success it emits the SINGLE `transaction.failed` outbox row (empty legs — no money moved),
+   *    FK-bound to the now-FAILED header, and returns `true`.
+   *
+   * `reason` is the raising domain error's stable `code`; `payee` is the external-payee snapshot for
+   * an `external_outbound` (carried onto the event so analytics stays self-contained), `null`
+   * otherwise. The caller (transfers) still owns any hold release — gated on this returning `true`.
+   * MUST run inside the given queryRunner's active transaction.
+   */
+  recordFailedInTx(
+    queryRunner: QueryRunner,
+    transactionId: string,
+    reason: string,
+    payee?: TransactionEventPayee | null,
+  ): Promise<boolean>;
 }

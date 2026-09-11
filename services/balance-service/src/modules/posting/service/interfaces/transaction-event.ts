@@ -115,13 +115,15 @@ export const TRANSACTION_FAILED_EVENT: TransactionEventType = 'transaction.faile
 
 /**
  * Build the `transaction.failed` payload from the (now-FAILED) transaction header. EXPORTED and
- * pure so the transfers layer can emit the event WITHOUT importing from posting `impl/` (the
- * POSTED builder is impl-private): the transfers service already holds the header entity, the
- * payee snapshot (external_outbound only, `null` otherwise), the failure `reason` (the domain
- * error's `code`), and the `occurredAt` instant. `legs` is empty — a FAILED transaction moves no
- * money — so the double-entry sum-zero invariant holds trivially. `createdAt` comes from the
- * existing header; `postedAt` is `null`; `status` is forced to FAILED regardless of the passed
- * entity's momentary state.
+ * pure, kept beside the contract types (not in posting `impl/`, where the POSTED builder is
+ * private) so the several FAILED-emit call sites in the reducer — the confirm-time
+ * `recordFailedInTx` and a later fresh-FAILED-header case — reuse ONE builder while the reducer
+ * stays the sole emitter of transaction events. Inputs: the header entity, the payee snapshot
+ * (external_outbound only, `null` otherwise), the failure `reason` (the domain error's `code`),
+ * and the `occurredAt` instant. `legs` is empty — a FAILED transaction moves no money — so the
+ * double-entry sum-zero invariant holds trivially. `createdAt` comes from the existing header;
+ * `postedAt` is `null`; `status` is forced to FAILED regardless of the passed entity's momentary
+ * state.
  */
 export function buildFailedPayload(
   transaction: Transaction,
