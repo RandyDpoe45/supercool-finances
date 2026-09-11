@@ -709,7 +709,7 @@ All under the global `/api` prefix (the `GatewayIdentityGuard` has required the 
 | Route | Effect |
 |---|---|
 | `POST /api/transfers` | Initiate an internal transfer → creates a **PENDING** transaction (no money moves). Body `{ sourceAccountId, destinationAccountId, amount, currency, confirmDuplicate? }`; required `Idempotency-Key` header. **201**, `TransferDto`. |
-| `POST /api/otp` | Mint the caller's user-scoped one-time code (mocked out-of-band delivery). **201**, `OtpDto { code, ttlSeconds }`. Singleton-gated → `OtpAlreadyActiveError` (409) if a code is already active. |
+| `POST /api/otp` | Mint the caller's user-scoped one-time code (mocked out-of-band delivery). **200**, `OtpDto { code, ttlSeconds }`. Singleton-gated → `OtpAlreadyActiveError` (409) if a code is already active. |
 | `POST /api/transfers/:id/confirm` | Verify+consume the OTP, then post the pending transfer (money moves). Body `{ code }`; `:id` via `ParseUUIDPipe`. **200**, the posted `TransferDto`. |
 | `GET /api/pending-authorizations` | The caller's PENDING transfers, newest-first (the OTP app's feed). **200**, `{ authorizations: PendingAuthorizationDto[] }`. |
 

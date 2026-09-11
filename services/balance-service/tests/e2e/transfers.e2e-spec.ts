@@ -7,7 +7,7 @@
  * Endpoints under test:
  *   POST /api/transfers/resolve-destination  (body {accountNumber})  → 200 {maskedName, currency, confirmationToken}
  *   POST /api/transfers                       (Idempotency-Key hdr)   → 201 + a PENDING Transfer DTO (with expiresAt)
- *   POST /api/otp                                                      → 201 + {code, ttlSeconds}
+ *   POST /api/otp                                                      → 200 + {code, ttlSeconds}
  *   POST /api/transfers/:id/confirm           (body {code})            → 200 + a POSTED Transfer DTO
  *   POST /api/transfers/:id/cancel                                     → 200 + a CANCELLED Transfer DTO
  *   GET  /api/pending-authorization                                    → { authorization: PendingAuthorizationDto | null }
@@ -361,7 +361,7 @@ suite(
       const transferId = idOf(created.body);
 
       const otp = await mintOtp(owner);
-      expect(otp.status).toBe(201);
+      expect(otp.status).toBe(200);
       expect(typeof otp.code).toBe('string');
       expect(typeof otp.ttlSeconds).toBe('number');
       expect(otp.ttlSeconds as number).toBeGreaterThan(0);
@@ -640,7 +640,7 @@ suite(
     it('a second POST /api/otp while one is active → 409 with error.code OTP_ALREADY_ACTIVE', async () => {
       const owner = newOwner();
       const first = await mintOtp(owner);
-      expect(first.status).toBe(201);
+      expect(first.status).toBe(200);
 
       const second = await asUser(owner).post('/api/otp').send({});
       expect(second.status).toBe(409);

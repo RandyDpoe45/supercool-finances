@@ -1,4 +1,4 @@
-import { Controller, Inject, Post } from '@nestjs/common';
+import { Controller, HttpCode, HttpStatus, Inject, Post } from '@nestjs/common';
 import { Identity } from '../../../common/identity/identity.decorator';
 import { RequestIdentity } from '../../../common/identity/request-identity';
 import { IOtpService, OTP_SERVICE } from '../service/interfaces/otp.service.interface';
@@ -20,7 +20,9 @@ import { serializeOtp } from './serializers/otp.serializer';
 export class OtpApiController {
   constructor(@Inject(OTP_SERVICE) private readonly otp: IOtpService) {}
 
+  /** Mint the caller's user-scoped one-time code (no resource is created at a new URL). 200. */
   @Post('otp')
+  @HttpCode(HttpStatus.OK)
   async generate(@Identity() identity: RequestIdentity): Promise<OtpDto> {
     const result = await this.otp.generate(identity.userId);
     return serializeOtp(result);
