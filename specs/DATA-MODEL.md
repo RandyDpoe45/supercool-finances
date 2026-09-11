@@ -382,20 +382,28 @@ Wire conventions:
 - **Reversal is link-only:** a reversal is itself a compensating `transaction.posted`
   event carrying `reversesTransactionId`; there is **no** separate `transaction.reversed`
   event.
-- **`transaction.failed` (confirm-time business failure):** when a user transfer is
-  OTP-confirmed but the business rejects it under the account lock (funds dropped below
-  the amount between initiate and confirm, the source froze, a spend limit tripped, or —
-  external — the payee is not active / still cooling off), the transfer transitions
-  **PENDING → FAILED** (`failure_reason` = the domain error's `code`, `failed_at = now()`)
-  and emits **exactly one** `transaction.failed` event: the same header envelope with
-  `status: "FAILED"`, a non-null **`failureReason`**, `postedAt: null`, and an **empty
-  `legs`** array — no money moved, so the double-entry sum-zero invariant holds trivially.
-  For an `external_outbound` the transfer's hold is **released** in the same failure tx
-  (`PLACED → RELEASED`, `held -= amount`). `failureReason` is carried on the header of
-  **both** event kinds (`null` on a `transaction.posted`) so they share one shape. Only a
-  BUSINESS failure persists FAILED; a VALIDATION/STRUCTURAL error (`INVALID_POSTING_COMMAND`,
-  `ACCOUNT_NOT_FOUND`, `CURRENCY_MISMATCH`, `TRANSFER_NOT_PENDING`) propagates as a 4xx with
-  **nothing persisted**.
+- **`transaction.failed` (business failure — confirm-time OR initiate-time):** when the
+  business rejects a **well-formed** transfer, it becomes a terminal **FAILED** transaction
+  (`failure_reason` = the domain error's `code`, `failed_at = now()`) and emits **exactly
+  one** `transaction.failed` event: the same header envelope with `status: "FAILED"`, a
+  non-null **`failureReason`**, `postedAt: null`, and an **empty `legs`** array — no money
+  moved, so the double-entry sum-zero invariant holds trivially. Two points trigger this:
+  - **Confirm-time** — a user transfer is OTP-confirmed but the business rejects it under the
+    account lock (funds dropped between initiate and confirm, the source froze, a spend limit
+    tripped, or — external — the payee is not active). The existing transfer transitions
+    **PENDING → FAILED**, and for an `external_outbound` its hold is **released** in the same
+    failure tx (`PLACED → RELEASED`, `held -= amount`).
+  - **Initiate-time (`external_outbound`)** — the funds / frozen / **cooling-off** check fires
+    during initiate/hold-placement (BEFORE any hold is placed), so a **fresh** FAILED
+    transaction is **inserted** (no prior PENDING, no hold to release), the idempotency key is
+    **completed** and linked to it, and one `transaction.failed` is emitted. The initiate then
+    responds **`201` with `status: "FAILED"`** (regenerated from the linked transaction).
+
+  `failureReason` is carried on the header of **both** event kinds (`null` on a
+  `transaction.posted`) so they share one shape. Only a BUSINESS failure persists FAILED; a
+  VALIDATION/STRUCTURAL error (`INVALID_POSTING_COMMAND`, `ACCOUNT_NOT_FOUND`,
+  `CURRENCY_MISMATCH`, `TRANSFER_NOT_PENDING`, payee-not-found, a pending-conflict) propagates
+  as a 4xx and **releases the key, persisting nothing**.
 - **A rail-settlement failure is different (unchanged):** an outbound already POSTED, so
   the rail's FAILURE callback **reverses** it (`POSTED → REVERSED` + a compensating
   `clearing → customer` `transaction.posted`) — it is **never** a `transaction.failed`.

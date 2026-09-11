@@ -42,6 +42,24 @@ export interface IIdempotencyKeyRepository {
     transactionId: string,
   ): Promise<void>;
   /**
+   * Atomically INSERT a COMPLETED key linked to `transactionId` (the initiate-time fresh-FAILED
+   * path, where no prior claim survives — the operation tx rolled back): an explicit parameterized
+   * `INSERT (owner_id, key, request_fingerprint, status='completed', transaction_id, expires_at)
+   * ON CONFLICT (owner_id, key) DO NOTHING RETURNING "key"`. Returns `true` iff THIS call inserted
+   * the row (won the completion); `false` on conflict (a concurrent same-key caller already holds or
+   * completed the key — the wrapper resolves it). Blocks on a concurrent UNCOMMITTED same-key row
+   * until it resolves (the serialization point). The linked transaction MUST already be inserted in
+   * the SAME tx (fk_idem_transaction). Never `.save()` (which would upsert on the composite PK).
+   */
+  completeFreshInTx(
+    queryRunner: QueryRunner,
+    ownerId: string,
+    key: string,
+    requestFingerprint: string,
+    transactionId: string,
+    expiresAt: Date,
+  ): Promise<boolean>;
+  /**
    * The soft duplicate-suppression lookup: the most recent OTHER key for the same owner +
    * `request_fingerprint` created after `sinceEpochMs`. Backed by `idx_idem_fingerprint`.
    * `excludeKey` omits the caller's own (not-yet-claimed) key.

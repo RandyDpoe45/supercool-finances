@@ -203,6 +203,13 @@ function makeMocks(): Mocks {
       callLog.push('recordFailedInTx');
       return true;
     }),
+    // P2b: the reducer also OWNS the FRESH terminal FAILED header + `transaction.failed` event for an
+    // EXTERNAL-OUTBOUND initiate-time business failure (sole emitter). The internal initiate branch
+    // must NEVER reach this — the guard below asserts it.
+    recordFreshFailedInTx: jest.fn(async () => {
+      callLog.push('recordFreshFailedInTx');
+      return { id: 'tx-fresh-failed', status: 'FAILED' };
+    }),
   };
 
   const otp = {
@@ -589,6 +596,12 @@ describe('TransfersService.initiateTransfer — confirmation-of-payee gate', () 
     expect(mocks.transactionRepo.insertPendingInTx).toHaveBeenCalledTimes(1);
     expect(statusOf(res.value)).toBe('PENDING');
     expect(idOf(res.value)).toBe('tx-op');
+    // P2b (spec 05 producer side): the FAILED-at-initiate persistence is EXTERNAL-OUTBOUND-only.
+    // An INTERNAL initiate performs no funds/business check (funds are a CONFIRM-time gate), so it
+    // NEVER delegates a terminal FAILED at initiate — guards against a regression that wires the
+    // external fresh-FAILED path (recordFreshFailedInTx) into the internal branch.
+    expect(mocks.posting.recordFreshFailedInTx).not.toHaveBeenCalled();
+    expect(mocks.posting.recordFailedInTx).not.toHaveBeenCalled();
   });
 });
 

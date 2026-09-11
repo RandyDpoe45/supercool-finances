@@ -61,6 +61,31 @@ export class IdempotencyKeyRepository implements IIdempotencyKeyRepository {
       .execute();
   }
 
+  async completeFreshInTx(
+    queryRunner: QueryRunner,
+    ownerId: string,
+    key: string,
+    requestFingerprint: string,
+    transactionId: string,
+    expiresAt: Date,
+  ): Promise<boolean> {
+    // Explicit parameterized INSERT of an already-COMPLETED key (NOT .save()/create, which upserts
+    // on the client-supplied composite PK). The initiate-time fresh-FAILED path left no surviving
+    // claim (the operation tx rolled back), so there is nothing to UPDATE — we INSERT the terminal
+    // key directly, linked to the just-inserted FAILED transaction. `ON CONFLICT DO NOTHING`
+    // BLOCKS on a concurrent UNCOMMITTED same-key row until it resolves; `RETURNING "key"` yields a
+    // row only when this statement actually inserted, so a returned row === we won the completion.
+    const inserted: unknown[] = await queryRunner.manager.query(
+      `INSERT INTO "idempotency_key"
+         ("owner_id", "key", "request_fingerprint", "status", "transaction_id", "expires_at")
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT ("owner_id", "key") DO NOTHING
+       RETURNING "key"`,
+      [ownerId, key, requestFingerprint, IdempotencyStatus.Completed, transactionId, expiresAt],
+    );
+    return inserted.length === 1;
+  }
+
   findRecentByFingerprintInTx(
     queryRunner: QueryRunner,
     ownerId: string,

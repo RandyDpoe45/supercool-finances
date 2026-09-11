@@ -414,16 +414,20 @@ the returned entity reliably carries it without an extra read; for a confirm-tim
 **Reversal is link-only.** A reversal is itself a compensating `transaction.posted` event
 carrying `reversesTransactionId` — there is **no** separate `transaction.reversed` event.
 
-**`transaction.failed` (confirm-time business failure).** When a user transfer is OTP-confirmed
-but the business rejects it under the account lock, the transfer is persisted **PENDING → FAILED**
-and a single `transaction.failed` event is emitted (`status: FAILED`, `failureReason` = the domain
-error's `code`, `postedAt: null`, **empty legs**). **The posting reducer is the SOLE emitter of
-transaction events**, so this FAILED write + event is owned by `IPostingService.recordFailedInTx`
-(the transfers layer delegates to it — it never emits an event itself). The **exported pure builder**
+**`transaction.failed` (business failure — confirm-time OR initiate-time).** When the business
+rejects a well-formed transfer, it is persisted as a terminal **FAILED** transaction and a single
+`transaction.failed` event is emitted (`status: FAILED`, `failureReason` = the domain error's `code`,
+`postedAt: null`, **empty legs**). Two entry points hit this: a confirm-time rejection transitions an
+existing **PENDING → FAILED** (`IPostingService.recordFailedInTx`), and an external-outbound
+**initiate** rejection (funds / frozen / cooling-off, caught before the hold is placed) **INSERTS** a
+fresh FAILED header (`IPostingService.recordFreshFailedInTx`). **The posting reducer is the SOLE
+emitter of transaction events**, so BOTH the FAILED write and the event are owned in the reducer (the
+transfers layer delegates — it never emits an event itself). The **exported pure builder**
 `buildFailedPayload` lives in `service/interfaces/transaction-event.ts` (beside the contract types,
 NOT in posting `impl/` where `buildPostedPayload` is private) so the reducer's several FAILED-emit
 call sites reuse ONE builder — see
-[Confirm-time FAILED persistence](#confirm-time-failed-persistence-business-vs-validation) below.
+[Confirm-time FAILED persistence](#confirm-time-failed-persistence-business-vs-validation) and
+[Initiate-time FAILED persistence](#initiate-time-failed-persistence-external-outbound) below.
 
 The payload types are declared as `type` aliases (not interfaces) so they satisfy the entity's
 `Record<string, unknown>` column without an explicit index signature.
@@ -442,14 +446,14 @@ by `AppModule`** until the transfers surface consumes it (step 4). The module ro
 |---|---|
 | `idempotency.module.ts` | Binds `{ provide: IDEMPOTENCY_SERVICE, useClass: IdempotencyService }`, exports the token; imports `PersistenceModule`. |
 | `service/interfaces/idempotency.service.interface.ts` | `IIdempotencyService` + the `IDEMPOTENCY_SERVICE` token, plus the shared `IdempotencyParams` / `IdempotentOperation` / `IdempotencyOutcome` types (kept here so the interface never imports from `impl/`). |
-| `service/impl/idempotency.service.ts` | `IdempotencyService implements IIdempotencyService` — the `execute(params, operation)` wrapper + its replay/claim flow. |
+| `service/impl/idempotency.service.ts` | `IdempotencyService implements IIdempotencyService` — the `execute(params, operation, onFailure?)` wrapper + its replay/claim flow and the opt-in business-failure branch (`recordFailureOutcome`). |
 | `service/fingerprint.ts` | Pure `computeFingerprint(input)` — `sha256` hex over the canonical business tuple. Lives at the `service/` root so BOTH the interface (for `FingerprintInput`) and the impl import it without an interface→impl edge. |
 | `service/errors.ts` | The domain errors (extend `DomainError`). |
 
 ### The `execute` contract
 
 ```
-execute(params, operation): Promise<{ transactionId: string; replayed: boolean }>
+execute(params, operation, onFailure?): Promise<{ transactionId: string; replayed: boolean }>
 
 params = {
   ownerId: string;
@@ -458,10 +462,22 @@ params = {
   confirmDuplicate?: boolean;           // override a suspected soft-duplicate
 }
 operation = (queryRunner) => Promise<{ transactionId: string }>   // the movement, run IN-TX
+onFailure? = (queryRunner, error) => Promise<string | null>       // OPT-IN business-failure hook
 ```
 
 `replayed` is `true` when a prior completed result was returned (money moved 0 additional
 times) and `false` when the operation ran fresh.
+
+**`onFailure` (optional).** When the operation tx throws, the wrapper — having rolled that tx back
+(the claim released, nothing persisted) — opens a **NEW** tx and offers the error to `onFailure`. A
+BUSINESS failure persists a terminal FAILED transaction (via the posting reducer, the sole emitter)
+and returns its id, so the wrapper **completes the key linked to it** (`completeFreshInTx`) and
+`execute` returns that FAILED outcome instead of throwing; a validation/structural error (or an
+absent `onFailure`) returns `null`, leaving the key released and the original error to propagate.
+This backs the external-outbound **initiate-time** FAILED persistence (a business rejection →
+`201` with `status: FAILED`); every caller that omits `onFailure` is unchanged. Concurrency &
+exactly-once are covered under
+[Initiate-time FAILED persistence](#initiate-time-failed-persistence-external-outbound).
 
 ### One-transaction atomicity model
 
@@ -772,6 +788,59 @@ Anything unlisted (or a raw non-`DomainError` fault) is treated as non-business 
 default persists **only** an explicitly-classified business failure. A **rail-settlement failure**
 is unaffected: that transfer already POSTED, so its FAILURE callback **reverses** it (`POSTED →
 REVERSED`), never a `transaction.failed`.
+
+### Initiate-time FAILED persistence (external-outbound)
+
+The **same taxonomy** now also applies at **initiate-time** for `initiateExternalTransfer`. A
+BUSINESS rejection discovered while placing the hold — **insufficient funds**, a **frozen source**,
+or the **payee still cooling off** — is caught by the reducer/wrapper **before** any money moves and
+persisted as a **FRESH terminal FAILED transaction**, so `POST /api/transfers/external` responds
+**`201` with `status: "FAILED"`** (regenerated by the existing status-agnostic serializer) instead
+of a bare 4xx. A **VALIDATION/STRUCTURAL** failure (bad amount/currency, `PAYEE_NOT_FOUND`, a
+pending-conflict, or any non-`DomainError`) keeps today's behavior: the 4xx propagates, the
+`in_progress` key is **released**, and **nothing** is persisted.
+
+The mechanism differs from the confirm-time path because **no header exists yet** — the funds /
+frozen / cooling-off checks run **before** the `insertPendingInTx` + hold placement, so at
+initiate-fail time there is **no PENDING row and no hold to release** (nothing was reserved). The
+work is split so the reducer stays the **sole emitter**:
+
+- The **cooling-off gate moved INSIDE the operation tx** (judged on the DB clock via
+  `readDbNow(queryRunner)`), so a cooling-off rejection rolls the operation tx back and routes
+  through the failure hook — just like the funds / frozen checks. Payee **load** + `PAYEE_NOT_FOUND`
+  stay **before** `execute` (a validation 404: release the key, persist nothing).
+- `IdempotencyService.execute(params, operation, onFailure?)` gained an **opt-in** third argument,
+  the `IdempotencyFailureRecorder`. When the operation tx throws, the wrapper (having rolled that tx
+  back — the claim released, nothing persisted) opens a **NEW** tx and offers the error to
+  `onFailure`. Every other caller (internal initiate, etc.) omits the hook and is **unchanged**.
+- The transfers `onFailure` closure classifies with `isBusinessFailure`: a business error calls
+  `posting.recordFreshFailedInTx(qr, spec, code, payee)` — the reducer **INSERTS** a fresh
+  `external_outbound` header with `status = FAILED` (`failure_reason = code`, `created_at`/`failed_at`
+  stamped, `posted_at`/`expires_at` null) and emits the **SINGLE** `transaction.failed` outbox row
+  (`buildFailedPayload` → **empty legs**) — returning the FAILED transaction's id; a
+  validation/structural error returns **`null`** (nothing persisted → `execute` rethrows the
+  original 4xx).
+- The wrapper then **completes the key** linked to that FAILED transaction via
+  `IIdempotencyKeyRepository.completeFreshInTx` — an explicit `INSERT (… status='completed',
+  transaction_id …) ON CONFLICT (owner_id, key) DO NOTHING RETURNING "key"` (never `.save()`, which
+  would upsert on the composite PK). A won insert returns the `{ transactionId, replayed: false }`
+  FAILED outcome; `execute` returns it, so the controller regenerates the **201-with-FAILED** reply
+  from the linked transaction (the "every completed key has a `transaction_id`" invariant now holds
+  for an initiate business failure too).
+
+**A prior PENDING is preserved.** Because the operation tx **rolled back**, any expire/supersede of a
+prior pending it attempted is undone — the caller's existing pending is left exactly as it was, and
+the FAILED persistence happens in a fresh tx that touches only the new FAILED header + the key.
+
+**Exactly-once under concurrent same-key initiates.** Two same-key initiates that both business-fail
+race in `recordFailureOutcome`. Each inserts its own orphan FAILED header, then calls
+`completeFreshInTx`; the `ON CONFLICT DO NOTHING` **blocks on the loser** until the winner's tx
+commits, so the loser sees a conflict, throws the internal `FailureRaceResolved` sentinel to **roll
+its orphan FAILED insert back**, and replays the winner's linked transaction (`replayed: true`). The
+result is **exactly one** FAILED transaction and **exactly one** `transaction.failed` event per
+logical failed attempt. (A conflict with no committed COMPLETED row is defensively surfaced as
+`IDEMPOTENCY_IN_PROGRESS`; a genuine deadlock is still retried by `runInTransactionWithRetry` — a
+sentinel throw is not a deadlock, so it rolls back and is translated by the wrapper.)
 
 ### The `postPendingInTx` posting seam
 

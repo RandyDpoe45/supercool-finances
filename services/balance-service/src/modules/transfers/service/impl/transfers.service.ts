@@ -352,14 +352,12 @@ export class TransfersService implements ITransfersService {
 
     // c. The DESTINATION is an ENROLLED payee. A missing OR non-owned payee collapses to the SAME
     //    404 (anti-IDOR / anti-enumeration — never reveal another user's payee). The cooling-off
-    //    gate is judged on the DB CLOCK (never the app clock): `now() < cooling_off_until` → 409.
+    //    gate is a BUSINESS rule judged on the DB CLOCK inside the operation tx (below), so a
+    //    cooling-off rejection routes through the failure branch (persist FAILED + complete the
+    //    key). Payee-not-found stays a VALIDATION 404 here — release the key, persist nothing.
     const payee = await this.externalPayees.findById(payeeId);
     if (!payee || payee.ownerId !== ownerId) {
       throw new PayeeNotFoundError();
-    }
-    const dbNow = await this.readDbNow();
-    if (dbNow.getTime() < payee.coolingOffUntil.getTime()) {
-      throw new PayeeInCoolingOffError();
     }
 
     // d. The counter-leg is the seeded outbound-rail clearing account. Its absence is a system
@@ -391,6 +389,13 @@ export class TransfersService implements ITransfersService {
           confirmDuplicate,
         },
         async (queryRunner) => {
+          // e0. Cooling-off gate (BUSINESS rule), judged on the DB CLOCK inside the operation tx so
+          //     a rejection rolls back and routes through onFailure (persist FAILED + complete key).
+          const dbNow = await this.readDbNow(queryRunner);
+          if (dbNow.getTime() < payee.coolingOffUntil.getTime()) {
+            throw new PayeeInCoolingOffError();
+          }
+
           // e1. Single-active-pending rule spans types: release the prior external pending's hold
           //     BEFORE the flip, then flip the prior (overdue → EXPIRED, else CANCELLED).
           await this.releasePriorExternalPendingHold(queryRunner, ownerId);
@@ -442,10 +447,41 @@ export class TransfersService implements ITransfersService {
           });
           return { transactionId: created.id };
         },
+        // f. Initiate-time business-failure hook. A BUSINESS failure (insufficient funds / frozen
+        //    source / payee still cooling off — all caught BEFORE the hold is placed, so no hold
+        //    exists and the operation tx rolled back) persists a FRESH terminal FAILED
+        //    external_outbound and emits the SINGLE `transaction.failed` — BOTH owned by the reducer
+        //    (the sole event emitter) — so the wrapper completes the key linked to it and `execute`
+        //    returns the FAILED outcome (→ 201 with status FAILED via the status-agnostic
+        //    serializer). No money moved and no hold to release. A VALIDATION/STRUCTURAL error (or
+        //    any non-DomainError) returns null → the key is released and the 4xx propagates,
+        //    persisting nothing.
+        async (queryRunner, error) => {
+          if (!isBusinessFailure(error)) {
+            return null;
+          }
+          const failed = await this.posting.recordFreshFailedInTx(
+            queryRunner,
+            {
+              type: TransactionType.ExternalOutbound,
+              amount,
+              currency,
+              debitAccountId: source.id,
+              creditAccountId: clearing.id,
+              payeeId: payee.id,
+              initiatedBy: ownerId,
+            },
+            error.code,
+            { id: payee.id, displayName: payee.displayName, rail: payee.rail },
+          );
+          return failed.id;
+        },
       );
     } catch (error) {
       // Concurrency backstop: a same-initiator initiate racing another (different keys) collides
-      // on the single-pending index. The idempotent same-key replay never reaches the insert.
+      // on the single-pending index. The idempotent same-key replay never reaches the insert. A
+      // BUSINESS failure no longer reaches here (execute returns the FAILED outcome instead of
+      // throwing); only validation/structural and the pending-conflict do.
       if (isPendingUniqueViolation(error)) {
         throw new PendingTransferConflictError();
       }

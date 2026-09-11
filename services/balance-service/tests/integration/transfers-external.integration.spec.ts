@@ -832,33 +832,80 @@ suite(
     // Gate rejections at INITIATE — frozen source / cooling-off payee / insufficient available
     // =========================================================================================
 
-    it('FROZEN source: initiate external on a frozen source is rejected; NO hold placed, held unchanged, no PENDING txn', async () => {
+    // P2b (spec 05 producer side): a BUSINESS failure at external initiate is no longer a bare 4xx —
+    // the service persists a TERMINAL FAILED external_outbound and RETURNS it (201-FAILED), emitting
+    // exactly one `transaction.failed` event. The money-safety invariants are UNCHANGED (no hold, no
+    // ledger, balances untouched). The full FAILED-persistence contract (key completed+linked, the
+    // enriched event payload, replay, prior-pending) is proven in
+    // tests/integration/initiate-failed-persistence.integration.spec.ts; here we keep the
+    // money-safety subset so this suite stays green against the P2b behavior.
+    it('FROZEN source: initiate external on a frozen source persists a terminal FAILED (P2b) — 201-FAILED (reason ACCOUNT_FROZEN), NO hold placed, held/balance unchanged, no ledger, exactly ONE transaction.failed event', async () => {
       const owner = newOwner();
       const src = await mkCustomer(owner, { balance: 10000, held: 0, status: 'frozen' });
       const payee = await mkPayee(owner);
 
       const res = await capture(initiateExternal(owner, src.id, payee.id, 1000));
-      expect(res.ok).toBe(false);
-      expect(codeOf(res.error)).toBe('ACCOUNT_FROZEN');
+      expect(res.ok).toBe(true); // RETURNED (not thrown) — the initiate-time inversion vs. confirm
+      expect(statusOf(res.value)).toBe('FAILED');
+      const failedId = idOf(res.value);
 
-      expect((await acct(src.id)).held).toBe('0'); // no reservation
+      const [failedRow] = await ds.query(
+        `SELECT status, type, failure_reason FROM "transaction" WHERE id = $1`,
+        [failedId],
+      );
+      expect(failedRow.status).toBe('FAILED');
+      expect(failedRow.type).toBe('external_outbound');
+      expect(failedRow.failure_reason).toBe('ACCOUNT_FROZEN');
+
+      // Money-safety UNCHANGED: no reservation, no ledger, balances untouched.
+      const a = await acct(src.id);
+      expect(a.held).toBe('0');
+      expect(a.balance).toBe('10000');
       expect(await holdsForAccount(src.id)).toHaveLength(0);
-      expect(await anyTxCountFor(owner)).toBe(0); // the money machinery never created a header
+      expect(await legsForTx(failedId)).toHaveLength(0);
+      expect(await sumPlaced(src.id)).toBe(0n);
+      // Exactly ONE outbox row for it, the transaction.failed event (the sole emitter path).
+      const events = await ds.query(
+        `SELECT event_type FROM outbox_event WHERE transaction_id = $1`,
+        [failedId],
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0].event_type).toBe('transaction.failed');
+      expect(await anyTxCountFor(owner)).toBe(1); // only the FAILED row — never a PENDING
     }, 30_000);
 
-    it('COOLING-OFF payee: initiate external to a payee still in cooling-off → PAYEE_IN_COOLING_OFF (409); no hold, no PENDING txn', async () => {
+    it('COOLING-OFF payee: initiate external to a payee still in cooling-off persists a terminal FAILED (P2b) — 201-FAILED (reason PAYEE_IN_COOLING_OFF), no hold, no ledger, balances untouched, exactly ONE transaction.failed event', async () => {
       const owner = newOwner();
       const src = await mkCustomer(owner, { balance: 10000, held: 0 });
       // A payee whose cooling-off window is still in the FUTURE (not yet usable).
       const payee = await mkPayee(owner, { coolingOffUntil: new Date(Date.now() + 3_600_000) });
 
       const res = await capture(initiateExternal(owner, src.id, payee.id, 1000));
-      expect(res.ok).toBe(false);
-      expect(codeOf(res.error)).toBe('PAYEE_IN_COOLING_OFF');
+      expect(res.ok).toBe(true);
+      expect(statusOf(res.value)).toBe('FAILED');
+      const failedId = idOf(res.value);
 
-      expect((await acct(src.id)).held).toBe('0');
+      const [failedRow] = await ds.query(
+        `SELECT status, type, failure_reason FROM "transaction" WHERE id = $1`,
+        [failedId],
+      );
+      expect(failedRow.status).toBe('FAILED');
+      expect(failedRow.type).toBe('external_outbound');
+      expect(failedRow.failure_reason).toBe('PAYEE_IN_COOLING_OFF');
+
+      const a = await acct(src.id);
+      expect(a.held).toBe('0');
+      expect(a.balance).toBe('10000');
       expect(await holdsForAccount(src.id)).toHaveLength(0);
-      expect(await anyTxCountFor(owner)).toBe(0);
+      expect(await legsForTx(failedId)).toHaveLength(0);
+      expect(await sumPlaced(src.id)).toBe(0n);
+      const events = await ds.query(
+        `SELECT event_type FROM outbox_event WHERE transaction_id = $1`,
+        [failedId],
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0].event_type).toBe('transaction.failed');
+      expect(await anyTxCountFor(owner)).toBe(1);
     }, 30_000);
 
     it("NON-OWNED / missing payee: initiate external addressing another user's payee → 404-class (no leak); no hold, no PENDING txn", async () => {
@@ -876,20 +923,37 @@ suite(
       expect(await anyTxCountFor(attacker)).toBe(0);
     }, 30_000);
 
-    it('INSUFFICIENT available: initiate external for more than available (balance − held) → INSUFFICIENT_FUNDS; no hold, held unchanged, no PENDING txn', async () => {
+    it('INSUFFICIENT available: initiate external for more than available (balance − held) persists a terminal FAILED (P2b) — 201-FAILED (reason INSUFFICIENT_FUNDS), NO hold placed, held/balance unchanged, no ledger, exactly ONE transaction.failed event', async () => {
       const owner = newOwner();
       const src = await mkCustomer(owner, { balance: 1000, held: 0 }); // available = 1000
       const payee = await mkPayee(owner);
 
       const res = await capture(initiateExternal(owner, src.id, payee.id, 5000)); // > available
-      expect(res.ok).toBe(false);
-      expect(codeOf(res.error)).toBe('INSUFFICIENT_FUNDS');
+      expect(res.ok).toBe(true);
+      expect(statusOf(res.value)).toBe('FAILED');
+      const failedId = idOf(res.value);
 
-      // No reservation was made — the funds check is the gate BEFORE a hold is placed.
+      const [failedRow] = await ds.query(
+        `SELECT status, type, failure_reason FROM "transaction" WHERE id = $1`,
+        [failedId],
+      );
+      expect(failedRow.status).toBe('FAILED');
+      expect(failedRow.type).toBe('external_outbound');
+      expect(failedRow.failure_reason).toBe('INSUFFICIENT_FUNDS');
+
+      // No reservation was made — the funds check gates BEFORE a hold is placed; nothing moved.
       expect((await acct(src.id)).held).toBe('0');
+      expect((await acct(src.id)).balance).toBe('1000');
       expect(await holdsForAccount(src.id)).toHaveLength(0);
-      expect(await anyTxCountFor(owner)).toBe(0);
+      expect(await legsForTx(failedId)).toHaveLength(0);
       expect(await sumPlaced(src.id)).toBe(0n);
+      const events = await ds.query(
+        `SELECT event_type FROM outbox_event WHERE transaction_id = $1`,
+        [failedId],
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0].event_type).toBe('transaction.failed');
+      expect(await anyTxCountFor(owner)).toBe(1); // only the FAILED row — never a PENDING
     }, 30_000);
 
     // =========================================================================================

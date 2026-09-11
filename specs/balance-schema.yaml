@@ -296,7 +296,7 @@ OutboxEvent:
       description: "FK -> transaction.id. The aggregate this event describes. NOT NULL."
     event_type:
       type: varchar
-      description: "'transaction.posted' | 'transaction.failed'. NOT NULL. Only 'transaction.posted' is emitted today; 'transaction.failed' is reserved for a later FAILED-persistence step. A reversal is link-only — a compensating 'transaction.posted' carrying reverses_transaction_id — NOT a separate 'transaction.reversed' event."
+      description: "'transaction.posted' | 'transaction.failed'. NOT NULL. 'transaction.failed' is emitted for a business failure of a well-formed transfer — at confirm-time (PENDING -> FAILED) and at external-outbound initiate-time (a fresh FAILED header when funds/frozen/cooling-off is caught before the hold is placed); empty legs, status FAILED, failure_reason set. A reversal is link-only — a compensating 'transaction.posted' carrying reverses_transaction_id — NOT a separate 'transaction.reversed' event."
     payload:
       type: jsonb
       description: "The full, self-contained event contract (see DATA-MODEL Part 2). NOT NULL."

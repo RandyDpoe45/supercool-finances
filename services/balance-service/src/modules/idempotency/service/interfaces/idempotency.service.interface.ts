@@ -25,8 +25,24 @@ export interface IdempotencyOutcome {
   replayed: boolean;
 }
 
+/** Optional business-failure hook for {@link IIdempotencyService.execute}. Called (in a FRESH tx,
+ * AFTER the operation tx rolled back) with the operation's error. It must decide business vs
+ * validation: for a BUSINESS failure, persist a terminal FAILED transaction (via the posting
+ * reducer, keeping it the sole emitter) and return its transaction id, to COMPLETE the key linked
+ * to it; for a VALIDATION/STRUCTURAL error (or any non-persistable error) return `null`, leaving
+ * the key RELEASED and the original error to propagate. The wrapper owns the key completion +
+ * concurrency; the recorder owns only building the FAILED transaction. */
+export type IdempotencyFailureRecorder = (
+  queryRunner: QueryRunner,
+  error: unknown,
+) => Promise<string | null>;
+
 /** A generic at-most-once wrapper for money-moving requests with soft duplicate-suppression
  * (spec 04 Transfers), decoupled from posting. */
 export interface IIdempotencyService {
-  execute(params: IdempotencyParams, operation: IdempotentOperation): Promise<IdempotencyOutcome>;
+  execute(
+    params: IdempotencyParams,
+    operation: IdempotentOperation,
+    onFailure?: IdempotencyFailureRecorder,
+  ): Promise<IdempotencyOutcome>;
 }

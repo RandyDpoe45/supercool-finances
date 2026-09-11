@@ -1,7 +1,7 @@
 import { QueryRunner } from 'typeorm';
 import { Transaction } from '../../../../database/entities/transaction.entity';
 import { PostTransactionCommand } from './post-transaction.command';
-import { TransactionEventPayee } from './transaction-event';
+import { FreshFailedTransaction, TransactionEventPayee } from './transaction-event';
 
 /** DI token for {@link IPostingService}. Consumers depend on the interface via this token,
  * never the concrete reducer class. */
@@ -75,4 +75,19 @@ export interface IPostingService {
     reason: string,
     payee?: TransactionEventPayee | null,
   ): Promise<boolean>;
+
+  /**
+   * Record a FRESH terminal FAILED transaction inside the caller's tx and emit the SINGLE
+   * `transaction.failed` event for it — the reducer stays the sole emitter. Inserts a new header
+   * with status FAILED (failure_reason = `reason`, failed_at + created_at stamped, posted_at null,
+   * expires_at null, empty legs), moving NO money. Used by the external-initiate BUSINESS-failure
+   * path (no header exists yet, unlike recordFailedInTx which transitions an existing PENDING one).
+   * Returns the inserted FAILED transaction. MUST run inside the given queryRunner's active tx.
+   */
+  recordFreshFailedInTx(
+    queryRunner: QueryRunner,
+    spec: FreshFailedTransaction,
+    reason: string,
+    payee?: TransactionEventPayee | null,
+  ): Promise<Transaction>;
 }

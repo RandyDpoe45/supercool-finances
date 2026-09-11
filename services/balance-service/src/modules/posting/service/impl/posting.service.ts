@@ -39,6 +39,7 @@ import {
 } from '../errors';
 import {
   buildFailedPayload,
+  FreshFailedTransaction,
   TRANSACTION_FAILED_EVENT,
   TRANSACTION_POSTED_EVENT,
   TransactionEventLeg,
@@ -200,6 +201,42 @@ export class PostingService implements IPostingService {
     }
     await this.emitTransactionFailed(queryRunner, header, reason, payee ?? null);
     return true;
+  }
+
+  async recordFreshFailedInTx(
+    queryRunner: QueryRunner,
+    spec: FreshFailedTransaction,
+    reason: string,
+    payee?: TransactionEventPayee | null,
+  ): Promise<Transaction> {
+    // The initiate-time sibling of recordFailedInTx: no PENDING header exists yet (the business
+    // check — funds / frozen / cooling-off — fires BEFORE the hold is placed and rolled the
+    // operation tx back), so the reducer INSERTS a fresh terminal FAILED header rather than
+    // transitioning one. Presetting `id` guarantees an INSERT (insertInTx is save(create(...))).
+    // Both `created_at` and `failed_at` are stamped from the SAME app-clock instant (mirroring
+    // insertPostedHeader); `posted_at`/`expires_at` stay null — the movement never posted and never
+    // held. Then the reducer emits the SINGLE `transaction.failed` outbox row for it. No money moves.
+    const id = randomUUID();
+    const now = new Date();
+    const header = await this.transactions.insertInTx(queryRunner, {
+      id,
+      type: spec.type,
+      status: TransactionStatus.Failed,
+      amount: spec.amount,
+      currency: spec.currency,
+      debitAccountId: spec.debitAccountId,
+      creditAccountId: spec.creditAccountId,
+      payeeId: spec.payeeId,
+      initiatedBy: spec.initiatedBy,
+      reversesTransactionId: null,
+      failureReason: reason,
+      createdAt: now,
+      failedAt: now,
+      postedAt: null,
+      expiresAt: null,
+    });
+    await this.emitTransactionFailed(queryRunner, header, reason, payee ?? null);
+    return header;
   }
 
   /**

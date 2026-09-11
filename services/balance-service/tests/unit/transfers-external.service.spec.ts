@@ -67,6 +67,10 @@ const CUSTOMER_REPO_TOKEN = tryResolve(() => harness.getCustomerRepositoryToken(
 const REDIS_TOKEN = tryResolve(() => harness.getRedisClientToken());
 const APP_CONFIG_TOKEN = tryResolve(() => harness.getAppConfigToken());
 const de: any = harness.getDomainErrors();
+// P2b taxonomy predicate (the SAME gate the reducer/wrapper use to decide FAILED-vs-propagate).
+// Best-effort so the suite still runs if it is not resolvable; the business-vs-structural
+// assertions fall back to the stable `.code` when the predicate is absent.
+const isBusinessFailure = tryResolve(() => harness.getIsBusinessFailure());
 
 const DS_TOKEN = tryResolve(() => getDataSourceToken());
 
@@ -513,14 +517,30 @@ suite(
       expect(res.ok).toBe(false);
       expect(['PAYEE_NOT_FOUND', 'TRANSFER_NOT_FOUND']).toContain(res.error?.code);
       if (de.PayeeNotFoundError) expect(res.error).toBeInstanceOf(de.PayeeNotFoundError);
-      // The gate is a PRECONDITION: no reservation, no idempotency claim, no ledger post.
+      // The gate is a PRECONDITION: no reservation, no idempotency claim, no ledger post. A payee that
+      // does not resolve cannot back a FAILED external_outbound header (`payee_id` is set on it), so
+      // this is STRUCTURAL — it PROPAGATES a 4xx and persists NOTHING (P2b taxonomy: NOT a business
+      // failure, so NO FAILED row / no `transaction.failed` event / key released, proven end-to-end in
+      // initiate-failed-persistence.integration.spec.ts).
       expect(mocks.idempotency.execute).not.toHaveBeenCalled();
       expect(mocks.posting.postPendingInTx).not.toHaveBeenCalled();
       expect(mocks.posting.postTransaction).not.toHaveBeenCalled();
       expect(mocks.callLog.some((e) => e.target === 'hold')).toBe(false); // no hold placed
+      if (isBusinessFailure) expect(isBusinessFailure(res.error)).toBe(false); // structural, not FAILED
     });
 
-    it('rejects a payee still in COOLING-OFF with 409 PayeeInCoolingOff — idempotency NEVER invoked, no hold, no post', async () => {
+    // P2b (spec 05 producer side): a payee still in cooling-off is a BUSINESS failure at initiate. It
+    // is no longer a bare precondition 4xx — it is routed THROUGH the idempotency claim so a terminal
+    // FAILED external_outbound is persisted, the key is completed+linked, and exactly one
+    // `transaction.failed` event is emitted (the DB-backed proof is in
+    // initiate-failed-persistence.integration.spec.ts). Here — a pure unit with the idempotency
+    // wrapper mocked as a PASSTHROUGH (so it does NOT emulate the wrapper's own FAILED-persistence
+    // branch) — we pin the SERVICE-side, architecture-independent invariants: the money op IS engaged
+    // under the claim (required so the key can complete + link the FAILED — the pre-P2b "precondition,
+    // never invoked" behavior would break exactly-once key completion), the outcome is a BUSINESS
+    // failure (destined for a FAILED row, never a structural bare-4xx and never a silent PENDING), and
+    // NO money moves at initiate (no ledger post, no hold placed).
+    it('COOLING-OFF payee is a BUSINESS failure at initiate (P2b): the money op runs under the idempotency claim, the outcome is business-failed (FAILED, not a structural 4xx nor a silent PENDING), and NO money moves / NO hold placed', async () => {
       const { service, mocks } = await setup();
       // Owned by the caller but its cooling-off window is still in the FUTURE (now() < cooling_off_until).
       mocks.state.payee = {
@@ -532,14 +552,36 @@ suite(
         coolingOffUntil: new Date(Date.now() + 3_600_000),
         status: 'pending',
       };
+      // If the wrapper's FAILED branch were emulated the service would RETURN a FAILED; with the
+      // passthrough mock the business error instead PROPAGATES. The disjunction below accepts either,
+      // so the proof does not couple to WHERE the wrapper persists the FAILED — only that the outcome
+      // is business-failed (never PENDING, never a structural error).
+      mocks.state.findByIdResult = externalPending({
+        status: 'FAILED',
+        failureReason: 'PAYEE_IN_COOLING_OFF',
+        postedAt: null,
+      });
 
       const res = await capture(service.initiateExternalTransfer(initiateParams()));
 
-      expect(res.ok).toBe(false);
-      expect(res.error?.code).toBe('PAYEE_IN_COOLING_OFF');
-      if (de.PayeeInCoolingOffError) expect(res.error).toBeInstanceOf(de.PayeeInCoolingOffError);
-      expect(mocks.idempotency.execute).not.toHaveBeenCalled();
+      // The money op is engaged under the idempotency claim (so the key can complete + link the
+      // FAILED — proof: exactly-once key completion). A pre-P2b "precondition, never invoked" cooling
+      // gate would leave the key uncompletable and fail this.
+      expect(mocks.idempotency.execute).toHaveBeenCalled();
+
+      // The outcome is a BUSINESS failure: either the service returned a FAILED transaction, or it
+      // surfaced a cooling-off error the taxonomy classifies as business (⇒ a FAILED row downstream).
+      // A silent PENDING (cooling-off not enforced) or a STRUCTURAL error (mis-classified) fails here.
+      const classifiedBusiness = isBusinessFailure
+        ? !res.ok && isBusinessFailure(res.error)
+        : !res.ok && res.error?.code === 'PAYEE_IN_COOLING_OFF';
+      const returnedFailed = res.ok && statusOf(res.value) === 'FAILED';
+      expect(returnedFailed || classifiedBusiness).toBe(true);
+      if (!res.ok) expect(res.error?.code).toBe('PAYEE_IN_COOLING_OFF');
+
+      // NO money moves at initiate and NO hold is placed on a cooling-off rejection.
       expect(mocks.posting.postPendingInTx).not.toHaveBeenCalled();
+      expect(mocks.posting.postTransaction).not.toHaveBeenCalled();
       expect(mocks.callLog.some((e) => e.target === 'hold')).toBe(false);
     });
 
