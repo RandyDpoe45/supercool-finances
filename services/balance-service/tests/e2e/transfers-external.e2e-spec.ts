@@ -378,7 +378,7 @@ suite(
       const transferId = idOf(created.body);
 
       const otp = await mintOtp(owner);
-      expect(otp.status).toBe(201);
+      expect(otp.status).toBe(200);
 
       const confirmed = await asUser(owner)
         .post(`/api/transfers/${transferId}/confirm`)
