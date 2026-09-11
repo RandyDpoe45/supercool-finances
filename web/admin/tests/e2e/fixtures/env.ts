@@ -52,3 +52,28 @@ function requireCred(kind: 'username' | 'password', name: string): string {
 /** Admin login (spec-08-seeded Keycloak user carrying the `admin` realm role). */
 export const requireUsername = (): string => requireCred('username', 'E2E_USERNAME');
 export const requirePassword = (): string => requireCred('password', 'E2E_PASSWORD');
+
+/**
+ * SECOND admin login, the maker-checker CHECKER. Four-eyes requires a DIFFERENT admin than the maker
+ * (`E2E_USERNAME`) to approve a reversal — the server 403s (`SELF_APPROVAL_FORBIDDEN`) if the same
+ * identity tries to decide its own proposal — so the reversal e2e drives a second browser context
+ * with these credentials. Same lazy-required / never-defaulted contract as the maker accessors: read
+ * from the environment on first access, throw a clear error if unset. Must be the spec-08-seeded
+ * SECOND admin (`demo-admin-2`, carrying the `admin` realm role), distinct from the maker.
+ */
+function requireCheckerCred(kind: 'username' | 'password', name: string): string {
+  const value = env[name];
+  if (value !== undefined && value !== '') {
+    return value;
+  }
+  throw new Error(
+    `${name} must be set to the spec-08-seeded SECOND Keycloak admin user's ${kind} ` +
+      `(the maker-checker CHECKER: demo-admin-2, distinct from the maker, carrying the ` +
+      `'admin' realm role) when E2E_ENABLED=1`,
+  );
+}
+
+export const requireCheckerUsername = (): string =>
+  requireCheckerCred('username', 'E2E_CHECKER_USERNAME');
+export const requireCheckerPassword = (): string =>
+  requireCheckerCred('password', 'E2E_CHECKER_PASSWORD');

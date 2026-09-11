@@ -67,7 +67,12 @@ working on a clean machine.
   `up --build` is required to (re)align.
 - **Demo dataset** — the shared contract both the seed code and its tests follow:
   - Pinned Keycloak ids: `demo-customer` = `11111111-1111-4111-8111-111111111111`,
-    `demo-admin` = `22222222-2222-4222-8222-222222222222`.
+    `demo-admin` = `22222222-2222-4222-8222-222222222222`,
+    `demo-admin-2` = `33333333-3333-4333-8333-333333333333` (a **second** admin,
+    realm role `admin`) — exists so the maker-checker reversal has a **distinct
+    checker** (four-eyes: checker ≠ maker). It is **admin-only**: admins are not
+    customers, so it carries **no customer/account row** (identity comes from the
+    gateway).
   - **Customer A** (`demo-customer`, the login): `id` = the demo-customer sub above;
     `name` "Demo Customer", `phone` "5510000001", `email` "demo-customer@example.test"
     (matches its realm-export email). One **active MXN customer account**:
@@ -91,8 +96,11 @@ working on a clean machine.
 
 - [ ] Clean-machine `docker compose up --build` reaches all-healthy with no manual
       steps.
-- [ ] A full **transfer-with-OTP** works from the client app; an **admin
-      maker-checker reversal** works from the admin app.
+- [x] A full **transfer-with-OTP** works from the client app; an **admin
+      maker-checker reversal** works from the admin app. (Both halves are proven
+      end-to-end by the full-run harness, `tests/e2e-fullrun/`: the public
+      transfer-with-OTP chain, then the admin reversal of that posted transfer —
+      `demo-admin` proposes, `demo-admin-2` approves.)
 - [ ] Seed data is present and Keycloak logins map to seeded customers.
 - [ ] Re-running up is idempotent (seed doesn't duplicate; migrations no-op).
 - [ ] Only `:8080`, `:8081`, `:8082` are published.
@@ -119,14 +127,18 @@ working on a clean machine.
 > **Update (post-Pass-2).** The admin app has since been completed — A2 accounts/limits
 > (#47), A3 maker-checker reversals (#51), A4 audit view (#52), A5 analytics dashboard
 > (#53) — and the balance-service admin READ surface now exists: `GET /admin/accounts` +
-> `/admin/limits` + `/admin/approvals` (#50) and `GET /admin/audit` (PR #54, pending
-> merge). Accordingly the full-run harness (`tests/e2e-fullrun/`) now runs the admin
-> **read/landing** browser e2e — `login` (PKCE + whoami), `accounts` (accounts + limits
-> reads through the gateway), and `analytics` (the `/analytics/admin` reporting reads) —
-> in addition to the public transfer-with-OTP chain. The DoD item **"admin maker-checker
-> reversal from the admin app"** stays unchecked: proving a reversal (and an audit-trail)
-> end-to-end needs SEEDED data the seed does not create yet (a POSTED transaction to
-> reverse, a pending approval, audit rows), so those browser flows remain future work.
+> `/admin/limits` + `/admin/approvals` (#50) and `GET /admin/audit` (#54). Accordingly the
+> full-run harness (`tests/e2e-fullrun/`) now runs the admin browser e2e — `login` (PKCE +
+> whoami), `accounts` (accounts + limits reads through the gateway), `analytics` (the
+> `/analytics/admin` reporting reads), **`reversals`, and `audit`** — in addition to the
+> public transfer-with-OTP chain. The DoD item **"admin maker-checker reversal from the
+> admin app"** is now **proven end-to-end**: the admin chain runs AFTER the public chain, so
+> the POSTED internal transfer the transfer-with-OTP flow creates (`1000000001 →
+> 1000000002`) is the reversible transaction — **`demo-admin` proposes** the reversal and a
+> **second admin, `demo-admin-2`, approves** it (four-eyes: checker ≠ maker), so the demo
+> transfer is reversed and the reversal's rows are then visible via `GET /admin/audit`. A
+> full run therefore ends with that demo transfer reversed. (`demo-admin-2` is a new
+> admin-only realm user pinned at `33333333-…`, added purely to be the distinct checker.)
 
 ## Open questions
 

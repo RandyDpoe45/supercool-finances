@@ -35,11 +35,13 @@
 # `up --wait` brings them up all-healthy. After the stack is up it asserts the admin SPA is
 # served at :8081, the no-token admin API is a 401 at Kong (authenticated spine wired), a
 # real demo-admin bearer reaches /balance/admin/whoami -> 200 with the `admin` role, and it
-# ENABLES + runs the admin app's login.e2e.ts browser chain (PKCE at :8081). Only :8080
+# ENABLES + runs the admin app's browser chain (PKCE at :8081) — which now ALSO proves the
+# maker-checker REVERSAL (demo-admin proposes -> demo-admin-2 approves -> the public chain's
+# transfer is reversed) and the AUDIT log (the reversal's rows via GET /admin/audit). Only :8080
 # (public-nginx), :8081 (internal-nginx) and :8082 (keycloak) are host-published.
 #
-# ADMIN BROWSER CHAIN (now three read/landing specs). The admin app's Playwright specs run
-# with E2E_ENABLED=1 against the live :8081 origin:
+# ADMIN BROWSER CHAIN (now five specs, run IN ORDER, sequentially). The admin app's Playwright
+# specs run with E2E_ENABLED=1 against the live :8081 origin:
 #   login.e2e.ts     — PKCE login + GET /balance/admin/whoami renders the admin identity.
 #   accounts.e2e.ts  — GET /balance/admin/accounts + /balance/admin/limits read smoke through
 #                      the gateway (both endpoints shipped in PR #50 as role-gated reads; the
@@ -49,12 +51,26 @@
 #                      smoke through the internal gateway's /analytics/admin namespace (the
 #                      analytics-server, spec 05). Reachability + render only — the reports may
 #                      be EMPTY because no transactions are seeded.
+#   reversals.e2e.ts — the admin maker-checker REVERSAL: the MAKER (demo-admin) proposes a
+#                      reversal of the POSTED internal transfer that the public transfer-with-OTP
+#                      chain above already created (1000000001 -> 1000000002), and the CHECKER
+#                      (demo-admin-2, a SECOND admin so the four-eyes checker != maker) approves
+#                      it -> the transfer is reversed. A full run therefore ENDS with that demo
+#                      transfer reversed.
+#   audit.e2e.ts     — an order-INDEPENDENT reachability smoke: GET /admin/audit (#54) returns 200
+#                      with an admin bearer and the /audit screen renders (table OR empty state). It
+#                      does NOT assert reversal rows: Playwright orders spec files ALPHABETICALLY, so
+#                      audit.e2e.ts actually runs BEFORE reversals.e2e.ts. The audit-CONTENT proof
+#                      (the reversal.executed row) lives in reversals.e2e.ts, which creates + asserts
+#                      those rows in-scope — so ordering is never relied upon.
+# The read specs use only the MAKER cred; the reversal spec uses BOTH (maker proposes, checker
+# approves). If only ONE admin is present (no distinct checker), reversals + audit are excluded
+# and SKIPped — never failed.
 #
-# REMAINING GAP (not proven here): the admin maker-checker REVERSAL e2e and the AUDIT e2e are
-# still not run — the reversal + audit flows need SEEDED data the seed does not create (no
-# transactions, no pending approval, no audit rows), and the GET /admin/audit read endpoint
-# shipped as PR #54 but is NOT yet merged to main. Those get e2e coverage once the seed is
-# expanded and #54 lands.
+# Two admins are required for the reversal (four-eyes): the maker is the existing demo-admin, the
+# checker is a SECOND admin, demo-admin-2 (realm role `admin`), added to realm-export.json for
+# exactly this. Both logins are read from realm-export.json (no credential literal in this
+# harness) and assigned deterministically by username sort order (maker = sorts first).
 #
 # Failure policy (the point of the step): a real SERVING or TRANSFER failure FAILs;
 # environmental blockers (no Docker daemon, offline/registry, host ports occupied, DNS for
@@ -106,9 +122,10 @@ INTERNAL_HTTP_PORT=""
 KEYCLOAK_PORT=""
 KC_HOSTNAME=""
 POSTGRES_USER=""; POSTGRES_PASSWORD=""; BALANCE_DB=""
-E2E_USERNAME=""; E2E_PASSWORD=""             # read from realm-export.json (demo-customer)
-E2E_ADMIN_USERNAME=""; E2E_ADMIN_PASSWORD="" # read from realm-export.json (demo-admin)
-ADMIN_TOKEN=""; ADMIN_SUB=""                 # minted demo-admin access token + its sub (black-box whoami slice)
+E2E_USERNAME=""; E2E_PASSWORD=""               # read from realm-export.json (demo-customer)
+E2E_ADMIN_USERNAME=""; E2E_ADMIN_PASSWORD=""   # read from realm-export.json (MAKER admin = demo-admin)
+E2E_CHECKER_USERNAME=""; E2E_CHECKER_PASSWORD="" # read from realm-export.json (CHECKER admin = demo-admin-2; four-eyes reversal)
+ADMIN_TOKEN=""; ADMIN_SUB=""                 # minted demo-admin (maker) access token + its sub (black-box whoami slice)
 PKCE_SCRIPT=""                               # temp path of the scripted PKCE flow
 
 RUNTIME_ENVFILE=""                   # temp copy of .env.example used for every `dc` call
@@ -219,10 +236,18 @@ PY
   [ -n "$E2E_USERNAME" ] && [ -n "$E2E_PASSWORD" ]
 }
 
-# Read the demo-admin login (the user carrying the `admin` realm role) straight from
-# realm-export.json — same source of record as the customer login. Sets
-# E2E_ADMIN_USERNAME / E2E_ADMIN_PASSWORD.
-load_realm_admin_login() {
+# Read the demo-admin logins (users carrying the `admin` realm role) straight from
+# realm-export.json — same source of record as the customer login; no credential literal is
+# duplicated into this harness. The maker-checker REVERSAL needs TWO distinct admins
+# (four-eyes: the checker must differ from the maker), so this loads BOTH and assigns them
+# DETERMINISTICALLY by username sort order (so the assignment never flips between runs):
+#   MAKER   = the admin whose username sorts FIRST -> E2E_ADMIN_USERNAME / E2E_ADMIN_PASSWORD
+#             (this is the existing demo-admin, so the whoami slice + read specs are unchanged).
+#   CHECKER = the next admin                       -> E2E_CHECKER_USERNAME / E2E_CHECKER_PASSWORD
+#             (demo-admin-2). Stays EMPTY when only one admin exists — the caller then SKIPs
+#             the reversal + audit specs (never fails on the checker being absent).
+# Returns 0 once at least the MAKER pair is populated.
+load_realm_admin_logins() {
   [ -n "$PYTHON" ] || return 1
   [ -f "$REALM_EXPORT" ] || return 1
   local out
@@ -230,18 +255,33 @@ load_realm_admin_login() {
 import json, sys
 d = json.load(open(sys.argv[1], encoding='utf-8'))
 role = sys.argv[2]
+admins = []
 for u in d.get('users', []):
     if role in (u.get('realmRoles') or []):
         pw = ''
         for c in (u.get('credentials') or []):
             if c.get('type') == 'password':
                 pw = c.get('value') or ''
-        print(f"{u.get('username','')}\t{pw}")
-        break
+        admins.append((u.get('username', ''), pw))
+# Deterministic maker/checker assignment: sort by username so it never flips.
+admins.sort(key=lambda t: t[0])
+for username, pw in admins:
+    print(f"{username}\t{pw}")
 PY
 )" || return 1
-  E2E_ADMIN_USERNAME="${out%%$'\t'*}"
-  E2E_ADMIN_PASSWORD="${out#*$'\t'}"
+  E2E_ADMIN_USERNAME=""; E2E_ADMIN_PASSWORD=""
+  E2E_CHECKER_USERNAME=""; E2E_CHECKER_PASSWORD=""
+  local line idx=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$idx" in
+      0) E2E_ADMIN_USERNAME="${line%%$'\t'*}";   E2E_ADMIN_PASSWORD="${line#*$'\t'}" ;;
+      1) E2E_CHECKER_USERNAME="${line%%$'\t'*}"; E2E_CHECKER_PASSWORD="${line#*$'\t'}" ;;
+    esac
+    idx=$((idx + 1))
+  done <<EOF
+$out
+EOF
   [ -n "$E2E_ADMIN_USERNAME" ] && [ -n "$E2E_ADMIN_PASSWORD" ]
 }
 
@@ -776,7 +816,10 @@ prepare_playwright_admin() {
 
 # --- The admin-plane DoD spine: ENABLE + run the admin app's browser chain against the live
 # :8081 origin (flip E2E_ENABLED on and feed the demo-admin creds + the :8081 origin — the admin
-# analog of how 8-C enabled the client chain). Three read/landing specs run:
+# analog of how 8-C enabled the client chain). Five specs run sequentially (workers=1 +
+# fullyParallel=false). Playwright orders the spec FILES ALPHABETICALLY (so the actual run order is
+# accounts, analytics, audit, login, reversals — NOT the CLI order); the suite is deliberately
+# order-INDEPENDENT, so this does not matter (see audit.e2e.ts below):
 #   login.e2e.ts     — PKCE at :8081 -> GET /balance/admin/whoami renders the gateway-resolved
 #                      admin identity ("Admin console", role admin).
 #   accounts.e2e.ts  — GET /balance/admin/accounts + /balance/admin/limits read smoke through the
@@ -785,16 +828,39 @@ prepare_playwright_admin() {
 #   analytics.e2e.ts — GET /analytics/admin/reports/{account-summaries,daily-aggregates} read
 #                      smoke through the internal gateway's /analytics/admin namespace (spec 05).
 #                      Reachability + render only; the reports may be EMPTY (no seeded transactions).
-# NOT run yet: the maker-checker REVERSAL e2e and the AUDIT e2e — both need seeded data the seed
-# does not create (no transactions/pending approval/audit rows), and GET /admin/audit (PR #54) is
-# not yet merged to main. A non-zero exit is a REAL serving/auth failure (or a test-code bug) -> FAIL. ---
+#   reversals.e2e.ts — the maker-checker REVERSAL: the MAKER (demo-admin) proposes a reversal of
+#                      the POSTED internal transfer the public transfer-with-OTP chain already
+#                      created (1000000001 -> 1000000002), and the CHECKER (demo-admin-2, != maker,
+#                      four-eyes) approves it -> the transfer is reversed. So a full run ends with
+#                      that demo transfer REVERSED.
+#   audit.e2e.ts     — an order-INDEPENDENT reachability smoke: GET /admin/audit (#54) returns 200
+#                      with an admin bearer + the /audit screen renders (table OR empty state). It
+#                      does NOT assert reversal rows (Playwright runs it BEFORE reversals.e2e.ts
+#                      alphabetically); the audit-CONTENT proof (the reversal.executed row) lives in
+#                      reversals.e2e.ts, which creates + asserts those rows in-scope.
+# The read specs (login/accounts/analytics) use only the MAKER cred; the reversal spec uses BOTH
+# (maker proposes, checker approves). If only ONE admin is found (no distinct checker), the two
+# four-eyes specs are EXCLUDED and SKIPped with a message — never a failure. A non-zero exit is a
+# REAL serving/auth/reversal failure (or a test-code bug) -> FAIL. ---
 run_admin_e2e() {
-  section "Admin read/landing e2e — PKCE at :$INTERNAL_HTTP_PORT -> whoami landing + /accounts + /limits + analytics reporting read smokes (the admin-plane proof)"
-  if ! load_realm_admin_login; then
-    skip "could not read the demo-admin login from realm-export.json — admin e2e skipped"; return
+  section "Admin e2e — PKCE at :$INTERNAL_HTTP_PORT -> whoami + /accounts + /limits + analytics reads, then the maker-checker REVERSAL + AUDIT (the admin-plane proof)"
+  if ! load_realm_admin_logins; then
+    skip "could not read a demo-admin login from realm-export.json — admin e2e skipped"; return
   fi
-  info "e2e env: E2E_ENABLED=1 E2E_BASE_URL=$(internal_base)/ E2E_USERNAME=$E2E_ADMIN_USERNAME E2E_PASSWORD=****"
-  info "specs: login.e2e.ts (PKCE + whoami renders 'Admin console' + admin role), accounts.e2e.ts (GET /balance/admin/accounts + /balance/admin/limits read smoke — non-empty from migration seeds), analytics.e2e.ts (GET /analytics/admin/reports/{account-summaries,daily-aggregates} read smoke — may be empty, no seeded transactions)"
+  # The read/landing specs always run with the MAKER cred (demo-admin) — unchanged behaviour.
+  local specs="tests/e2e/login.e2e.ts tests/e2e/accounts.e2e.ts tests/e2e/analytics.e2e.ts"
+  local reversal_note=""
+  if [ -n "$E2E_CHECKER_USERNAME" ] && [ -n "$E2E_CHECKER_PASSWORD" ]; then
+    # Four-eyes needs a distinct checker: append the reversal + audit specs. Run ORDER is NOT
+    # relied upon (Playwright sorts spec files alphabetically) — reversals.e2e.ts creates + asserts
+    # its own audit rows in-scope, and audit.e2e.ts tolerates an empty log.
+    specs="$specs tests/e2e/reversals.e2e.ts tests/e2e/audit.e2e.ts"
+    reversal_note=", the maker-checker REVERSAL ('$E2E_ADMIN_USERNAME' proposes -> '$E2E_CHECKER_USERNAME' approves -> the public chain's posted 1000000001->1000000002 transfer is reversed), and the AUDIT read (the reversal's rows via GET /admin/audit)"
+  else
+    skip "only ONE admin in realm-export.json — the maker-checker REVERSAL + AUDIT specs need a distinct checker (four-eyes), so reversals.e2e.ts + audit.e2e.ts are excluded; the read/landing specs still run"
+  fi
+  info "e2e env: E2E_ENABLED=1 E2E_BASE_URL=$(internal_base)/ E2E_USERNAME=$E2E_ADMIN_USERNAME (maker) E2E_PASSWORD=**** E2E_CHECKER_USERNAME=${E2E_CHECKER_USERNAME:-<none>} (checker) E2E_CHECKER_PASSWORD=****"
+  info "specs: $specs"
   local rc
   (
     cd "$WEB_ADMIN" && \
@@ -802,13 +868,15 @@ run_admin_e2e() {
     E2E_BASE_URL="$(internal_base)/" \
     E2E_USERNAME="$E2E_ADMIN_USERNAME" \
     E2E_PASSWORD="$E2E_ADMIN_PASSWORD" \
-    npx playwright test tests/e2e/login.e2e.ts tests/e2e/accounts.e2e.ts tests/e2e/analytics.e2e.ts
+    E2E_CHECKER_USERNAME="$E2E_CHECKER_USERNAME" \
+    E2E_CHECKER_PASSWORD="$E2E_CHECKER_PASSWORD" \
+    npx playwright test $specs
   )
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    pass "ADMIN READ/LANDING passed: demo-admin PKCE login at :$INTERNAL_HTTP_PORT -> whoami 200 (admin identity renders on 'Admin console'), the /accounts + /limits reads (200 via /balance/admin, non-empty from migration seeds), and the analytics reporting reads (200 via /analytics/admin/reports) all traverse internal-nginx -> internal-kong -> the services"
+    pass "ADMIN e2e passed: demo-admin PKCE login at :$INTERNAL_HTTP_PORT -> whoami 200 (admin identity renders on 'Admin console'), the /accounts + /limits reads (200 via /balance/admin, non-empty from migration seeds), the analytics reporting reads (200 via /analytics/admin/reports)$reversal_note — all traverse internal-nginx -> internal-kong -> the services"
   else
-    fail "an admin read/landing e2e exited $rc — a real serving/auth failure (or a test-code bug). Re-run verbosely: (cd web/admin && E2E_ENABLED=1 E2E_BASE_URL=$(internal_base)/ E2E_USERNAME=$E2E_ADMIN_USERNAME E2E_PASSWORD=**** npx playwright test tests/e2e/login.e2e.ts tests/e2e/accounts.e2e.ts tests/e2e/analytics.e2e.ts --reporter=list)"
+    fail "an admin e2e exited $rc — a real serving/auth/reversal failure (or a test-code bug). Re-run verbosely: (cd web/admin && E2E_ENABLED=1 E2E_BASE_URL=$(internal_base)/ E2E_USERNAME=$E2E_ADMIN_USERNAME E2E_PASSWORD=**** E2E_CHECKER_USERNAME=$E2E_CHECKER_USERNAME E2E_CHECKER_PASSWORD=**** npx playwright test $specs --reporter=list)"
   fi
 }
 
