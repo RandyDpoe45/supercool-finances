@@ -72,6 +72,18 @@
 #     -> public-kong (unchanged). See infra/nginx-public/nginx.conf + the two
 #     web/*/docs. (The admin SPA + internal edge are a LATER pass — spec 08 scope
 #     note; only :8080 + :8082 are published in this pass.)
+#   - `seed` (spec 08, THIS step): a ONE-SHOT, PROFILE-GATED demo-data tool
+#     (profiles: ["seed"]) — NOT in the default `up` graph; run explicitly with
+#     `docker compose --profile seed up`. Atomic tool under tools/seed (its own
+#     package + image, NO balance-service imports — ADR-16; the balance schema is
+#     duplicated and kept in sync via spec 08). It idempotently upserts the demo
+#     customers + their MXN accounts into the `balance` DB (customers ON CONFLICT
+#     (id), accounts ON CONFLICT (account_number) DO NOTHING). System constants (the
+#     MXN currency row, the two clearing accounts, the global baseline user_limits)
+#     are migration-seeded, NOT here. Reaches Postgres with the SAME discrete creds as
+#     balance-service (DB_* <- POSTGRES_BALANCE_* + POSTGRES_DB; composes its own
+#     connection, no *_URL var). Joins `data` ONLY; depends_on balance-service:
+#     service_healthy (migrations run on boot -> schema present before the seed runs).
 #
 # What arrives in later steps (do NOT add here early):
 #   - Step 3  (spec 04): `balance-service`     — EXTENDED with the money domain
@@ -335,6 +347,45 @@ services:
     networks:
       - app-public
       - app-internal
+      - data
+
+  # Demo-data seed (spec 08, THIS step) — a ONE-SHOT, PROFILE-GATED tool that loads
+  # the demo customers + their MXN accounts into the `balance` DB so the demo has
+  # state. It is NOT in the default `up` graph: it sits behind the `seed` profile and
+  # is run explicitly with `docker compose --profile seed up`. Atomic tool (ADR-16):
+  # its own package + image under tools/seed, NO balance-service imports — the balance
+  # schema is DUPLICATED there and kept in sync via spec 08. System constants (the MXN
+  # currency row, the two clearing accounts, the global baseline user_limits) are
+  # seeded by boot MIGRATIONS, NOT here; the seed never touches them. Idempotent:
+  # customers `ON CONFLICT (id)`, accounts `ON CONFLICT (account_number) DO NOTHING` —
+  # a re-run changes nothing. Reaches Postgres with the SAME discrete creds as
+  # balance-service (DB_* mapped from POSTGRES_BALANCE_* + POSTGRES_DB; composes its
+  # own connection internally, no *_URL var). Joins `data` ONLY. depends_on
+  # balance-service: service_healthy — balance-service runs the migrations on boot, so
+  # its health guarantees the schema (tables + migration-seeded system constants)
+  # exists before the seed writes. See tools/seed/docs/README.md.
+  seed:
+    build: ./tools/seed
+    # Profile-gated: excluded from the default `up` graph; run with --profile seed.
+    profiles: ["seed"]
+    # One-shot: it runs to completion and exits; never restarted.
+    restart: "no"
+    environment:
+      # Same discrete-cred wiring as balance-service: the balance app role -> the
+      # `balance` DB. The tool composes its own connection from these (no *_URL var).
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_BALANCE_USER}
+      DB_PASSWORD: ${POSTGRES_BALANCE_PASSWORD}
+    depends_on:
+      # balance-service runs TypeORM migrations on boot, so its healthy state
+      # guarantees the schema + migration-seeded system constants are present before
+      # the seed writes the demo customers/accounts.
+      balance-service:
+        condition: service_healthy
+    networks:
+      # Reaches Postgres over `data` ONLY; no edge/app network membership.
       - data
 
   # Analytics server — NestJS foundation skeleton (spec 03); the stream consumer +

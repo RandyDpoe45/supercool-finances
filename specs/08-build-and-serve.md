@@ -45,14 +45,39 @@ working on a clean machine.
 
 ## Seed data
 
+- **System constants are seeded by boot MIGRATIONS, not by this step** — the MXN
+  `currency` row, the two **clearing (system) accounts** (`clearing:rail-outbound`,
+  `clearing:rail-inbound`), and the **global baseline `user_limits`** row. The seed
+  must NOT duplicate or touch these.
 - After migrations, an **idempotent seed step** — a one-shot service under a compose
   **`seed` profile** (developer ruling), run explicitly (`docker compose --profile
   seed up`) so the default `up` graph carries no always-declared seed container —
-  loads customers, accounts, default limits, and the two **clearing (system)
-  accounts** (`clearing:rail-outbound`, `clearing:rail-inbound`) into the `balance`
-  DB so the demo has state.
-- Keycloak users/roles come from `realm-export.json` (spec 02); the seeded app
-  customers must line up with the seeded Keycloak `sub`s.
+  loads the **demo customers and their accounts** into the `balance` DB so the demo
+  has state. It is an atomic tool in `tools/seed/` (its own package + Dockerfile, no
+  balance-service imports per ADR-16 — the schema is duplicated and kept in sync via
+  this spec), reaching Postgres with the same discrete creds as the service. Upserts
+  are idempotent: customers `ON CONFLICT (id) DO NOTHING`, accounts
+  `ON CONFLICT (account_number) DO NOTHING` (a re-run changes nothing). Per-customer
+  limit overrides are an admin concern (`PUT /limits`) and are NOT seeded.
+- **Sub alignment (developer ruling).** `customer.id` IS the Keycloak `sub` and
+  `account.owner_id` FKs to it, so the demo users carry a **pinned `id`** in
+  `realm-export.json` (spec 02) to make the `sub` deterministic, and the seed inserts
+  the customer row with that SAME id. Realm import is first-boot only, so a clean
+  `up --build` is required to (re)align.
+- **Demo dataset** — the shared contract both the seed code and its tests follow:
+  - Pinned Keycloak ids: `demo-customer` = `11111111-1111-4111-8111-111111111111`,
+    `demo-admin` = `22222222-2222-4222-8222-222222222222`.
+  - **Customer A** (`demo-customer`, the login): `id` = the demo-customer sub above;
+    `name` "Demo Customer", `phone` "5510000001", `email` "demo-customer@example.test"
+    (matches its realm-export email). One **active MXN customer account**:
+    `account_number` `1000000001`, `balance` `100000000` (1,000,000.00 MXN), `held` 0,
+    spend counters 0, `spent_today_date`/`spent_month_date` = `CURRENT_DATE`.
+  - **Customer B** (transfer destination, NO Keycloak login): synthetic `id`
+    `b0000000-0000-4000-8000-000000000002`; `name` "Maria Gonzalez", `phone`
+    "5520000002", `email` "maria.gonzalez@example.test". One active MXN customer
+    account: `account_number` `1000000002`, `balance` `50000000` (500,000.00 MXN),
+    same counter defaults. Exists so the demo has a confirmation-of-payee target for
+    the transfer-with-OTP flow.
 
 ## Full run
 
