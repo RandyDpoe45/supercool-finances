@@ -5,8 +5,8 @@ import { Link } from 'react-router-dom';
 /**
  * The authenticated admin frame: a header (title + primary nav + sign-out) wrapping the
  * routed content. Navigation uses router `<Link>`s (the app is root-served). Nav covers Home,
- * account management (Accounts), Limits, and the Analytics placeholder; reversal / audit links are
- * added as those screens land.
+ * account management (Accounts), Limits, maker-checker Reversals, and the Analytics placeholder;
+ * the audit link is added as that screen lands.
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const auth = useAuth();
@@ -19,6 +19,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Link to="/">Home</Link>
           <Link to="/accounts">Accounts</Link>
           <Link to="/limits">Limits</Link>
+          <Link to="/reversals">Reversals</Link>
           <Link to="/analytics">Analytics</Link>
         </nav>
         <span className="app-header__identity"> — signed in as {subject} </span>

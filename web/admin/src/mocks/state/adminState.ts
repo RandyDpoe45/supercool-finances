@@ -1,13 +1,20 @@
 import type { AdminAccountDto } from '../../services/api/contracts/account';
+import type { ApprovalRequestDto } from '../../services/api/contracts/approval';
 import type { LimitsDto, UpsertLimitsBody } from '../../services/api/contracts/limits';
+import type { AdminTransactionDto } from '../../services/api/contracts/transaction';
 import { fixtureAccounts } from '../fixtures/accounts';
+import { fixtureApprovals } from '../fixtures/approvals';
 import { fixtureLimits } from '../fixtures/limits';
+import { fixtureTransactions } from '../fixtures/transactions';
 
 /**
  * In-memory admin state for the MSW stub, mirroring the balance-service admin surface closely enough
- * to exercise the account-management + limits screens WITHOUT a backend: account freeze/unfreeze
- * (status flips + `updatedAt` bump), owner-filtered + paged account listing (limit clamped ≤200,
- * default 50), and limits upsert keyed by (scope, ownerId, currency).
+ * to exercise the account-management, limits, and maker-checker reversal screens WITHOUT a backend:
+ * account freeze/unfreeze (status flips + `updatedAt` bump), owner-filtered + paged account listing
+ * (limit clamped ≤200, default 50), limits upsert keyed by (scope, ownerId, currency), transaction
+ * listing (filtered + paged), and the reversal maker-checker flow (propose → approve/reject) with the
+ * SAME domain guards the real service enforces: reversibility (POSTED && internal|external_inbound),
+ * four-eyes (checker ≠ maker), and the propose-time duplicate guard.
  *
  * State lives at MODULE scope (the browser worker and the node test server each get their own
  * instance) and therefore SURVIVES `server.resetHandlers()` — so a test that mutated it must call
@@ -24,12 +31,16 @@ const MAX_LIMIT = 200;
 interface AdminState {
   accounts: AdminAccountDto[];
   limits: LimitsDto[];
+  transactions: AdminTransactionDto[];
+  approvals: ApprovalRequestDto[];
 }
 
 function seed(): AdminState {
   return {
     accounts: fixtureAccounts.map((account) => ({ ...account })),
     limits: fixtureLimits.map((row) => ({ ...row })),
+    transactions: fixtureTransactions.map((tx) => ({ ...tx })),
+    approvals: fixtureApprovals.map((approval) => ({ ...approval })),
   };
 }
 
@@ -142,4 +153,208 @@ function clamp(value: number, min: number, max: number): number {
     return min;
   }
   return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+// --- Maker-checker reversals -------------------------------------------------------------------
+
+/** The domain error codes the reversal flow can surface; the handler maps each to an HTTP status. */
+export type ReversalDomainCode =
+  | 'TRANSFER_NOT_FOUND'
+  | 'TRANSACTION_NOT_REVERSIBLE'
+  | 'REVERSAL_ALREADY_REQUESTED'
+  | 'APPROVAL_NOT_FOUND'
+  | 'APPROVAL_NOT_PENDING'
+  | 'SELF_APPROVAL_FORBIDDEN';
+
+/** A discriminated result: either the produced value, or a domain code the handler maps to a status.
+ * Keeps the stub's business decisions here and the HTTP mapping in `handlers.ts`. */
+export type DomainResult<T> = { ok: true; value: T } | { ok: false; code: ReversalDomainCode };
+
+/** Reversibility, mirroring the balance-service rule VERBATIM: a POSTED `internal` transfer or a
+ * POSTED `external_inbound` credit. `external_outbound` and any non-POSTED state are NOT reversible. */
+function isReversibleTransaction(tx: AdminTransactionDto): boolean {
+  return tx.status === 'POSTED' && (tx.type === 'internal' || tx.type === 'external_inbound');
+}
+
+/**
+ * The admin-visible transactions, filtered by any present param, then paged (same clamp as
+ * {@link listAccounts}: default 50, max 200, offset ≥0). `status` / `type` / `accountId` map cleanly
+ * (accountId matches EITHER leg). `ownerId` is a BEST-EFFORT stub filter matched against
+ * `initiatedBy` — the `AdminTransactionDto` carries no `ownerId` field (the real service resolves
+ * ownership through the account legs, which the stub does not model), so this only finds transactions
+ * a given owner initiated, not every transaction touching their accounts. Copies are returned.
+ */
+export function listTransactions(params: {
+  ownerId?: string;
+  accountId?: string;
+  status?: string;
+  type?: string;
+  limit?: number;
+  offset?: number;
+}): AdminTransactionDto[] {
+  const filtered = state.transactions.filter((tx) => {
+    if (params.ownerId && tx.initiatedBy !== params.ownerId) {
+      return false;
+    }
+    if (
+      params.accountId &&
+      tx.debitAccountId !== params.accountId &&
+      tx.creditAccountId !== params.accountId
+    ) {
+      return false;
+    }
+    if (params.status && tx.status !== params.status) {
+      return false;
+    }
+    if (params.type && tx.type !== params.type) {
+      return false;
+    }
+    return true;
+  });
+  const limit = clamp(
+    Number.isFinite(params.limit) ? (params.limit as number) : DEFAULT_LIMIT,
+    1,
+    MAX_LIMIT,
+  );
+  const offset =
+    Number.isFinite(params.offset) && (params.offset ?? 0) > 0 ? (params.offset as number) : 0;
+  return filtered.slice(offset, offset + limit).map((tx) => ({ ...tx }));
+}
+
+/** Approval requests filtered by `status` — DEFAULTS to `PENDING` (the checker's queue), matching the
+ * service. Copies are returned. */
+export function listApprovals(params: { status?: string }): ApprovalRequestDto[] {
+  const status = params.status ?? 'PENDING';
+  return state.approvals
+    .filter((approval) => approval.status === status)
+    .map((row) => ({ ...row }));
+}
+
+/**
+ * Propose a reversal (the MAKER action). Mirrors the service's order of checks: unknown target →
+ * `TRANSFER_NOT_FOUND`; not reversible → `TRANSACTION_NOT_REVERSIBLE`; an existing PENDING or EXECUTED
+ * approval for the SAME target → `REVERSAL_ALREADY_REQUESTED` (the propose-time duplicate guard); else
+ * push a new PENDING approval and return it. `checkerId` / `decidedAt` / `executedAt` are null while
+ * PENDING; `reason` is not surfaced on the DTO (the service keeps it on an internal payload).
+ */
+export function proposeReversal(
+  makerId: string,
+  transactionId: string,
+  // The reason is validated + carried at the handler edge (matching the real wire contract) but not
+  // modeled in stub state — the service records it on an internal payload the DTO never surfaces. The
+  // `_` prefix marks it intentionally unused (TS `noUnusedParameters`); the disable is for ESLint.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _reason?: string,
+): DomainResult<ApprovalRequestDto> {
+  const target = state.transactions.find((tx) => tx.id === transactionId);
+  if (!target) {
+    return { ok: false, code: 'TRANSFER_NOT_FOUND' };
+  }
+  if (!isReversibleTransaction(target)) {
+    return { ok: false, code: 'TRANSACTION_NOT_REVERSIBLE' };
+  }
+  const hasBlockingApproval = state.approvals.some(
+    (approval) =>
+      approval.targetTransactionId === transactionId &&
+      (approval.status === 'PENDING' || approval.status === 'EXECUTED'),
+  );
+  if (hasBlockingApproval) {
+    return { ok: false, code: 'REVERSAL_ALREADY_REQUESTED' };
+  }
+  const approval: ApprovalRequestDto = {
+    id: crypto.randomUUID(),
+    actionType: 'reversal',
+    status: 'PENDING',
+    makerId,
+    checkerId: null,
+    targetTransactionId: transactionId,
+    createdAt: new Date().toISOString(),
+    decidedAt: null,
+    executedAt: null,
+  };
+  state.approvals.push(approval);
+  return { ok: true, value: { ...approval } };
+}
+
+/**
+ * Approve a PENDING reversal (the CHECKER action) — EXECUTES it. Mirrors the service: unknown id →
+ * `APPROVAL_NOT_FOUND`; not PENDING → `APPROVAL_NOT_PENDING`; `checkerId === makerId` (four-eyes) →
+ * `SELF_APPROVAL_FORBIDDEN`. On success the approval transitions to EXECUTED, the target transaction
+ * flips POSTED → REVERSED (`failureReason: 'admin_reversal'`), and a balanced COMPENSATING transaction
+ * is pushed (mirrored legs, `reversesTransactionId` → the target, initiated by the checker). Returns
+ * the EXECUTED approval.
+ */
+export function approveReversal(
+  checkerId: string,
+  approvalId: string,
+): DomainResult<ApprovalRequestDto> {
+  const approval = state.approvals.find((row) => row.id === approvalId);
+  if (!approval) {
+    return { ok: false, code: 'APPROVAL_NOT_FOUND' };
+  }
+  if (approval.status !== 'PENDING') {
+    return { ok: false, code: 'APPROVAL_NOT_PENDING' };
+  }
+  if (checkerId === approval.makerId) {
+    return { ok: false, code: 'SELF_APPROVAL_FORBIDDEN' };
+  }
+  const now = new Date().toISOString();
+  approval.status = 'EXECUTED';
+  approval.checkerId = checkerId;
+  approval.decidedAt = now;
+  approval.executedAt = now;
+
+  // Flip the target POSTED → REVERSED and push the balanced compensating post (only when the target
+  // is still POSTED — the guarded transition the real service relies on).
+  const target = state.transactions.find((tx) => tx.id === approval.targetTransactionId);
+  if (target && target.status === 'POSTED') {
+    target.status = 'REVERSED';
+    target.failureReason = 'admin_reversal';
+    const compensating: AdminTransactionDto = {
+      id: crypto.randomUUID(),
+      type: target.type,
+      status: 'POSTED',
+      amount: target.amount,
+      currency: target.currency,
+      // Mirrored legs: debit the original credit account, credit the original debit account.
+      debitAccountId: target.creditAccountId,
+      creditAccountId: target.debitAccountId,
+      payeeId: null,
+      reversesTransactionId: target.id,
+      initiatedBy: checkerId,
+      failureReason: null,
+      createdAt: now,
+      postedAt: now,
+      failedAt: null,
+      expiresAt: null,
+    };
+    state.transactions.push(compensating);
+  }
+  return { ok: true, value: { ...approval } };
+}
+
+/**
+ * Reject a PENDING reversal (the CHECKER action) — moves no money. Mirrors the service: unknown id →
+ * `APPROVAL_NOT_FOUND`; not PENDING → `APPROVAL_NOT_PENDING`; four-eyes → `SELF_APPROVAL_FORBIDDEN`.
+ * On success the approval transitions to REJECTED (`checkerId` + `decidedAt` set, `executedAt` stays
+ * null). Returns the REJECTED approval.
+ */
+export function rejectReversal(
+  checkerId: string,
+  approvalId: string,
+): DomainResult<ApprovalRequestDto> {
+  const approval = state.approvals.find((row) => row.id === approvalId);
+  if (!approval) {
+    return { ok: false, code: 'APPROVAL_NOT_FOUND' };
+  }
+  if (approval.status !== 'PENDING') {
+    return { ok: false, code: 'APPROVAL_NOT_PENDING' };
+  }
+  if (checkerId === approval.makerId) {
+    return { ok: false, code: 'SELF_APPROVAL_FORBIDDEN' };
+  }
+  approval.status = 'REJECTED';
+  approval.checkerId = checkerId;
+  approval.decidedAt = new Date().toISOString();
+  return { ok: true, value: { ...approval } };
 }
