@@ -253,6 +253,9 @@ export class RailsService implements IRailsService {
         ],
         initiatedBy: RAIL_ACTOR,
         reversesTransactionId: transactionId,
+        // No payee snapshot on a reversal — the emitted compensating event links to the original
+        // via reversesTransactionId (payee is external_outbound-forward only).
+        payee: null,
       };
       await this.posting.postFreshInTx(queryRunner, command);
 
@@ -317,6 +320,8 @@ export class RailsService implements IRailsService {
             { accountId: destination.id, delta: amount },
           ],
           initiatedBy: RAIL_ACTOR,
+          // Inbound credit has no external payee (the customer is the CREDIT leg).
+          payee: null,
         };
         const posted = await this.posting.postFreshInTx(queryRunner, command);
         return { transactionId: posted.id };

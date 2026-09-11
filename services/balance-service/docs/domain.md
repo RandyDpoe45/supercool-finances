@@ -352,27 +352,68 @@ branch that maps each domain `code` to its status via the single
 `ACCOUNT_FROZEN` → 409, `ACCOUNT_NOT_FOUND` → 404, `INVALID_POSTING_COMMAND` → 400), and returns
 the domain `code` itself as the response `code`.
 
-### Outbox payload (provisional transaction-event contract)
+### Outbox payload (the enriched transaction-event contract)
 
 `service/interfaces/transaction-event.ts` holds the **balance-service's own copy** of the
-transaction-event shape (per ADR-16 — the analytics server keeps an independent copy; the **spec** is the
-contract of record that keeps them in sync). It is **provisional** for this step; the relay
-and consumer steps may refine it, tracked via the spec. `event_type` is
-`transaction.posted`; the `jsonb` `payload` is:
+transaction-event shape (per ADR-16 — the analytics server keeps an independent copy; the
+**spec** [`specs/DATA-MODEL.md` Part 2](../../../specs/DATA-MODEL.md) is the contract of record
+that keeps them in sync). It is the **full read-model event**: analytics owns Mongo and may
+**not** join back to Postgres (ADR-11), so the event is **self-contained** — it carries every
+owner id, account attribute, and timestamp a per-customer / per-account rollup needs.
+
+Wire conventions: **camelCase** field names (matching this producer and the analytics stored
+doc); money (`amount`, leg `delta` / `balanceAfter`) is **`bigint` minor units carried as a
+`string`** — never a JS `number`, so a value past 2^53 survives verbatim. `event_id` (the
+`OutboxEvent.id`, the consumer's dedup key) and `event_type` are **stream fields** the relay
+emits alongside the payload — they are **not** inside it. The `jsonb` `payload` is:
 
 ```
 TransactionPostedPayload {
-  txId: string;
-  type: TransactionType;
-  currency: string;
-  amount: string;                 // positive magnitude, minor units
-  legs: { accountId: string; delta: string; balanceAfter: string }[];
-  occurredAt: string;             // ISO-8601 UTC
+  schemaVersion: 1;
+  occurredAt: string;                 // ISO-8601 UTC
+  transaction: {
+    id: string;
+    type: TransactionType;            // internal | external_outbound | external_inbound
+    status: TransactionStatus;        // POSTED for this event
+    amount: string;                   // positive magnitude, minor units (int64 string)
+    currency: string;
+    initiatedBy: string;
+    reversesTransactionId: string | null;   // set on a reversal's compensating post
+    payee: { id: string; displayName: string; rail: string } | null;  // external_outbound only
+    createdAt: string;                // ISO-8601 UTC
+    postedAt: string | null;          // ISO-8601 UTC (non-null for a POSTED movement)
+  };
+  legs: {
+    accountId: string;
+    ownerId: string | null;           // customer sub; null for system/clearing
+    accountKind: 'customer' | 'system';
+    systemKey: string | null;         // e.g. 'clearing:rail-outbound'; null for customer
+    delta: string;                    // signed minor units (int64 string)
+    balanceAfter: string;             // resulting balance (int64 string)
+    currency: string;
+  }[];                                // SUM(delta) == 0 (double-entry preserved)
 }
 ```
 
-The payload types are declared as `type` aliases (not interfaces) so they satisfy the
-entity's `Record<string, unknown>` column without an explicit index signature.
+**Where each field comes from (no extra DB read — all in hand at post time):** the header
+`Transaction` entity supplies `id` / `type` / `status` / `amount` / `currency` / `initiatedBy`
+/ `reversesTransactionId` / `createdAt` / `postedAt`; each leg's `ownerId` / `accountKind` /
+`systemKey` / `currency` come from the **locked `Account`** already read under the `FOR UPDATE`
+lock for the fold; the `payee` snapshot is copied verbatim from `command.payee` — the reducer
+never reaches into a payee repository (layering). For a fresh POSTED header
+(`insertPostedHeader`), `createdAt` is stamped from the same app-clock instant as `postedAt`, so
+the returned entity reliably carries it without an extra read; for a confirm-time
+`PENDING → POSTED` transition the re-read header carries the DB-clock `created_at` (initiate) and
+`posted_at` (confirm).
+
+**Reversal is link-only.** A reversal is itself a compensating `transaction.posted` event
+carrying `reversesTransactionId` — there is **no** separate `transaction.reversed` event.
+**FAILED** persistence and a `transaction.failed` event are a **subsequent step**; the
+`event_type` union reserves `transaction.failed` for forward-compat, but only
+`transaction.posted` is emitted here.
+
+The payload types are declared as `type` aliases (not interfaces) so they satisfy the entity's
+`Record<string, unknown>` column without an explicit index signature.
 
 ## Idempotency & soft-duplicate (step 3)
 
@@ -1568,7 +1609,7 @@ three fields:
 |---|---|
 | `event_id` | `OutboxEvent.id` — the consumer's **dedup key** (at-least-once ⇒ duplicates possible). |
 | `event_type` | `OutboxEvent.eventType` (e.g. `transaction.posted`). |
-| `payload` | `JSON.stringify(OutboxEvent.payload)` — the reducer's JSON ([the provisional transaction-event payload](#outbox-payload-provisional-transaction-event-contract)); stringified because `payload` is a `jsonb` object and stream fields are strings. |
+| `payload` | `JSON.stringify(OutboxEvent.payload)` — the reducer's JSON ([the enriched transaction-event payload](#outbox-payload-the-enriched-transaction-event-contract)); stringified because `payload` is a `jsonb` object and stream fields are strings. |
 
 ### The background loop (self-rescheduling, non-overlapping)
 
@@ -1896,13 +1937,15 @@ the table). A missing/unknown reversal **target** reuses the transfers-owned `Tr
 (`TRANSFER_NOT_FOUND`, 404) — the same "transaction not found" semantics, no new code (anti-IDOR is
 moot on the role-gated admin surface).
 
-### Deferred analytics advisory (unchanged from 5c)
+### Analytics advisory — RESOLVED by the event-enrichment step
 
-The compensating post's outbox payload (`TransactionPostedPayload`) still **omits**
-`reverses_transaction_id` — the analytics consumer sees a fresh balanced movement but not the link
-to the original. This is the same deferred advisory noted for the [step-5c](#step-5c--external-rail-webhooks)
-rail-failure reversal, tracked via the spec (the contract of record); it does not affect balance-side
-correctness (the DB `transaction.reverses_transaction_id` FK is authoritative).
+The earlier 5c/8b advisory (the compensating post's outbox payload omitted the reversal link, so
+the analytics consumer saw a fresh balanced movement but not the link to the original) is now
+**resolved**: the [enriched `TransactionPostedPayload`](#outbox-payload-the-enriched-transaction-event-contract)
+carries `transaction.reversesTransactionId`, so a reversal is a self-describing, **link-only**
+compensating `transaction.posted` event (no separate `transaction.reversed`). This applies to
+BOTH reversal paths — the 5c rail-failure reversal and the 8b maker-checker reversal — since both
+post through the same reducer with `reversesTransactionId` set on the command.
 
 ## Not in this slice (later)
 

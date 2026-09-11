@@ -1,4 +1,5 @@
 import { TransactionType } from '../../../../database/entities/enums';
+import { TransactionEventPayee } from './transaction-event';
 
 /**
  * One signed leg of a balancing post: a delta applied to a single account. `delta` is a
@@ -24,6 +25,12 @@ export interface PostingLeg {
  *   admin/service identity).
  * - `payeeId` / `reversesTransactionId` are optional links (external payee, the transaction
  *   this one reverses); null when not applicable.
+ * - `payee` is an OPTIONAL external-payee SNAPSHOT (id + display name + rail) copied verbatim
+ *   onto the emitted transaction event so the analytics read model never joins back to
+ *   `external_payee` (ADR-11). Set ONLY on the `external_outbound` confirm/settle path (whose
+ *   caller already holds the payee entity); `null`/absent for internal transfers, inbound
+ *   credits, and reversals. The reducer copies `payee ?? null` straight onto the event — it
+ *   never itself reaches into a payee repository (that would break layering).
  * - `limitAccountId` opts this movement into limit enforcement — see the field doc.
  */
 export interface PostTransactionCommand {
@@ -33,6 +40,7 @@ export interface PostTransactionCommand {
   legs: PostingLeg[];
   initiatedBy: string;
   payeeId?: string | null;
+  payee?: TransactionEventPayee | null;
   reversesTransactionId?: string | null;
   /**
    * When set, the id of the CUSTOMER debit leg whose fixed-window spend this movement counts

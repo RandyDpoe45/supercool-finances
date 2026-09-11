@@ -229,6 +229,9 @@ export class ApprovalService implements IApprovalService {
         initiatedBy: actorId,
         reversesTransactionId: targetTransactionId,
         forced: true,
+        // No payee snapshot on a reversal — the emitted compensating event links to the original
+        // via reversesTransactionId (payee is external_outbound-forward only).
+        payee: null,
       };
       const compensating = await this.posting.postFreshInTx(queryRunner, command);
 
