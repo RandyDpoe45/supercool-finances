@@ -3,7 +3,7 @@ import { useAuth } from 'react-oidc-context';
 
 /**
  * The authenticated app frame: a minimal header (identity + sign-out) wrapping the
- * routed content. Real navigation and styling arrive with the O2 pending-feed UI.
+ * routed content.
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const auth = useAuth();

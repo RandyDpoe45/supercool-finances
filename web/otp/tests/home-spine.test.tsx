@@ -1,21 +1,24 @@
 import { configureStore } from '@reduxjs/toolkit';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { User } from 'oidc-client-ts';
 import { Provider } from 'react-redux';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { resetMockState, setMockPending } from '../src/mocks/state';
 import { server } from '../src/mocks/node';
+import type { PendingAuthorizationDto } from '../src/services/api/contracts/pending-authorization';
 
 /**
- * End-to-end spine (otp docs "Data spine"): a signed-in user's live token flows through
- * the RTK Query bearer to `GET /api/pending-authorization` (live MSW) and the home view
- * renders the presence/absence indicator. This exercises the REAL component + store +
- * base query + UserManager together, so it fails if the bearer is not attached, the
- * `{ authorization }` envelope is not unwrapped, or the indicator logic is wrong.
+ * End-to-end spine: a signed-in user's live token flows through the RTK Query bearer to
+ * `GET /api/pending-authorization` (live MSW) and the REAL HomePage renders the pending card
+ * (composed of the real feed + reveal panel), then re-fetches on demand. This exercises the
+ * real component + store + base query + UserManager together, so it fails if the bearer is not
+ * attached, the `{ authorization }` envelope is not unwrapped, the money/datetime helpers are
+ * not applied, or the empty/refetch behaviour is wrong.
  *
- * Harness note: `VITE_API_BASE_URL` is stubbed to the absolute jsdom origin before the
- * app modules load — see base-api-bearer.test.ts for why (Node cannot fetch a relative
- * base). This is a test accommodation, not a production change.
+ * Harness note: `VITE_API_BASE_URL` is stubbed to the absolute jsdom origin before the app
+ * modules load — see base-api-bearer.test.ts for why (Node cannot fetch a relative base). This
+ * is a test accommodation, not a production change.
  */
 
 const API_ORIGIN = window.location.origin;
@@ -23,6 +26,21 @@ const API_ORIGIN = window.location.origin;
 let baseApiMod: typeof import('../src/services/api/baseApi');
 let homePageMod: typeof import('../src/components/pages/HomePage');
 let userManagerMod: typeof import('../src/auth/userManager');
+
+// A controlled internal pending: fixed createdAt (so the Mexico City conversion is
+// deterministic) + a future expiresAt (so a live countdown is present and > 0).
+const CONTROLLED_INTERNAL: PendingAuthorizationDto = {
+  transferId: '33333333-3333-4333-8333-333333333333',
+  type: 'internal',
+  amount: '125000', // $1,250.00
+  currency: 'MXN',
+  sourceAccountId: '11111111-1111-4111-8111-111111111111',
+  destinationAccountNumber: '1000000002',
+  destinationMaskedName: 'Jua** Per**',
+  payeeDisplayName: null,
+  createdAt: '2026-09-10T18:00:00Z',
+  expiresAt: new Date(Date.now() + 90_000).toISOString(),
+};
 
 function makeStore() {
   const { baseApi } = baseApiMod;
@@ -71,21 +89,64 @@ afterAll(() => {
 
 afterEach(async () => {
   await userManagerMod.userManager.removeUser();
+  resetMockState();
 });
 
 describe('HomePage spine (token -> bearer -> /api -> render)', () => {
-  it('shows the pending indicator for the seeded pending authorization', async () => {
+  it('renders the real pending card for a seeded internal authorization', async () => {
     await signIn();
+    server.use(
+      http.get('/api/pending-authorization', () =>
+        HttpResponse.json({ authorization: CONTROLLED_INTERNAL }),
+      ),
+    );
     renderHome();
-    expect(await screen.findByText('1 pending authorization')).toBeInTheDocument();
+
+    // Formatted amount + currency (raw minor units never leak).
+    expect(await screen.findByText('$1,250.00 MXN')).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain('125000');
+
+    // Type-dependent destination for an internal transfer.
+    expect(screen.getByText('1000000002')).toBeInTheDocument();
+    expect(screen.getByText('Jua** Per**')).toBeInTheDocument();
+    expect(screen.queryByText('Payee')).toBeNull();
+
+    // Requested time is converted to Mexico City wall-clock, not left in UTC.
+    expect(document.body.textContent).toContain('12:00:00');
+    expect(document.body.textContent).toContain('GMT-6');
+    expect(document.body.textContent).not.toContain('06:00:00');
+
+    // A live expiry countdown is present.
+    expect(screen.getByText(/^\d{1,2}:\d{2}$/)).toBeInTheDocument();
   });
 
-  it('shows the no-pending state when the API returns { authorization: null }', async () => {
+  it('shows the empty state and withholds reveal when the API returns { authorization: null }', async () => {
     await signIn();
     server.use(
       http.get('/api/pending-authorization', () => HttpResponse.json({ authorization: null })),
     );
     renderHome();
-    expect(await screen.findByText('No pending authorizations')).toBeInTheDocument();
+
+    expect(await screen.findByText(/No pending authorization right now/i)).toBeInTheDocument();
+    // Reveal is withheld with a reason; there is no reveal action and no amount.
+    expect(
+      screen.getByText(/There is no pending authorization, so there is nothing to authorize/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('reveal-code')).toBeNull();
+    expect(document.body.textContent).not.toContain('$');
+  });
+
+  it('refetches from the server when Refresh is pressed (card -> empty state)', async () => {
+    await signIn();
+    // Start from the default seeded internal pending.
+    renderHome();
+    expect(await screen.findByText('$1,250.00 MXN')).toBeInTheDocument();
+
+    // The pending is authorized/cleared server-side; a refresh must reflect that.
+    setMockPending(null);
+    fireEvent.click(screen.getByRole('button', { name: /refresh/i }));
+
+    expect(await screen.findByText(/No pending authorization right now/i)).toBeInTheDocument();
+    expect(screen.queryByText('$1,250.00 MXN')).toBeNull();
   });
 });
