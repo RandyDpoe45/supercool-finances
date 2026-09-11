@@ -11,6 +11,7 @@ import { HealthModule } from './health/health.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { ConsumerModule } from './modules/consumer/consumer.module';
 import { InternalModule } from './modules/internal/internal.module';
+import { ReportingModule } from './modules/reporting/reporting.module';
 import { RedisModule } from './redis/redis.module';
 
 /**
@@ -34,6 +35,7 @@ import { RedisModule } from './redis/redis.module';
     AdminModule,
     InternalModule,
     ConsumerModule,
+    ReportingModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: GatewayIdentityGuard },
