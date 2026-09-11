@@ -41,12 +41,22 @@ Per-day x currency x type volume/count (`dailyAggregates` VIEW). Optional filter
 |---|---|---|
 | `currency` | string | Restrict to one currency. |
 | `type` | `internal` \| `external_outbound` \| `external_inbound` | Restrict to one type. |
-| `from` | date | Lower bound on `occurredAt` (`$gte`). |
-| `to` | date | Upper bound on `occurredAt` (`$lte`). |
+| `from` | date | Inclusive lower bound — start of the `from` UTC calendar day (`$gte`). |
+| `to` | date | Inclusive upper bound — the **whole** `to` UTC calendar day is included. |
 | `limit` / `offset` | int >=0 | Paging — same clamp as above. |
 
 Response `200`: `{ dailyAggregates: DailyAggregateDto[] }`. Each row:
 `{ date (YYYY-MM-DD, UTC), currency, type, count (number), totalAmount (string) }`.
+
+**`from` / `to` are inclusive UTC calendar days** — the same granularity as the
+`%Y-%m-%d` UTC output buckets and the admin app's A5 dashboard date-range filter. The
+wire contract stays day strings; the schema's `z.coerce.date()` parses e.g. `"2026-03-02"`
+to that day's UTC midnight, so the repository snaps `from` to the start of its UTC day
+(`$gte`) and expands `to` to the **start of the next UTC day** (`$lt`), which fully
+includes the `to` day. (A naive `$lte` on the coerced midnight would drop the entire `to`
+day — an exclusive-end-date bug.) This aligns the server with the admin app's A5
+date-range filter and its MSW stub — both already treat `to` as inclusive of the whole
+day — so **no client change is needed**.
 
 ## Query-time pipelines (no materialized rollups)
 

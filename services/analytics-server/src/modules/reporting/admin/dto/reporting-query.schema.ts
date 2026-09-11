@@ -6,8 +6,10 @@ import { z } from 'zod';
  * SHAPE of the untrusted query params (a security control) before they reach the service.
  * `limit` / `offset` are coerced to non-negative integers (query params arrive as strings)
  * and left UNBOUNDED here — the service CLAMPS them (default 50, max 200), so an over-large
- * request is clamped, not rejected. `from` / `to` are coerced to dates. `.strict()` rejects
- * unknown query keys.
+ * request is clamped, not rejected. `from` / `to` are coerced to dates and interpreted by
+ * the repository as INCLUSIVE UTC calendar days (a `"YYYY-MM-DD"` day string coerces to that
+ * day's UTC midnight; the whole `to` day is included via a next-day `$lt` bound). `.strict()`
+ * rejects unknown query keys.
  */
 export const accountSummariesQuerySchema = z
   .object({

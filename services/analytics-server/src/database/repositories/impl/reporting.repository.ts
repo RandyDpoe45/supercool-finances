@@ -20,6 +20,14 @@ import { TRANSACTION_MODEL_NAME } from '../../schemas/transaction.schema';
 const toBigInt = (v: unknown): bigint =>
   typeof v === 'bigint' ? v : BigInt((v as { toString(): string }).toString());
 
+/** Midnight (00:00:00.000) UTC of the given date's calendar day. */
+const startOfUtcDay = (d: Date): Date =>
+  new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+
+/** Midnight UTC of the day AFTER the given date's calendar day (exclusive upper bound). */
+const startOfNextUtcDay = (d: Date): Date =>
+  new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1));
+
 /** Raw `$group` output for the account-summaries pipeline (money fields are BSON `Long`). */
 interface AccountSummaryRow {
   _id: string;
@@ -118,10 +126,16 @@ export class ReportingRepository implements IReportingRepository {
     const match: Record<string, unknown> = { status: 'POSTED' };
     if (filter.currency !== undefined) match.currency = filter.currency;
     if (filter.type !== undefined) match.type = filter.type;
+    // `from`/`to` are INCLUSIVE UTC calendar days — matching the `%Y-%m-%d` UTC output
+    // buckets below and the admin app's A5 day-range dashboard filter. `z.coerce.date()`
+    // parses a day string ("2026-03-02") to that day's UTC midnight, so `to` is expanded
+    // to the END of its day via a `$lt` NEXT-day bound; an `$lte` on the coerced midnight
+    // would drop the entire `to` day. Snapping `from` to its UTC-day start keeps both
+    // bounds day-granular (a no-op for the day-string contract).
     if (filter.from !== undefined || filter.to !== undefined) {
       const occurredAt: Record<string, Date> = {};
-      if (filter.from !== undefined) occurredAt.$gte = filter.from;
-      if (filter.to !== undefined) occurredAt.$lte = filter.to;
+      if (filter.from !== undefined) occurredAt.$gte = startOfUtcDay(filter.from);
+      if (filter.to !== undefined) occurredAt.$lt = startOfNextUtcDay(filter.to);
       match.occurredAt = occurredAt;
     }
 

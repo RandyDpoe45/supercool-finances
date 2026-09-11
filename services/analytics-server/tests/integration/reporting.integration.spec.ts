@@ -708,4 +708,114 @@ suite('reporting aggregation (integration, needs Mongo)', () => {
     const distinct = new Set([...page1, ...page2].map((r) => r.accountId));
     expect(distinct.size).toBe(20); // no overlap -> offset advanced the window
   }, 90_000);
+
+  describe('daily-aggregates date range: the `to` bound is INCLUSIVE of the whole `to` UTC day', () => {
+    // Ground-truth seed. Times are chosen to EXPOSE the old `occurredAt.$lte = to` bug:
+    // `to` comes from `z.coerce.date()` on a `"YYYY-MM-DD"` wire string -> that day's UTC
+    // MIDNIGHT, but the output buckets are whole UTC calendar days ($dateToString '%Y-%m-%d'
+    // in UTC). So the 03-02 events below (15:00 / 23:59, AFTER 03-02T00:00Z) were WRONGLY
+    // EXCLUDED by the old code whenever `to = 2026-03-02` (nothing on the 03-02 day is
+    // <= 03-02T00:00Z). The fix makes [from, to] an inclusive UTC-calendar-day range
+    // (occurredAt >= start-of-from-day AND occurredAt < start-of-(to-day + 1)), so the
+    // ENTIRE 03-02 day is included. Every assertion below is derived from THIS seed's
+    // ground truth — not from the pipeline.
+    const T_0301 = new Date('2026-03-01T12:00:00.000Z'); // day 03-01
+    const T_0302_MID = new Date('2026-03-02T15:00:00.000Z'); // day 03-02, mid-day (the critical case)
+    const T_0302_LATE = new Date('2026-03-02T23:59:59.000Z'); // day 03-02, last second — strengthens the proof
+    const T_0303 = new Date('2026-03-03T09:00:00.000Z'); // day 03-03
+
+    const AMT_0301 = 100_000n;
+    const AMT_0302_MID = 20_000n;
+    const AMT_0302_LATE = 3_000n;
+    const AMT_0303 = 500_000n;
+    const TOTAL_0302 = AMT_0302_MID + AMT_0302_LATE; // 23_000 — the two 03-02 events bucket into ONE day
+
+    // `new Date('YYYY-MM-DD')` parses to that day's UTC midnight — EXACTLY what the
+    // controller's `z.coerce.date()` produces from the wire day string. Passing this
+    // through the service exercises the real coerced input, not a hand-built boundary.
+    const FROM_0302 = new Date('2026-03-02');
+    const TO_0302 = new Date('2026-03-02');
+
+    // All docs share ONE fresh synthetic currency + one type, so each distinct UTC day is
+    // exactly one bucket AND the query is isolated from any other data in a shared Mongo.
+    let cur: string;
+    const day = (r: any[], date: string): any => findDaily(r, date, cur, 'internal');
+
+    beforeEach(async () => {
+      cur = synthCurrency();
+      const posted = (amount: bigint, at: Date): TxDoc => {
+        const owner = `sub-${randomUUID()}`;
+        return mkDoc({
+          type: 'internal',
+          currency: cur,
+          amount,
+          initiatedBy: owner,
+          occurredAt: at,
+          legs: [
+            leg({
+              accountId: randomUUID(),
+              ownerId: owner,
+              delta: -amount,
+              balanceAfter: 0n,
+              currency: cur,
+            }),
+            leg({
+              accountId: randomUUID(),
+              accountKind: 'system',
+              systemKey: 'clearing:x',
+              delta: amount,
+              balanceAfter: amount,
+              currency: cur,
+            }),
+          ],
+        });
+      };
+      await seed(posted(AMT_0301, T_0301));
+      await seed(posted(AMT_0302_MID, T_0302_MID));
+      await seed(posted(AMT_0302_LATE, T_0302_LATE));
+      await seed(posted(AMT_0303, T_0303));
+    });
+
+    it('proof 1 — the `to` day is INCLUDED: {from:03-02,to:03-02} yields the 03-02 bucket with BOTH that-day events (old $lte:midnight code returned ZERO buckets)', async () => {
+      const rows = await aggregates({ currency: cur, from: FROM_0302, to: TO_0302, limit: 200 });
+
+      // Narrowed by the synthetic currency, the ONLY in-range day carrying data is 03-02, so
+      // there is exactly one bucket. The old code (occurredAt <= 03-02T00:00Z) dropped both
+      // 03-02 events and returned an EMPTY result here.
+      expect(rows).toHaveLength(1);
+      const g = day(rows, '2026-03-02');
+      expect(g).toBeDefined();
+      // Both 03-02 events (15:00 and 23:59, AFTER midnight) are counted — the bug's blind spot.
+      expect(g.count).toBe(2);
+      expect(money(g.totalAmount)).toBe(TOTAL_0302);
+    }, 60_000);
+
+    it('proof 2 — upper bound inclusive, lower open: {to:03-02} (no from) returns 03-01 AND 03-02, and NOT 03-03 (old code returned only 03-01)', async () => {
+      const rows = await aggregates({ currency: cur, to: TO_0302, limit: 200 });
+
+      const d1 = day(rows, '2026-03-01');
+      const d2 = day(rows, '2026-03-02');
+      expect(d1).toBeDefined();
+      expect(d1.count).toBe(1);
+      expect(money(d1.totalAmount)).toBe(AMT_0301);
+      // The whole 03-02 day is present — the old code omitted this bucket entirely.
+      expect(d2).toBeDefined();
+      expect(d2.count).toBe(2);
+      expect(money(d2.totalAmount)).toBe(TOTAL_0302);
+
+      // 03-03 is strictly after the `to` day -> excluded by the exclusive next-day upper bound.
+      expect(day(rows, '2026-03-03')).toBeUndefined();
+      expect(rows).toHaveLength(2);
+    }, 60_000);
+
+    it('proof 3 — the window excludes days outside [from,to]: {from:03-02,to:03-02} includes neither 03-01 (from lower bound) nor 03-03 (exclusive next-day upper bound) — no over-inclusion', async () => {
+      const rows = await aggregates({ currency: cur, from: FROM_0302, to: TO_0302, limit: 200 });
+
+      expect(day(rows, '2026-03-01')).toBeUndefined();
+      expect(day(rows, '2026-03-03')).toBeUndefined();
+      // 03-02 is the SOLE surviving bucket — the fix widened the upper bound to cover the
+      // whole `to` day WITHOUT bleeding into the next day.
+      expect(rows.map((r) => r.date)).toEqual(['2026-03-02']);
+    }, 60_000);
+  });
 });
