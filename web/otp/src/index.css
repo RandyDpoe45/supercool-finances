@@ -1,172 +1,158 @@
-:root {
-  font-family:
-    system-ui,
-    -apple-system,
-    'Segoe UI',
-    Roboto,
-    sans-serif;
-  line-height: 1.5;
-  color-scheme: light dark;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* OTP SPA styling. Palette in tailwind.config.js; this file wires it to base
+ * elements and the app's existing BEM class hooks, so markup (and the tests that
+ * query it) is untouched while the whole surface restyles. Dark, Spotify-inspired. */
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  html,
+  body {
+    @apply bg-base text-ink;
+  }
+  body {
+    @apply font-sans antialiased;
+    margin: 0;
+    min-height: 100vh;
+    line-height: 1.5;
+  }
+  main {
+    @apply mx-auto w-full max-w-5xl px-4 py-6 sm:px-6;
+  }
+  h1 {
+    @apply text-2xl font-extrabold tracking-tight;
+  }
+  h2 {
+    @apply text-xl font-bold tracking-tight;
+  }
+  a {
+    @apply text-ink no-underline transition-colors hover:text-accent;
+  }
+  input:not([type='checkbox']):not([type='radio']),
+  select,
+  textarea {
+    @apply rounded-md border border-line bg-surface-input px-3 py-2 text-ink outline-none transition
+      placeholder:text-ink-subtle focus:border-accent focus:ring-2 focus:ring-accent/40;
+    font: inherit;
+  }
 }
 
-body {
-  margin: 0;
-  min-height: 100vh;
+@layer components {
+  /* Button primitive — pill CTA. Green primary with black text (Spotify style). */
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-full border border-transparent
+      px-5 py-2 text-sm font-bold transition
+      focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent;
+  }
+  .btn--primary {
+    @apply bg-accent text-black hover:-translate-y-px hover:bg-accent-hover active:translate-y-0;
+  }
+  .btn--secondary {
+    @apply border-line bg-transparent text-ink hover:border-ink hover:bg-white/5;
+  }
+  .btn--link {
+    @apply h-auto rounded-none border-none bg-transparent p-0 font-normal text-accent underline hover:text-accent-hover;
+  }
+  .btn:disabled {
+    @apply cursor-not-allowed opacity-50 hover:translate-y-0;
+  }
+
+  /* Alert primitive (otp + admin). */
+  .alert {
+    @apply rounded-md border px-3 py-2;
+  }
+  .alert--error {
+    @apply border-danger/60 bg-danger/10 text-ink;
+  }
+  .alert--warning {
+    @apply border-warn/60 bg-warn/10 text-ink;
+  }
+  .alert--info {
+    @apply border-accent/50 bg-accent/10 text-ink;
+  }
+
+  /* Field error (client + admin). */
+  .field-error {
+    @apply m-0 mt-1 text-sm text-danger;
+  }
+
+  /* Form actions row (client + admin). */
+  .form-actions {
+    @apply mt-3 flex flex-wrap items-center gap-3;
+  }
 }
 
-main {
-  padding: 1rem;
-  max-width: 40rem;
-  margin: 0 auto;
-}
+/* OTP component layer — maps the app's existing BEM hooks to the dark theme.
+ * The pending-authorization amount and the revealed one-time code are the green
+ * hero elements (Spotify vibe); everything else is muted around them. */
+@layer components {
+  /* Home — vertical stack, constrained narrower than the shell's <main>. */
+  .home {
+    @apply mx-auto flex w-full max-w-2xl flex-col gap-4;
+  }
 
-/* Layout ------------------------------------------------------------------ */
-.home {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
+  /* Pending-authorization card. */
+  .card {
+    @apply rounded-card border border-line bg-surface p-6;
+  }
+  .card__header {
+    @apply flex items-center justify-between gap-4;
+  }
+  .card__title {
+    @apply m-0 text-lg font-bold;
+  }
+  .card__amount {
+    @apply my-3 text-4xl font-extrabold tracking-tight tabular-nums text-accent;
+  }
+  .card__empty {
+    @apply mt-3 text-ink-muted;
+  }
+  .card__details {
+    @apply m-0 grid gap-1;
+  }
 
-/* Buttons ----------------------------------------------------------------- */
-.btn {
-  font: inherit;
-  padding: 0.5rem 1rem;
-  border-radius: 0.375rem;
-  border: 1px solid transparent;
-  cursor: pointer;
-}
+  /* Label / value detail rows. */
+  .detail-row {
+    @apply flex gap-2;
+  }
+  .detail-row__label {
+    @apply min-w-[8rem] font-semibold text-ink-muted;
+  }
+  .detail-row__value {
+    @apply m-0;
+  }
 
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
+  /* Live countdown to a deadline. */
+  .countdown {
+    @apply tabular-nums;
+  }
+  .countdown--expired {
+    @apply font-semibold text-danger;
+  }
 
-.btn--primary {
-  background: #1a56db;
-  color: #fff;
-}
+  /* Code-reveal panel. */
+  .reveal {
+    @apply flex flex-col gap-3;
+  }
+  .reveal__disabled {
+    @apply m-0 text-ink-muted;
+  }
 
-.btn--secondary {
-  background: transparent;
-  border-color: currentColor;
-}
-
-/* Pending-authorization card ---------------------------------------------- */
-.card {
-  border: 1px solid rgba(128, 128, 128, 0.4);
-  border-radius: 0.5rem;
-  padding: 1rem 1.25rem;
-}
-
-.card__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.card__title {
-  margin: 0;
-  font-size: 1.1rem;
-}
-
-.card__amount {
-  font-size: 2rem;
-  font-weight: 700;
-  margin: 0.75rem 0;
-}
-
-.card__empty {
-  margin: 0.75rem 0 0;
-  opacity: 0.85;
-}
-
-.card__details {
-  margin: 0;
-  display: grid;
-  gap: 0.25rem;
-}
-
-.detail-row {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.detail-row__label {
-  min-width: 8rem;
-  font-weight: 600;
-}
-
-.detail-row__value {
-  margin: 0;
-}
-
-.countdown {
-  font-variant-numeric: tabular-nums;
-}
-
-.countdown--expired {
-  color: #b91c1c;
-  font-weight: 600;
-}
-
-/* Code reveal ------------------------------------------------------------- */
-.reveal {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-
-.reveal__disabled {
-  margin: 0;
-  opacity: 0.85;
-}
-
-.revealed-code {
-  border: 2px solid #1a56db;
-  border-radius: 0.5rem;
-  padding: 1rem 1.25rem;
-  text-align: center;
-}
-
-.revealed-code__label {
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-size: 0.8rem;
-  opacity: 0.8;
-}
-
-.revealed-code__value {
-  margin: 0.25rem 0;
-  font-size: 2.75rem;
-  font-weight: 800;
-  letter-spacing: 0.35em;
-  font-variant-numeric: tabular-nums;
-}
-
-.revealed-code__ttl {
-  margin: 0 0 0.5rem;
-}
-
-/* Alerts ------------------------------------------------------------------ */
-.alert {
-  border-radius: 0.375rem;
-  padding: 0.5rem 0.75rem;
-  border: 1px solid transparent;
-}
-
-.alert--error {
-  background: rgba(185, 28, 28, 0.12);
-  border-color: #b91c1c;
-}
-
-.alert--warning {
-  background: rgba(180, 83, 9, 0.12);
-  border-color: #b45309;
-}
-
-.alert--info {
-  background: rgba(26, 86, 219, 0.12);
-  border-color: #1a56db;
+  /* Revealed one-time code — the green hero box. */
+  .revealed-code {
+    @apply rounded-card border-2 border-accent bg-accent/5 p-5 text-center;
+  }
+  .revealed-code__label {
+    @apply m-0 text-xs uppercase tracking-widest text-ink-muted;
+  }
+  .revealed-code__value {
+    @apply my-1 text-5xl font-extrabold tracking-[0.35em] tabular-nums text-accent;
+  }
+  .revealed-code__ttl {
+    @apply mb-2;
+  }
 }

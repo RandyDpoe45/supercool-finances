@@ -217,6 +217,28 @@ imported solely by the test setup.
 - The app-local contract types in `src/services/api/contracts/` are the SPA's own copy
   (ADR-16), kept in sync with `specs/07-frontends.md`.
 
+## Styling / theme
+
+The app is styled with **Tailwind CSS v3 + PostCSS + autoprefixer** (dev
+dependencies; v3 is pure-JS, reproducible under the `.npmrc` `ignore-scripts=true`
+policy — no native binaries). The dark, Spotify-inspired palette (near-black
+surfaces + a single green accent) lives as design tokens in
+[`tailwind.config.js`](../tailwind.config.js); `postcss.config.js` wires Tailwind +
+autoprefixer into the Vite build. `src/index.css` is the theme: a base layer
+(preflight + element defaults) and an `@layer components` block that maps the app's
+existing **BEM class hooks** (`.card`, `.card__amount`, `.revealed-code*`,
+`.detail-row*`, `.countdown*`, `.btn`/`.btn--*`, `.alert`/`.alert--*`, …) to the
+palette via `@apply`; the pending-authorization amount and the revealed one-time
+code are the green hero elements. The `AppShell`/`AuthGate` shell (sticky dark
+header, green brand mark, muted identity) uses Tailwind utilities directly in JSX.
+
+The restyle is **behavior-preserving**: markup, semantic tags, `data-*`/`aria-*`
+attributes, accessible names, text/brand strings, and the BEM class names are all
+unchanged — the theme *drives* those hooks, it does not rename them. Vitest runs
+with `css: false`, so unit tests never process CSS; the restyle is invisible to the
+test suite. Each SPA keeps its **own** Tailwind setup and its own copy of the tokens
+(ADR-16: shared conventions, not code).
+
 ## Environment variables
 
 Build-time Vite vars (all **public** — they ship in the bundle). See `.env.example`;
