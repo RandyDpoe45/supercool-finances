@@ -11,8 +11,9 @@ to work with. It is the seed step of **spec 08** (`specs/08-build-and-serve.md`,
   schema it writes to is **duplicated here** (in `src/seed.js`) and kept in sync with
   the service **via the spec** — the spec is the contract of record. This is the
   accepted price of folder independence: the tool could be extracted to its own repo.
-- **Seeds demo data only.** It inserts the 11 demo customers and one MXN account
-  each. It does **not** insert or modify the **system constants** — the MXN `currency`
+- **Seeds demo data only.** It inserts the 11 demo customers and their 17 MXN accounts
+  (most own one; a few login customers own 2–3). It does **not** insert or modify the
+  **system constants** — the MXN `currency`
   row, the two clearing/system accounts (`clearing:rail-outbound`,
   `clearing:rail-inbound`), or any `user_limits` row. Those are seeded by the balance
   service's **boot migrations** and are out of this tool's scope.
@@ -21,10 +22,12 @@ to work with. It is the seed step of **spec 08** (`specs/08-build-and-serve.md`,
 
 ## The dataset (spec 08 §Seed data)
 
-**11 customers + 11 customer accounts**: 10 login-capable customers (`demo-customer` =
+**11 customers + 17 customer accounts**: 10 login-capable customers (`demo-customer` =
 #1, then `demo-customer-2` … `demo-customer-10`) plus one no-login payee (Maria
-Gonzalez). Customers #2–#10 are generated in `src/seed.js` from `N ∈ 2..10` (a loop,
-not 9 literals) matching this table exactly.
+Gonzalez). Most customers own **one** account; a few login customers own **2–3** (never
+more than 3) — see [Multiple accounts](#multiple-accounts) below. Customers #2–#10 are
+generated in `src/seed.js` from `N ∈ 2..10` (a loop, not 9 literals) matching this
+**primary-account** table exactly.
 
 | Customer | `customer.id` | name | phone | email | account_number | balance (minor units) |
 |----------|---------------|------|-------|-------|----------------|-----------------------|
@@ -40,12 +43,35 @@ not 9 literals) matching this table exactly.
 | #10 (login) | `c0000010-0010-4010-8010-000000000010` | Demo Customer 10 | 5510000010 | demo-customer-10@example.test | `1000000011` | `100000000` (1,000,000.00 MXN) |
 | payee (no login) | `b0000000-0000-4000-8000-000000000002` | Maria Gonzalez | 5520000002 | maria.gonzalez@example.test | `1000000002` | `50000000` (500,000.00 MXN) |
 
-Account numbers run `1000000001 + N` for the login customers (`1000000003` …
+Primary account numbers run `1000000001 + N` for the login customers (`1000000003` …
 `1000000011`), **skipping `1000000002`** which is Maria's. Each account is a
 **customer** account, **active**, currency **MXN**, with `held = 0`,
 `spent_today = spent_month = 0`, and `spent_today_date = spent_month_date =
 CURRENT_DATE` (the database's notion of "today", so the fixed-window spend counters
 start fresh). `account.id` uses the DB default (`gen_random_uuid()`).
+
+### Multiple accounts
+
+So the apps can be exercised with customers holding more than one account, a few login
+customers own **2–3** MXN accounts (never more than 3); every other customer owns
+exactly its one primary account. `demo-customer` (#1) and Maria are deliberately kept at
+**one** account each — #1 is the transfer-with-OTP e2e source and Maria its destination,
+so their single-account shape is load-bearing. Extra accounts are numbered from
+`1000000012` upward (the primary numbers above are unchanged), so `account_number` stays
+globally unique; they are `active` MXN, `held = 0`, counters `0` @ `CURRENT_DATE`, with
+`owner_id` = that customer's pinned sub. A **secondary** account carries `5000000`
+(50,000.00 MXN), a **tertiary** `2500000` (25,000.00 MXN). Generated in `src/seed.js`
+as `EXTRA_ACCOUNTS` (extras assigned in ascending customer order):
+
+| Customer | total accounts | extra account_number(s) | extra balance(s) (minor units) |
+|----------|----------------|-------------------------|--------------------------------|
+| #2 (`demo-customer-2`) | 3 | `1000000012`, `1000000013` | `5000000` (50,000.00), `2500000` (25,000.00) |
+| #3 (`demo-customer-3`) | 2 | `1000000014` | `5000000` (50,000.00) |
+| #4 (`demo-customer-4`) | 3 | `1000000015`, `1000000016` | `5000000` (50,000.00), `2500000` (25,000.00) |
+| #5 (`demo-customer-5`) | 2 | `1000000017` | `5000000` (50,000.00) |
+
+**Total: 17 customer accounts** = 11 primaries (`1000000001` … `1000000011`) + 6 extras
+(`1000000012` … `1000000017`).
 
 ### Sub alignment
 

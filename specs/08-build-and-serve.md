@@ -68,7 +68,9 @@ working on a clean machine.
 - **Demo dataset** — the shared contract both the seed code and its tests follow.
   There are **10 login-capable customers** (`demo-customer` = #1, then
   `demo-customer-2` … `demo-customer-10`) plus **one no-login payee** (Maria
-  Gonzalez), so the seed loads **11 customers + 11 customer accounts** in total.
+  Gonzalez), so the seed loads **11 customers + 17 customer accounts** in total —
+  most customers own one account, but a few own **2–3** (see "Multiple accounts"
+  below).
   - Pinned Keycloak ids — **customers** (realm role `customer`; account.owner_id FKs
     to `customer.id` = this sub, so each is deterministic):
     - `demo-customer`    = `11111111-1111-4111-8111-111111111111`
@@ -97,17 +99,39 @@ working on a clean machine.
     realm `firstName` "Demo", `lastName` `"Customer N"`, `email`
     `demo-customer-N@example.test`, `phone` = `55100000` + zero-padded 2-digit `N`
     (`5510000002` … `5510000010`), realm password `demo-customer-N-pw`, realm role
-    `customer`, `enabled` + `emailVerified` true. Each owns exactly one **active MXN
-    customer account**: `account_number` = `1000000001 + N` (`1000000003` …
-    `1000000011`, skipping `1000000002` which is Maria's); `balance` = `N × 10000000`
-    minor units (N × 100,000.00 MXN → #2 = 200,000.00 … #10 = 1,000,000.00); `held` 0,
-    spend counters 0, dates = `CURRENT_DATE`, same defaults as #1.
+    `customer`, `enabled` + `emailVerified` true. Each owns a **primary active MXN
+    account**: `account_number` = `1000000001 + N` (`1000000003` … `1000000011`,
+    skipping `1000000002` which is Maria's); `balance` = `N × 10000000` minor units
+    (N × 100,000.00 MXN → #2 = 200,000.00 … #10 = 1,000,000.00); `held` 0, spend
+    counters 0, dates = `CURRENT_DATE`, same defaults as #1. A few of them **also**
+    own extra accounts — see "Multiple accounts".
   - **Maria Gonzalez** (transfer destination, **NO Keycloak login**): synthetic `id`
     `b0000000-0000-4000-8000-000000000002`; `name` "Maria Gonzalez", `phone`
     "5520000002", `email` "maria.gonzalez@example.test". One active MXN customer
     account: `account_number` `1000000002`, `balance` `50000000` (500,000.00 MXN),
     same counter defaults. Exists so the demo has a confirmation-of-payee target for
     the transfer-with-OTP flow — she has **no realm user** and cannot log in.
+  - **Multiple accounts** — so the apps can be tested with customers holding more than
+    one account, a few login customers own **2–3** MXN accounts (**never more than 3**);
+    every other customer owns exactly its one primary account. `demo-customer` (#1) and
+    Maria are deliberately kept at **one** account each — #1 is the transfer-with-OTP
+    e2e source and Maria its destination, so their single-account shape is load-bearing.
+    Extra accounts are numbered from `1000000012` upward (the primary numbers above are
+    unchanged), so `account_number` stays globally unique. Extra accounts are `active`
+    MXN, `held` 0, counters 0 @ `CURRENT_DATE`, `owner_id` = that customer's sub; a
+    **secondary** account carries `5000000` (50,000.00 MXN), a **tertiary** `2500000`
+    (25,000.00 MXN). Per customer (extras assigned in ascending customer order):
+    - `demo-customer-2` → **3** accounts: `1000000003` (primary, 200,000.00),
+      `1000000012` (50,000.00), `1000000013` (25,000.00)
+    - `demo-customer-3` → **2** accounts: `1000000004` (primary, 300,000.00),
+      `1000000014` (50,000.00)
+    - `demo-customer-4` → **3** accounts: `1000000005` (primary, 400,000.00),
+      `1000000015` (50,000.00), `1000000016` (25,000.00)
+    - `demo-customer-5` → **2** accounts: `1000000006` (primary, 500,000.00),
+      `1000000017` (50,000.00)
+    - every other customer (`demo-customer`, `demo-customer-6` … `-10`, Maria) → **1**
+      account (its primary).
+    Total: **17** customer accounts (11 primaries + 6 extras).
 
 ## Full run
 

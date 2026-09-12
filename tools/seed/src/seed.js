@@ -17,7 +17,8 @@ const { Client } = pg;
 // --- Demo dataset — the shared contract from spec 08 (§Seed data / Demo dataset) ----
 
 // 10 login-capable customers (demo-customer = #1, then demo-customer-2 … demo-customer-10)
-// plus one no-login payee (Maria Gonzalez) = 11 customers + 11 customer accounts. Each
+// plus one no-login payee (Maria Gonzalez) = 11 customers + 17 customer accounts. Most
+// customers own one account; a few login customers own 2–3 (see EXTRA_ACCOUNTS below). Each
 // login customer's `id` IS the pinned Keycloak `sub` from realm-export.json (so
 // account.owner_id -> this id lines up with the token's sub). Maria has NO Keycloak login;
 // her id is a synthetic UUID — she exists as a confirmation-of-payee transfer target.
@@ -54,13 +55,13 @@ const MARIA = {
 
 const CUSTOMERS = [PRIMARY_CUSTOMER, ...LOGIN_CUSTOMERS, MARIA];
 
-// One active MXN customer account each. Money (`balance`) is bigint minor units passed
-// as a STRING — never float arithmetic. `held` and the spend counters start at 0 and
-// the fixed-window markers start at the DB's CURRENT_DATE (supplied in SQL below, not
+// One active MXN PRIMARY account per customer. Money (`balance`) is bigint minor units
+// passed as a STRING — never float arithmetic. `held` and the spend counters start at 0
+// and the fixed-window markers start at the DB's CURRENT_DATE (supplied in SQL below, not
 // as a parameter, so it is the database's notion of "today"). account.id uses the DB
-// default (gen_random_uuid()).
+// default (gen_random_uuid()). A few customers own extra accounts too — see EXTRA_ACCOUNTS.
 //
-// Account numbers: #1 = 1000000001; Maria = 1000000002; #2 … #10 = 1000000003 …
+// Primary account numbers: #1 = 1000000001; Maria = 1000000002; #2 … #10 = 1000000003 …
 // 1000000011 (1000000001 + N, skipping Maria's 1000000002). Balances: #1 = 100000000
 // (1,000,000.00 MXN); Maria = 50000000 (500,000.00 MXN); #N = N × 10000000 minor units
 // (N × 100,000.00 MXN → #2 = 200,000.00 … #10 = 1,000,000.00).
@@ -73,10 +74,30 @@ const LOGIN_ACCOUNTS = LOGIN_CUSTOMERS.map((customer, i) => {
   };
 });
 
+// Extra accounts (§Multiple accounts) — a few login customers own 2–3 MXN accounts (never
+// more than 3) so the apps can be exercised with multi-account holders; demo-customer (#1)
+// and Maria are deliberately kept single (they are the transfer-with-OTP e2e source and
+// destination). `owner_id` resolves through LOGIN_CUSTOMERS by customer number N, so it is
+// always the pinned sub of an already-seeded customer (FK holds). Extra account numbers run
+// 1000000012 upward — disjoint from the primaries (1000000001 … 1000000011) — so
+// account_number stays globally unique. A secondary account carries 5000000 (50,000.00 MXN),
+// a tertiary 2500000 (25,000.00 MXN). Money is bigint minor units passed as a STRING.
+const loginCustomerByNumber = (n) => LOGIN_CUSTOMERS[n - 2];
+
+const EXTRA_ACCOUNTS = [
+  { ownerId: loginCustomerByNumber(2).id, accountNumber: '1000000012', balance: '5000000' },
+  { ownerId: loginCustomerByNumber(2).id, accountNumber: '1000000013', balance: '2500000' },
+  { ownerId: loginCustomerByNumber(3).id, accountNumber: '1000000014', balance: '5000000' },
+  { ownerId: loginCustomerByNumber(4).id, accountNumber: '1000000015', balance: '5000000' },
+  { ownerId: loginCustomerByNumber(4).id, accountNumber: '1000000016', balance: '2500000' },
+  { ownerId: loginCustomerByNumber(5).id, accountNumber: '1000000017', balance: '5000000' },
+];
+
 const ACCOUNTS = [
   { ownerId: PRIMARY_CUSTOMER.id, accountNumber: '1000000001', balance: '100000000' },
   ...LOGIN_ACCOUNTS,
   { ownerId: MARIA.id, accountNumber: '1000000002', balance: '50000000' },
+  ...EXTRA_ACCOUNTS,
 ];
 
 const CURRENCY = 'MXN';
