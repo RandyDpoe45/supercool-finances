@@ -24,6 +24,30 @@ spec — the spec, not the service code, is the contract of record.
 - **MSW** for the `/balance/api` stub (dev browser worker + node server for tests).
 - **Vitest + React Testing Library + jsdom** as the test runner (tests live in
   `tests/`, segregated from `src/`).
+- **Tailwind CSS v3 + PostCSS + autoprefixer** for styling (see below).
+
+## Styling / theme
+
+A dark, Spotify-inspired look (near-black surfaces, a single green accent, high-contrast
+type, pill buttons). The stack is **Tailwind CSS v3 + PostCSS + autoprefixer** (v3, not v4:
+v3 is pure-JS and reproducible under the repo's `ignore-scripts` `.npmrc` policy).
+
+- **Palette tokens live in `tailwind.config.js`** (`base`/`surface`/`accent`/`ink`/`line`/
+  `danger`/`warn`, plus the `card` radius/shadow) — that config is the app's design contract.
+- **`src/index.css`** is the theme: `@tailwind base/components/utilities`, a `@layer base`
+  that styles bare elements (incl. the bare `<button>` → green primary CTA), and a
+  `@layer components` that maps the app's existing **BEM class hooks** (`.account-card`,
+  `.statement`, `.badge`, `.transfer-form`, `.button--secondary`/`--link`, …) via `@apply`.
+- The shell (`AppShell`) and the `AuthGate` loading/error states use Tailwind utilities
+  directly in JSX (plus a small green brand mark).
+- The restyle is **behavior-preserving**: markup, semantic tags, `data-*` attributes,
+  `aria-label`s, brand/identity/button text, and the BEM class names are all unchanged —
+  the theme drives those hooks, it does not rename them — so the existing tests (which query
+  by role/name/`data-*`, not by class) stay green. Vitest runs with `css: false`, so the CSS
+  is not processed in unit tests; only `vite build` compiles it.
+
+Each frontend keeps its **own** Tailwind setup and its own copy of these tokens (ADR-16:
+the monorepo shares conventions, not code — identical copies are expected).
 
 ## Structure
 
@@ -69,7 +93,9 @@ templates → pages). Only the components actually used exist:
 - **atoms** — `Money` (renders a minor-unit string via `lib/money`), `StatusBadge`
   (account status), `Timestamp` (renders a UTC instant in Mexico City time, keeping the
   canonical UTC in the `<time dateTime>` attribute), `FieldError` (inline form/validation
-  message), `CoolingOffStatus` (a payee's "ready to send" / "usable from …" cooling-off state).
+  message), `CoolingOffStatus` (a payee's "ready to send" / "usable from …" cooling-off state),
+  `CopyButton` (a reusable quiet utility button that copies a value to the clipboard with a
+  transient "Copied" confirmation and a stable accessible name).
 - **molecules** — `AccountCard` (one account: id/link, currency, kind, status, and the
   balance/held/available money fields), `StatementRow` (one ledger leg as a table row),
   `CaptchaStub` (client-only demo captcha), `PayeeConfirmation` (masked payee + confirm/deny),
@@ -253,7 +279,10 @@ copy to `.env.local` to override locally. Never put a secret here.
 
 - **Accounts overview** (`/`, `AccountsPage` → `AccountsList` → `AccountCard`): each
   account shows its number (or id), currency, kind, status badge, and the three money
-  fields — **balance, held, available**. Selecting an account navigates to its statement.
+  fields — **balance, held, available**. The card header also carries a quiet
+  **copy-account-number** utility control (`CopyButton`), which writes the account
+  number (or id, for a system account) to the clipboard. Selecting an account navigates
+  to its statement.
 - **Statement / history** (`/accounts/:id/transactions`, `AccountStatementPage` →
   `StatementTable` → `StatementRow`): each ledger leg shows its timestamp (Mexico City
   time), direction (**Credit** / **Debit**, derived from the sign of `delta`), the signed

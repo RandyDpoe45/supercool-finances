@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import type { AccountDto } from '../../services/api/contracts/accounts';
+import { CopyButton } from '../atoms/CopyButton';
 import { Money } from '../atoms/Money';
 import { StatusBadge } from '../atoms/StatusBadge';
 
@@ -18,6 +19,7 @@ export function AccountCard({ account }: { account: AccountDto }) {
         <span className="account-card__currency">{account.currency}</span>
         <span className="account-card__kind">{account.kind}</span>
         <StatusBadge status={account.status} />
+        <CopyButton value={account.accountNumber ?? account.id} label="Copy account number" />
       </div>
       <dl className="account-card__money">
         <div>
