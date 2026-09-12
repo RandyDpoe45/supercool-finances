@@ -15,6 +15,7 @@ export const fixtureAccounts: AccountDto[] = [
     held: '0',
     available: '1500000',
     accountNumber: '1000000001',
+    label: 'Checking',
   },
   {
     id: '22222222-2222-4222-8222-222222222222',
@@ -25,5 +26,6 @@ export const fixtureAccounts: AccountDto[] = [
     held: '5000',
     available: '245075',
     accountNumber: '1000000002',
+    label: 'Savings',
   },
 ];

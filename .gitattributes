@@ -34,3 +34,5 @@ infra/**/init/*.js text eol=lf
 *.css   text eol=lf
 *.html  text eol=lf
 *.md    text eol=lf
+# Frontend config files (postcss/tailwind) are covered by the prettier gate too.
+*.js    text eol=lf

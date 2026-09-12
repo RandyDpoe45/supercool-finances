@@ -14,7 +14,8 @@ import type { ErrorResponse } from '../src/services/api/contracts/error';
 
 // The EXACT whitelist the serializer emits (services/.../accounts.serializer.ts).
 // Internal columns (ownerId, systemKey, spentToday/spentMonth + dates, createdAt,
-// updatedAt) must never reach the wire.
+// updatedAt) must never reach the wire. `label` (the customer-supplied account name)
+// is on the wire now, so the pinned key set includes it.
 const CONTRACT_FIELDS = [
   'id',
   'currency',
@@ -24,6 +25,7 @@ const CONTRACT_FIELDS = [
   'held',
   'available',
   'accountNumber',
+  'label',
 ].sort();
 
 const ACCOUNTS_URL = new URL('/balance/api/accounts', window.location.origin).toString();

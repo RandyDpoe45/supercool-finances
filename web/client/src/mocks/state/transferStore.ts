@@ -284,6 +284,8 @@ export function projectAccounts(): AccountDto[] {
       held: held.toString(),
       available: available.toString(),
       accountNumber: base.accountNumber,
+      // Carry the seeded account's label through the whitelist (else it would be silently dropped).
+      label: base.label ?? null,
     };
   });
 }

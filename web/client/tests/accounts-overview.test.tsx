@@ -21,6 +21,7 @@ const account: AccountDto = {
   held: '5000',
   available: '245075',
   accountNumber: '1000000009',
+  label: 'Primary Checking',
 };
 
 function renderList(accounts: AccountDto[]) {
@@ -52,6 +53,9 @@ describe('AccountsList — overview formatting', () => {
     // Currency and status are surfaced.
     expect(item.textContent).toContain('MXN');
     expect(within(item).getByText('active')).toBeInTheDocument();
+
+    // The customer-supplied account name is surfaced alongside the money fields.
+    expect(within(item).getByText('Primary Checking')).toBeInTheDocument();
   });
 
   it('links each account to its statement route (selecting an account opens history)', () => {
