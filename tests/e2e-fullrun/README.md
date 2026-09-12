@@ -3,8 +3,9 @@
 The reproducible **clean-machine** proof of the spec-08
 [`Full run`](../../specs/08-build-and-serve.md) + **Definition of Done**: one command
 brings the whole stack up all-healthy, loads the seed, drives the headline
-**transfer-with-OTP** flow from the real client app (public plane), and proves the
-**admin whoami landing** through the internal front door (admin plane, Pass 2).
+**transfer-with-OTP** flow from the real client app (public plane), and proves the admin
+plane through the internal front door — the **whoami landing**, the read screens, and the
+**maker-checker reversal** (two admins) + the **audit trail**.
 
 It orchestrates the existing pieces — it does **not** re-implement them:
 
@@ -18,38 +19,47 @@ It orchestrates the existing pieces — it does **not** re-implement them:
    → initiate (pending) → **code revealed via the real otp-app in a second browser context**
    → confirm → the source balance is debited by **exactly** the transfer amount (DoD #2,
    public half).
-4. **Admin plane (Pass 2):** the admin SPA is served at **`:8081`**, a no-token
+4. **Admin plane:** the admin SPA is served at **`:8081`**, a no-token
    `/balance/admin/whoami` is a **401 at Kong**, a **real demo-admin bearer** reaches
    `/balance/admin/whoami` → **200** with the `admin` role (black-box, through
    internal-nginx → internal-kong → balance-service), and the admin app's browser chain runs
-   for real (PKCE at `:8081`): `login.e2e.ts` (the whoami landing renders "Admin console"),
-   `accounts.e2e.ts` (the `GET /balance/admin/accounts` + `/balance/admin/limits` reads —
-   endpoints shipped in #50, non-empty from the migration seeds — traverse the gateway and
-   render), and `analytics.e2e.ts` (the `GET /analytics/admin/reports/{account-summaries,
-   daily-aggregates}` reads traverse the internal gateway's `/analytics/admin` namespace and
-   the dashboard renders — a read smoke; the reports may be **empty** as no transactions are
-   seeded).
+   for real (PKCE at `:8081`), **in order**: `login.e2e.ts` (the whoami landing renders
+   "Admin console"), `accounts.e2e.ts` (the `GET /balance/admin/accounts` +
+   `/balance/admin/limits` reads — endpoints shipped in #50, non-empty from the migration
+   seeds — traverse the gateway and render), `analytics.e2e.ts` (the
+   `GET /analytics/admin/reports/{account-summaries,daily-aggregates}` reads traverse the
+   internal gateway's `/analytics/admin` namespace and the dashboard renders — a read smoke;
+   the reports may be **empty** as no transactions are seeded), `reversals.e2e.ts` (the
+   **maker-checker reversal**: `demo-admin` proposes a reversal of the **posted internal
+   transfer the public transfer-with-OTP chain already created** — `1000000001 →
+   1000000002` — and a **second admin `demo-admin-2`** approves it as the four-eyes checker,
+   so the transfer is reversed — and the same spec then reads `GET /admin/audit` (#54) and
+   asserts the `reversal.executed` row it just created), and `audit.e2e.ts` (an
+   order-independent reachability smoke: `GET /admin/audit` returns 200 with an admin bearer and
+   the `/audit` screen renders — Playwright runs spec files **alphabetically**, so it may run
+   before the reversal and the log may be empty; the audit **content** proof lives in
+   `reversals.e2e.ts`).
 
 The Playwright specs (`web/client/tests/e2e/**`, `web/otp/tests/e2e/**`,
 `web/admin/tests/e2e/**`) are the **test-writer's artifact** and are **not** edited here.
 This harness only supplies the env those specs read and the running stack.
 
-> **Scope.** Public plane end to end **plus** the admin plane's build & serve + the whoami
-> landing. Host-published: **`:8080`** (public-nginx), **`:8081`** (internal-nginx),
-> **`:8082`** (keycloak).
+> **Scope.** Public plane end to end **plus** the admin plane's build & serve, the whoami
+> landing + read screens, and the **maker-checker reversal + audit trail**. Host-published:
+> **`:8080`** (public-nginx), **`:8081`** (internal-nginx), **`:8082`** (keycloak).
 >
-> **Known gap (not proven here).** The admin **maker-checker reversal** e2e and the **audit**
-> e2e are still not run — both need **seeded data the seed does not create** (no transactions,
-> no pending approval, no audit rows), and the `GET /admin/audit` read endpoint shipped as
-> **PR #54** but is **not yet merged** to main. Those get e2e coverage once the seed is
-> expanded and #54 lands. (The admin browser chain now runs `login.e2e.ts` + the
-> `accounts.e2e.ts` and `analytics.e2e.ts` read smokes.)
+> **Reversal ↔ public chain.** The reversal reverses the **same posted transfer the public
+> transfer-with-OTP chain creates**, so the admin chain runs **after** the public one — and a
+> full run therefore **ends with that demo transfer reversed**. Four-eyes requires the checker
+> ≠ the maker, so a **second admin `demo-admin-2`** (realm role `admin`) exists solely to be
+> the checker. If only one admin were present, `reversals.e2e.ts` + `audit.e2e.ts` are
+> excluded (SKIPped, never failed).
 
 ## Layout
 
 | File | Purpose |
 |---|---|
-| `run.sh` | Orchestrator: up → healthy → seed → browser-reach → public edge + e2e → admin edge + whoami + admin read/landing e2e (login + accounts + analytics) → teardown. |
+| `run.sh` | Orchestrator: up → healthy → seed → browser-reach → public edge + e2e → admin edge + whoami + admin e2e (login + accounts + analytics + reversals + audit) → teardown. |
 | `lib.sh` | All phases + helpers (sourced by `run.sh`; never run directly). |
 | `README.md` | This file. |
 
@@ -80,9 +90,11 @@ The specs read everything infrastructure-specific from the environment; the harn
 |---|---|---|
 | `E2E_ENABLED` | `1` | Flips the suites from `describe.fixme` to live. |
 | `E2E_BASE_URL` | `http://localhost:8080` | The public front door (the spec default; shown for clarity). |
-| `E2E_USERNAME` / `E2E_PASSWORD` | **read from `tools/keycloak/realm-export.json`** | The `demo-customer` login — the project's existing demo credential; **no new secret** is introduced. |
+| `E2E_USERNAME` / `E2E_PASSWORD` | **read from `tools/keycloak/realm-export.json`** | The `demo-customer` login (public plane) — the project's existing demo credential; **no new secret** is introduced. |
 | `E2E_DEST_ACCOUNT` | `1000000002` | Customer B's **seeded** account. The spec-07 baked default `2000000001` does **not** match our seed, so this override is the load-bearing glue. |
 | `E2E_TRANSFER_MAJOR` / `E2E_TRANSFER_MINOR` | *(defaults 10.00 / 1000)* | Customer A is funded with 1,000,000.00 MXN, so the default 10.00 transfer is well within balance. |
+| `E2E_USERNAME` / `E2E_PASSWORD` *(admin chain)* | **read from `realm-export.json`** — the **maker** admin (the admin whose username sorts first, `demo-admin`) | The admin-plane login: the whoami landing, read screens, and the reversal **proposer**. Chosen deterministically so it never flips. **No literal.** |
+| `E2E_CHECKER_USERNAME` / `E2E_CHECKER_PASSWORD` *(admin chain)* | **read from `realm-export.json`** — the **checker** admin (the second admin, `demo-admin-2`) | The four-eyes **approver** for the maker-checker reversal (checker ≠ maker). Empty when only one admin exists → the reversal + audit specs are excluded. **No literal.** |
 
 ## What each phase proves (mapped to spec 08)
 
@@ -98,7 +110,7 @@ The specs read everything infrastructure-specific from the environment; the harn
 | **Transfer-with-OTP e2e** | the headline **DoD #2 (public half)**: `internal-transfer.e2e.ts` drives the full chain (client → real otp-app reveal → confirm → exact debit) and `login.e2e.ts` proves the seeded account renders (DoD #3). A non-zero exit is a **real** serving/transfer failure (or a test-code bug) → **FAIL**. |
 | **Admin edge sanity** | `GET :8081/healthz` → 200, `GET :8081/` → 200 the **admin** SPA index (title contains `Admin`, not the client/otp bundle), `GET /balance/admin/whoami` **no token** → **401 at Kong** — the admin `/` catch-all does not shadow the admin API, and the authenticated admin spine is wired. |
 | **Admin whoami slice** | black-box (browser-independent): a **real demo-admin bearer** (PKCE via the `admin-app` client) → `GET /balance/admin/whoami` → **200** with `userId == token sub` and `roles` containing `admin` — the demo-admin login reaches balance-service through `internal-nginx → internal-kong`. **FAILs** on a 401/403 for a valid admin or a wrong echoed identity; **SKIPs** if a token can't be minted (no `*.localtest.me` DNS). |
-| **Admin read/landing e2e** | the admin-plane spine: the admin app's `login.e2e.ts`, `accounts.e2e.ts`, and `analytics.e2e.ts` run for real (E2E enabled, demo-admin creds, origin `:8081`). `login` — PKCE through internal-nginx/Kong and `GET /balance/admin/whoami` renders the admin identity ("Admin console", role `admin`); `accounts` — the `GET /balance/admin/accounts` + `/balance/admin/limits` reads (shipped in #50, non-empty from the migration seeds) traverse the gateway and render; `analytics` — the `GET /analytics/admin/reports/{account-summaries,daily-aggregates}` reads traverse the internal gateway's `/analytics/admin` namespace and the dashboard renders (read smoke — reports may be **empty**, no seeded transactions). A non-zero exit is a **real** serving/auth failure (or a test-code bug) → **FAIL**. |
+| **Admin e2e** | the admin-plane spine: the admin app's `login.e2e.ts`, `accounts.e2e.ts`, `analytics.e2e.ts`, `reversals.e2e.ts`, and `audit.e2e.ts` run for real (E2E enabled, both admin cred pairs, origin `:8081`; Playwright orders the spec files **alphabetically**, and the suite is order-independent, so run order does not matter). `login` — PKCE through internal-nginx/Kong and `GET /balance/admin/whoami` renders the admin identity ("Admin console", role `admin`); `accounts` — the `GET /balance/admin/accounts` + `/balance/admin/limits` reads (shipped in #50, non-empty from the migration seeds) traverse the gateway and render; `analytics` — the `GET /analytics/admin/reports/{account-summaries,daily-aggregates}` reads traverse the internal gateway's `/analytics/admin` namespace and the dashboard renders (read smoke — reports may be **empty**, no seeded transactions); `reversals` — the **maker-checker reversal**: `demo-admin` proposes a reversal of the posted `1000000001 → 1000000002` transfer the public chain created, `demo-admin-2` approves it (four-eyes), the transfer is reversed, and `reversals` then reads `GET /admin/audit` (#54) and asserts the `reversal.executed` row it just created (the audit **content** proof, order-proof); `audit` — an order-independent reachability smoke: `GET /admin/audit` (#54) returns 200 with an admin bearer and the `/audit` screen renders (table or empty state). A non-zero exit is a **real** serving/auth/reversal failure (or a test-code bug) → **FAIL**. If only one admin is present, `reversals` + `audit` are excluded (SKIPped). |
 
 ### Why `external-transfer.e2e.ts` is not run here
 
@@ -114,10 +126,10 @@ proof and exercises the identical OTP out-of-band chain.
   `tests/build-serve-admin` (router, port contract, catch-all-not-shadow, static self-up).
 - **Seed** dataset exactness, sub-alignment, no-collateral, deep idempotency — `tests/seed`.
 - **Kong auth** semantics (401/403/anti-spoof/rate-limit, both edges) — `tests/transport`.
-- **Admin maker-checker reversal** e2e and the **audit** e2e — both need seeded
-  transactions/approvals/audit rows the seed does not create, and the `GET /admin/audit` read
-  endpoint (PR #54) is unmerged — later work. (The admin `/accounts` + `/limits` reads shipped
-  in #50 and now have a read smoke, `accounts.e2e.ts`.)
+
+The admin **maker-checker reversal** + **audit** e2e are **now run here** (`reversals.e2e.ts`
++ `audit.e2e.ts`): they reverse the posted transfer the public chain creates and read the
+resulting audit rows via `GET /admin/audit` (#54) — no longer a gap.
 
 ## Skips you may see (never false passes)
 
@@ -128,3 +140,6 @@ proof and exercises the identical OTP out-of-band chain.
 - **Playwright prep SKIP** — Chromium could not be downloaded (offline).
 - **Admin whoami slice SKIP** — a demo-admin token could not be minted headlessly (Keycloak
   unreachable / no `*.localtest.me` DNS); the admin `login.e2e.ts` still proves it if it runs.
+- **Reversal + audit excluded** — only one admin was found in `realm-export.json`, so there is
+  no distinct four-eyes checker; `reversals.e2e.ts` + `audit.e2e.ts` are skipped (never
+  failed). The read/landing specs still run.
