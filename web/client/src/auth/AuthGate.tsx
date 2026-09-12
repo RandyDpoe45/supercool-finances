@@ -20,17 +20,30 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   if (error) {
     return (
-      <div role="alert">
-        <p>Sign-in failed: {error.message}</p>
-        <button type="button" onClick={() => void signinRedirect()}>
-          Try again
-        </button>
+      <div className="grid min-h-screen place-items-center bg-base p-6 text-ink">
+        <div
+          role="alert"
+          className="grid max-w-md gap-3 rounded-card border border-danger/60 bg-danger/10 p-5 text-center"
+        >
+          <p className="m-0">Sign-in failed: {error.message}</p>
+          <button
+            type="button"
+            className="justify-self-center"
+            onClick={() => void signinRedirect()}
+          >
+            Try again
+          </button>
+        </div>
       </div>
     );
   }
 
   if (isLoading || !isAuthenticated) {
-    return <p>Signing in…</p>;
+    return (
+      <div className="grid min-h-screen place-items-center bg-base p-6 text-ink">
+        <p className="text-ink-muted">Signing in…</p>
+      </div>
+    );
   }
 
   return <>{children}</>;
