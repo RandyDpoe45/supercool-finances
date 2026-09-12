@@ -23,11 +23,26 @@ export interface AccountDto {
   available: string;
   /** Human destination identifier for a customer account; null on system accounts. */
   accountNumber: string | null;
+  /**
+   * Customer-supplied account name: the trimmed string on accounts the customer named at creation,
+   * null on older / seeded accounts that predate labels. The server always includes this field.
+   */
+  label: string | null;
 }
 
 /** Envelope returned by `GET /api/accounts`. */
 export interface AccountsResponse {
   accounts: AccountDto[];
+}
+
+/**
+ * Body for `POST /api/accounts`: the only field is the customer-supplied `label` (the server trims
+ * it, bounds it to 1–50 characters, and rejects control characters). Everything money-safe about the
+ * new account — zero balances, `active`/`customer`/`MXN`, a fresh 10-digit `accountNumber` — is
+ * server-owned and never sent.
+ */
+export interface CreateAccountRequest {
+  label: string;
 }
 
 /**

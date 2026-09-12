@@ -62,7 +62,7 @@ web/client/
 ├── src/
 │   ├── main.tsx               # bootstrap: start MSW (dev) → render <App/>
 │   ├── App.tsx                # AuthProvider → Provider(store) → Router → AuthGate
-│   ├── app/routes.tsx         # authenticated routes (accounts, statement, transfers/new)
+│   ├── app/routes.tsx         # authenticated routes (accounts, accounts/new, statement, transfers/new)
 │   ├── auth/
 │   │   ├── userManager.ts     # OIDC settings + shared UserManager + getAccessToken()
 │   │   └── AuthGate.tsx       # protected-route gate (login redirect / callback / error)
@@ -77,7 +77,7 @@ web/client/
 │   ├── store/                 # configureStore + typed hooks
 │   ├── services/api/
 │   │   ├── baseApi.ts         # createApi + fetchBaseQuery(prepareHeaders: bearer) + tag types
-│   │   ├── accountsApi.ts     # getAccounts + getAccountStatement queries
+│   │   ├── accountsApi.ts     # getAccounts + getAccountStatement queries + createAccount mutation
 │   │   ├── transfersApi.ts    # resolve/initiate/initiateExternal/confirm/cancel + pending-auth
 │   │   ├── payeesApi.ts       # getPayees + registerPayee
 │   │   └── contracts/         # app-local copies of the /api wire contract
@@ -106,8 +106,10 @@ templates → pages). Only the components actually used exist:
   (account-number lookup), `TransferAmountForm` (source + amount + captcha, gated initiate),
   `TransferConfirmPanel` (pending summary + OTP code + cancel), `PayeeEnrollmentForm` (name +
   external ref + captcha, gated enroll), `PayeeList` (semantic list of payee cards; empty state),
-  `ExternalTransferForm` (usable-payee + source + amount + captcha, gated initiate).
-- **pages** — `AccountsPage` (`/`, the overview; loading/error), `AccountStatementPage`
+  `ExternalTransferForm` (usable-payee + source + amount + captcha, gated initiate),
+  `CreateAccountForm` (account name, shape-validated, gated create).
+- **pages** — `AccountsPage` (`/`, the overview; loading/error), `CreateAccountPage`
+  (`/accounts/new`, open a new account), `AccountStatementPage`
   (`/accounts/:id/transactions`; loading/error), `TransferPage` (`/transfers/new`, the
   internal-transfer orchestrator), `PayeesPage` (`/payees`, enroll + list with cooling-off), and
   `ExternalTransferPage` (`/transfers/external`, the external-transfer orchestrator).
@@ -144,16 +146,22 @@ calls flow through the app's own origin. The base is **service-namespaced** per 
 `/balance`**, so the service still receives its own `/api` upstream surface; MSW **mirrors this
 `/balance/api` path** in dev/test. Feature endpoints are added with `injectEndpoints` and are
 **relative to the base** (`'accounts'`, `` `transfers/${id}/confirm` ``, …), so they compose onto
-`/balance/api` unchanged. The accounts slice (`services/api/accountsApi.ts`) ships two reads:
+`/balance/api` unchanged. The accounts slice (`services/api/accountsApi.ts`) ships two reads and one write:
 
 - `getAccounts` → `GET /balance/api/accounts`, unwrapping the `{ accounts }` envelope to the array.
 - `getAccountStatement(accountId)` → `GET /balance/api/accounts/:id/transactions`, keeping its
   `{ accountId, entries }` envelope; `entries` arrive **newest-first** (the server orders
   by `created_at DESC, id DESC`) and are rendered in that order.
+- `createAccount({ label })` → `POST /balance/api/accounts` → **201 `AccountDto`**. The body carries
+  **only** `label` (every money-safe field — zero balances, `active`/`customer`/`MXN`, a fresh
+  10-digit `accountNumber` — is server-owned and never sent). It **invalidates** the `Account`
+  `LIST` tag so `getAccounts` refetches and the new account appears in the overview.
 
-Both are cache-tagged under the `Account` tag. Their app-local response contracts live in
-`services/api/contracts/accounts.ts` (`AccountDto`, `StatementEntryDto`, and the two
-envelopes) — the SPA's own copy per ADR-16, synced via the specs.
+The reads are cache-tagged under the `Account` tag. Their app-local response contracts live in
+`services/api/contracts/accounts.ts` (`AccountDto`, `StatementEntryDto`, the two envelopes, and the
+`CreateAccountRequest` body) — the SPA's own copy per ADR-16, synced via the specs. `AccountDto`
+carries `label` (`string | null`: the trimmed name on accounts the customer created, null on
+older / seeded accounts).
 
 The transfers slice (`services/api/transfersApi.ts`) adds the write surface + the pending
 feed: the `resolveDestination` / `initiateTransfer` / `initiateExternalTransfer` /
@@ -201,6 +209,23 @@ OIDC traffic to Keycloak is left alone
   fold. Seed data is in `src/mocks/fixtures/accounts.ts` and `.../statements.ts`; the
   statement fixtures include credits and debits (non-zero, both directions) with UTC
   timestamps, and each account's final `balanceAfter` matches its `balance`.
+- It stubs **`POST /balance/api/accounts`** (create account) with state in
+  `src/mocks/state/accountStore.ts`: a minimal `.strict()` body `{ label }` only (unknown keys →
+  **400**, so no money-safe field can be smuggled), the label trimmed then bounded 1–50 with control
+  characters rejected (→ **400**), and the per-customer account cap → **422 `ACCOUNT_LIMIT_REACHED`**
+  once the total reaches `MAX_ACCOUNTS_PER_CUSTOMER` (5). On success it mints a money-safe
+  `AccountDto` (`crypto.randomUUID()` id, a fresh 10-digit `accountNumber` in a distinct
+  `30000000xx` range, `balance`/`held`/`available` = `"0"`, `active`/`customer`/`MXN`, the trimmed
+  `label`) → **201**. The account store holds **only the created accounts**; the seeded accounts stay
+  in the fixtures and are served (with the external-hold projection) by `transferStore`, so
+  `GET /balance/api/accounts` returns `projectAccounts()` **folded with** the store's created
+  accounts (each appears once, never double-counted). The cap counts the seeded accounts
+  (`fixtureAccounts.length`) plus the created ones. `resetAccountStore()` clears the created accounts
+  for test isolation.
+- **A newly created account's statement returns `[]`, not 404.** `GET /.../:id/transactions` first
+  looks up the seeded statement fixtures; failing that, it consults the account store
+  (`isKnownAccountId`) and returns `{ accountId, entries: [] }` for a known-but-empty created account,
+  while a truly-unknown id still 404s (existence stays unprobeable, ADR-3).
 - It mirrors the **identity/error contract** on every route with the service-wide
   `ErrorResponse` envelope (`{ error: { code, message, requestId } }`): no bearer → **401**
   (like `GatewayIdentityGuard`); a malformed account id → **400** (like the controller's
@@ -290,6 +315,25 @@ copy to `.env.local` to override locally. Never put a secret here.
   delivered by the server. Loading and error states live on the pages; empty states on the
   organisms. A 404 (missing / non-owned / system account) surfaces as a plain "not found"
   so the view never reveals whether an account exists.
+- Each account card also shows its **label** (`account.label`) when present — the customer-supplied
+  name given at creation.
+
+## Create-account flow (`/accounts/new`)
+
+`CreateAccountPage` → `CreateAccountForm` opens a new account. Reached from the accounts overview's
+**New account** action.
+
+- **Form.** The customer supplies only a **name** (`label`, trimmed, 1–50 characters); the form is
+  shape-validated and Create stays disabled until the name is valid. Nothing money-related is
+  entered — a new account is **money-safe by construction on the server** (`balance`/`held`/
+  `available` = `"0"`, `status:"active"`, `kind:"customer"`, `currency:"MXN"`, a fresh 10-digit
+  `accountNumber`).
+- **Endpoint.** `createAccount({ label })` → `POST /balance/api/accounts` → **201 `AccountDto`**.
+  On success the page navigates to `/`; the new account appears there because the mutation
+  invalidates the accounts `LIST` tag (so `getAccounts` refetches). The account cap
+  (`ACCOUNT_LIMIT_REACHED`, HTTP **422**) is surfaced as a friendly "account limit reached" message,
+  keyed off the stable domain **code** (not the raw status), consistent with the rest of the app;
+  a `BAD_REQUEST` (bad name) / `UNAUTHORIZED` (no bearer) falls through to the generic error phrase.
 
 ## Internal-transfer journey (`/transfers/new`)
 

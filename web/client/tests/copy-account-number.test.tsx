@@ -27,6 +27,7 @@ const ACCT_A: AccountDto = {
   held: '0',
   available: '1500000',
   accountNumber: '1000000001',
+  label: 'Everyday',
 };
 
 const ACCT_B: AccountDto = {
@@ -38,6 +39,7 @@ const ACCT_B: AccountDto = {
   held: '5000',
   available: '245075',
   accountNumber: '1000000002',
+  label: 'Rainy Day',
 };
 
 // A (system-style) account with NO number — the card must fall back to the id.
@@ -50,6 +52,7 @@ const ACCT_NO_NUMBER: AccountDto = {
   held: '0',
   available: '0',
   accountNumber: null,
+  label: null,
 };
 
 const COPY_LABEL = 'Copy account number';

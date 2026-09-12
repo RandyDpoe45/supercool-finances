@@ -113,6 +113,9 @@
   .account-card__id {
     @apply mr-auto text-base font-semibold;
   }
+  .account-card__label {
+    @apply text-sm font-medium text-ink-muted;
+  }
   .account-card__currency,
   .account-card__kind {
     @apply text-xs uppercase tracking-wide text-ink-muted;

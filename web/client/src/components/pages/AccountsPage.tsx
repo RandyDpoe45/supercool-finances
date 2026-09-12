@@ -18,6 +18,8 @@ export function AccountsPage() {
         <Link to="/transfers/new">Send money</Link>
         {' · '}
         <Link to="/payees">Manage payees</Link>
+        {' · '}
+        <Link to="/accounts/new">New account</Link>
       </p>
       {isLoading && <p>Loading accounts…</p>}
       {isError && <p role="alert">Failed to load accounts ({describeApiError(error)}).</p>}

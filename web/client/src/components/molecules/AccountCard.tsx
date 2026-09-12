@@ -16,6 +16,7 @@ export function AccountCard({ account }: { account: AccountDto }) {
         <Link className="account-card__id" to={`/accounts/${account.id}/transactions`}>
           {account.accountNumber ?? account.id}
         </Link>
+        {account.label ? <span className="account-card__label">{account.label}</span> : null}
         <span className="account-card__currency">{account.currency}</span>
         <span className="account-card__kind">{account.kind}</span>
         <StatusBadge status={account.status} />

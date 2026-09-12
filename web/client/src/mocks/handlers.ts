@@ -9,6 +9,12 @@ import type {
 import { fixtureAccounts } from './fixtures/accounts';
 import { fixtureStatements } from './fixtures/statements';
 import {
+  createAccount,
+  isKnownAccountId,
+  listCreatedAccounts,
+  serializeAccountDto,
+} from './state/accountStore';
+import {
   findPayee,
   isPayeeUsable,
   listPayees,
@@ -49,6 +55,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const ACCOUNT_NUMBER_PATTERN = /^\d{10}$/;
 const UNSIGNED_MINOR_UNITS = /^\d+$/;
 const NUMERIC_CODE = /^\d+$/;
+const LABEL_MAX = 50;
 
 /** The dev one-time code the confirm stub accepts (documented in docs/README.md + .env.example). */
 const DEV_OTP_CODE = import.meta.env.VITE_DEV_OTP_CODE ?? '123456';
@@ -77,6 +84,16 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
+/** True iff the string contains a C0 control character or DEL — the label-rejection contract the
+ * service's create-account schema enforces. Uses a char-code check (not a control-char regex) so the
+ * source stays free of raw control bytes and needs no `no-control-regex` suppression. */
+function hasControlChar(value: string): boolean {
+  return [...value].some((ch) => {
+    const code = ch.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f;
+  });
+}
+
 /** Mirror a Zod `.strict()` body: reject any key outside the allowlist (defense against param
  * smuggling — a client must not send `rail` / `status` / `coolingOffUntil` / `ownerId`, etc.). */
 function hasOnlyKeys(body: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -88,9 +105,12 @@ export const handlers = [
     if (!isBearerAuthenticated(request)) {
       return unauthorized();
     }
-    // Fold any live external-outbound holds over the fixtures so `available` reflects a placed hold
-    // (with no external activity this is byte-identical to the pristine fixtures).
-    const body: AccountsResponse = { accounts: projectAccounts() };
+    // Seeded accounts come from `projectAccounts()` (folding any live external-outbound holds so
+    // `available` reflects a placed hold — byte-identical to the pristine fixtures with no external
+    // activity); the customer's created accounts are folded on from the account store.
+    const body: AccountsResponse = {
+      accounts: [...projectAccounts(), ...listCreatedAccounts().map(serializeAccountDto)],
+    };
     return HttpResponse.json(body);
   }),
 
@@ -103,12 +123,52 @@ export const handlers = [
       return errorResponse(400, 'BAD_REQUEST', 'Malformed account id');
     }
     const entries = fixtureStatements[id];
-    if (!entries) {
-      // Missing / non-owned / system are indistinguishable to the caller (never 403).
-      return errorResponse(404, 'NOT_FOUND', 'Account not found');
+    if (entries) {
+      const body: StatementResponse = { accountId: id, entries };
+      return HttpResponse.json(body);
     }
-    const body: StatementResponse = { accountId: id, entries };
-    return HttpResponse.json(body);
+    if (isKnownAccountId(id)) {
+      // A newly created account has no ledger history yet — an empty statement, NOT a 404.
+      const body: StatementResponse = { accountId: id, entries: [] };
+      return HttpResponse.json(body);
+    }
+    // Missing / non-owned / system are indistinguishable to the caller (never 403).
+    return errorResponse(404, 'NOT_FOUND', 'Account not found');
+  }),
+
+  // Open a new customer account. Minimal `.strict()` body `{ label }` — every money-safe field
+  // (zero balances, active/customer/MXN, a fresh 10-digit number) is server-owned and rejected as an
+  // unknown key. Over the per-customer cap → 422 ACCOUNT_LIMIT_REACHED.
+  http.post('/balance/api/accounts', async ({ request }) => {
+    if (!isBearerAuthenticated(request)) {
+      return unauthorized();
+    }
+    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!body || typeof body !== 'object') {
+      return badRequest('Malformed request body');
+    }
+    if (!hasOnlyKeys(body, ['label'])) {
+      return badRequest('Unexpected field in account creation');
+    }
+    if (!isNonEmptyString(body.label)) {
+      return badRequest('label is required');
+    }
+    const label = body.label.trim();
+    if (label.length < 1 || label.length > LABEL_MAX) {
+      return badRequest('label must be 1–50 characters');
+    }
+    if (hasControlChar(label)) {
+      return badRequest('label must not contain control characters');
+    }
+    const result = createAccount({ label });
+    if (result.outcome === 'limit-reached') {
+      return errorResponse(
+        422,
+        'ACCOUNT_LIMIT_REACHED',
+        'You have reached the maximum number of accounts',
+      );
+    }
+    return HttpResponse.json(serializeAccountDto(result.account), { status: 201 });
   }),
 
   // Confirmation of payee (query only): resolve a 10-digit account number to a masked name +
