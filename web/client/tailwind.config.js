@@ -9,6 +9,11 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
+  // These BEM variants are built at runtime (e.g. `badge--${status}`,
+  // `direction--${direction}`), so the content scanner never sees the literal name and
+  // would tree-shake the mapped rules out of the production bundle. Safelist them so the
+  // status/direction colours always ship. (cooling-off--* are static literals, retained.)
+  safelist: ['badge--active', 'badge--frozen', 'direction--in', 'direction--out'],
   theme: {
     extend: {
       colors: {
