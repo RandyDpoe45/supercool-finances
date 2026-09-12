@@ -36,6 +36,11 @@ export class Account {
   @Column({ name: 'account_number', type: 'varchar', nullable: true })
   accountNumber!: string | null;
 
+  /** A customer-chosen display name stamped at self-service creation. NULL on seeded/system
+   * accounts (they carry no customer-facing name); not unique per owner. */
+  @Column({ name: 'label', type: 'varchar', nullable: true })
+  label!: string | null;
+
   @Column({ name: 'currency', type: 'char', length: 3 })
   currency!: string;
 

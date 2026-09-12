@@ -342,8 +342,8 @@ later domain modules import it the same way. See [domain.md](./domain.md#module-
 
 | Token | Interface | Methods |
 |---|---|---|
-| `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findByIdAndOwner(id, ownerId)`, `findBySystemKey`, `findByAccountNumber(accountNumber)`, `lockByIdForUpdate(queryRunner, id)`, `updateBalanceInTx(queryRunner, id, newBalance)`, `updateHeldInTx(queryRunner, id, newHeld)` |
-| `CUSTOMER_REPOSITORY` | `ICustomerRepository` | `findById`, `create` |
+| `ACCOUNT_REPOSITORY` | `IAccountRepository` | `findById`, `create`, `findByOwner`, `findByIdAndOwner(id, ownerId)`, `findBySystemKey`, `findByAccountNumber(accountNumber)`, `lockByIdForUpdate(queryRunner, id)`, `updateBalanceInTx(queryRunner, id, newBalance)`, `updateHeldInTx(queryRunner, id, newHeld)`, `lockOwnerForAccountCreation(qr, ownerId)` (tx-scoped advisory lock — self-service create), `countCustomerAccountsByOwner(qr, ownerId)` (the per-customer cap check), `createInTx(qr, data)` (tx-joined insert) |
+| `CUSTOMER_REPOSITORY` | `ICustomerRepository` | `findById`, `create`, `existsByIdInTx(qr, id)` (tx-joined FK precondition for self-service create) |
 | `LEDGER_ENTRY_REPOSITORY` | `ILedgerEntryRepository` | `findById`, `create`, `findByAccount(accountId, limit)` |
 | `TRANSACTION_REPOSITORY` | `ITransactionRepository` | `findById`, `create`, `insertInTx`, `insertPendingInTx` (DB-clock `expires_at`), `findByIdInTx`, `findPendingByInitiator` (→ single row or null), `findPendingByInitiatorInTx`, `transitionToPostedInTx`, `expireOverduePendingByInitiator`, `supersedeActivePendingByInitiator`, `expireIfOverdue`, `expireIfOverdueInTx`, `transitionToCancelled`, `transitionToCancelledInTx`, `transitionToReversedInTx` (guarded POSTED→REVERSED — step 5c) |
 | `HOLD_REPOSITORY` | `IHoldRepository` | `findById`, `create`, `insertInTx` (PLACED), `findByTransactionInTx`, `settleInTx` (guarded PLACED→SETTLED), `releaseInTx(qr, id, RELEASED\|EXPIRED)` (guarded PLACED→terminal), `recordExternalRefInTx(qr, id, externalRef)` (guarded `external_ref IS NULL` — step 5c) |

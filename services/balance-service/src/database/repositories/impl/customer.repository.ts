@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DeepPartial, Repository } from 'typeorm';
+import { DeepPartial, QueryRunner, Repository } from 'typeorm';
 import { Customer } from '../../entities/customer.entity';
 import { ICustomerRepository } from '../interfaces/customer.repository.interface';
 
@@ -16,5 +16,13 @@ export class CustomerRepository implements ICustomerRepository {
 
   create(data: DeepPartial<Customer>): Promise<Customer> {
     return this.repo.save(this.repo.create(data));
+  }
+
+  async existsByIdInTx(queryRunner: QueryRunner, id: string): Promise<boolean> {
+    const count = await queryRunner.manager
+      .createQueryBuilder(Customer, 'customer')
+      .where('customer.id = :id', { id })
+      .getCount();
+    return count > 0;
   }
 }

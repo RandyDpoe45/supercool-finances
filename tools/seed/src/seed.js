@@ -102,6 +102,11 @@ const ACCOUNTS = [
 
 const CURRENCY = 'MXN';
 
+// A customer-chosen display name (the `account.label` column) so the apps show a name rather
+// than a bare account number. The demo seeds one label for every account — labels are not
+// unique per owner and are display-only; a self-created account (POST /api/accounts) sets its own.
+const DEMO_ACCOUNT_LABEL = 'Checking';
+
 // Connection resilience: balance-service's `service_healthy` gate already guarantees
 // Postgres is up and migrated before this runs, so these are a thin safety net for the
 // brief readiness race, not a substitute for the dependency.
@@ -173,14 +178,14 @@ async function upsertCustomer(client, customer) {
 async function upsertAccount(client, account) {
   const result = await client.query(
     `INSERT INTO "account"
-       ("owner_id", "kind", "system_key", "currency", "account_number", "status",
+       ("owner_id", "kind", "system_key", "currency", "account_number", "label", "status",
         "balance", "held", "spent_today", "spent_today_date", "spent_month", "spent_month_date")
      VALUES
-       ($1, 'customer', NULL, $2, $3, 'active',
-        $4, 0, 0, CURRENT_DATE, 0, CURRENT_DATE)
+       ($1, 'customer', NULL, $2, $3, $4, 'active',
+        $5, 0, 0, CURRENT_DATE, 0, CURRENT_DATE)
      ON CONFLICT ("account_number") DO NOTHING
      RETURNING "id"`,
-    [account.ownerId, CURRENCY, account.accountNumber, account.balance],
+    [account.ownerId, CURRENCY, account.accountNumber, DEMO_ACCOUNT_LABEL, account.balance],
   );
   return result.rowCount > 0;
 }

@@ -1123,6 +1123,33 @@ export function getGenerateAccountNumber(): (() => string) | undefined {
   );
 }
 
+/**
+ * The Zod schema for `POST /api/accounts` (customer self-service account creation) — a
+ * `.strict()` object validating `{ label }`: trimmed, 1–50 chars after trim, no control
+ * characters, unknown keys rejected. Resolved as a REQUIRED export (the SUT of its unit spec).
+ * Scanned with `findExportAcross`; if the implementor names/locates it differently, add the
+ * path/export HERE — the single coordination point.
+ */
+export function getCreateAccountSchema(): any {
+  const schema = findExportAcross(
+    [
+      `${SRC}/modules/accounts/api/dto/create-account.schema`,
+      `${SRC}/modules/accounts/api/dto/create-account.dto`,
+      `${SRC}/modules/accounts/api/schemas/create-account.schema`,
+      `${SRC}/modules/accounts/api/create-account.schema`,
+    ],
+    ['createAccountSchema', 'CreateAccountSchema'],
+  );
+  if (schema === undefined) {
+    throw new Error(
+      `[test harness] Could not resolve the createAccountSchema (POST /api/accounts body). If the ` +
+        `implementor named/placed it differently, add the path/export to ` +
+        `tests/support/harness.ts:getCreateAccountSchema — the single coordination point.`,
+    );
+  }
+  return schema;
+}
+
 // ---- Payees module (spec 04 "External payees", Step-5: enrollment) ------------------------
 // Resolved through the same single-seam convention as everything else: the running instance BY
 // TOKEN through the app graph (integration), and the CLASS for the pure unit spec. The

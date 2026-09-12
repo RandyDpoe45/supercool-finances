@@ -93,10 +93,11 @@ controller lives in its own `api/` surface folder with its `dto/` and `serialize
 |---|---|
 | `accounts.module.ts` | Feature module (the only root file): `imports: [PersistenceModule]`, binds `{ provide: ACCOUNTS_SERVICE, useClass: AccountsService }`, `exports: [ACCOUNTS_SERVICE]`. **No controllers of its own.** |
 | `service/interfaces/accounts.service.interface.ts` | `IAccountsService` + the `ACCOUNTS_SERVICE` Symbol token. |
-| `service/impl/accounts.service.ts` | `AccountsService implements IAccountsService` — owner-scoped reads (returns **entities**) + `assertOwnerScope` + `STATEMENT_PAGE_LIMIT`. |
-| `api/accounts-api.controller.ts` | `AccountsApiController`, `@Controller('api')` — the two read routes; **declared by `ApiModule`**; injects `@Inject(ACCOUNTS_SERVICE) accounts: IAccountsService`, calls it (entities) then serializes to DTOs. |
+| `service/impl/accounts.service.ts` | `AccountsService implements IAccountsService` — owner-scoped reads + self-service `createAccount` + admin `setFrozen` (all return **entities**); `assertOwnerScope`, `STATEMENT_PAGE_LIMIT`, `MAX_CUSTOMER_ACCOUNTS`. |
+| `api/accounts-api.controller.ts` | `AccountsApiController`, `@Controller('api')` — the two read routes + `POST accounts` (self-service create); **declared by `ApiModule`**; injects `@Inject(ACCOUNTS_SERVICE) accounts: IAccountsService`, calls it (entities) then serializes to DTOs. |
 | `api/serializers/accounts.serializer.ts` | Pure explicit-whitelist serializers `serializeAccount` / `serializeStatementEntry` (entity→DTO). |
 | `api/dto/account.dto.ts` | `AccountDto` — customer view of an account (the wire contract). |
+| `api/dto/create-account.schema.ts` | `createAccountSchema` / `CreateAccountBody` — the `POST /accounts` body validation (`{ label }`, `.strict()`). |
 | `api/dto/statement-entry.dto.ts` | `StatementEntryDto` — one ledger leg of a statement (the wire contract). |
 
 `PersistenceModule` is imported by `AccountsModule`; `AccountsModule` is reached from the
@@ -119,10 +120,56 @@ Lists **only the caller's own** accounts (`owner_id = userId`). The repo's
 `NULL`, so no customer id matches.
 
 - **200** → `{ accounts: AccountDto[] }`
-- `AccountDto`: `{ id, currency, status, kind, balance, held, available }` — all strings.
+- `AccountDto`: `{ id, currency, status, kind, balance, held, available, accountNumber, label }`
+  (money fields are strings; `accountNumber` / `label` are `string | null`).
   - Path: `AccountsApiController.listAccounts` → `AccountsService.listOwnedAccounts(userId)`
     (returns `Account[]`) → `IAccountRepository.findByOwner(userId)`; the controller maps
     each entity through `serializeAccount`.
+
+### `POST /api/accounts`
+
+Customer **self-service account creation**: the caller mints a NEW customer account for
+themselves. Body `{ label }` (the customer-chosen display name).
+
+- **Money-safety (non-negotiable):** a self-service create can NEVER seed funds. The new account
+  is minted at `balance = '0'`, `held = '0'`, with every spend counter `'0'`; `kind = customer`,
+  `status = active`, `currency = MXN` (the single seeded currency), and a freshly generated unique
+  10-digit `account_number`. It moves no money, so it writes **no** ledger entry, **no** outbox
+  event, **no** OTP, and **no** audit row (the `/api` surface does not audit — only `/admin`
+  mutations do).
+- **Owner scope:** the owner id is the trusted gateway `@Identity()` `userId` — NEVER the body. The
+  `.strict()` schema rejects any extra key (so an `ownerId` cannot be smuggled in).
+- **`label` validation** (`createAccountSchema`, applied by `ZodValidationPipe`): a string, trimmed,
+  **1–50 chars after trim**, free of control characters; **not** unique per owner. A malformed body
+  → **400** (`BAD_REQUEST`).
+- **Per-customer cap:** at most **5** customer accounts per owner (`MAX_CUSTOMER_ACCOUNTS`). An
+  over-cap create → **422** (`ACCOUNT_LIMIT_REACHED`). The cap holds even under a concurrent
+  double-create (see Concurrency below).
+- **Missing customer:** the `account.owner_id → customer.id` FK requires the caller's `customer`
+  row to exist; its absence → **404** (`CUSTOMER_NOT_FOUND`). Unreachable behind the gateway (it
+  only issues ids for provisioned customers) — a fail-closed guard, not an expected path.
+- **201** → `AccountDto` (the newly created account; the same shape as the list read, with
+  `held = '0'`, `available = '0'`).
+  - Path: `AccountsApiController.createAccount` → `AccountsService.createAccount(userId, { label })`
+    (returns the created `Account`) → the controller serializes it through `serializeAccount`.
+
+#### Concurrency — the per-owner advisory lock
+
+There is no owner row to `FOR UPDATE`, and the cap is a **COUNT** invariant (not a single-row one),
+so the count-then-insert critical section is serialized per owner by a **transaction-scoped Postgres
+advisory lock** — `IAccountRepository.lockOwnerForAccountCreation` runs
+`SELECT pg_advisory_xact_lock(hashtext(ownerId))` (parameterized) as the first statement inside the
+create transaction. A concurrent double-create for the same owner blocks there until the first
+commits, so `countCustomerAccountsByOwner` then `createInTx` cannot race past the cap. The lock is
+released automatically at transaction end (commit/rollback). Distinct owners hash to (effectively)
+distinct keys, so they never contend.
+
+The whole create runs inside `runInTransactionWithRetry` (which retries only on a deadlock, `40P01`).
+The generated 10-digit `account_number` has a UNIQUE index (`uq_account_account_number`); a collision
+is astronomically rare over the 10^10 space but is handled by a **bounded outer retry** (up to 5
+attempts) that regenerates the number and re-runs the transaction **only** on a `23505` unique
+violation scoped to that constraint. The cap, missing-customer, and validation errors are **not**
+retryable — they propagate immediately.
 
 ### `GET /api/accounts/:id/transactions`
 

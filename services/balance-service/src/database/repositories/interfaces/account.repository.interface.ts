@@ -42,6 +42,23 @@ export interface IAccountRepository {
   /** `SELECT ... FOR UPDATE` on the account row — the concurrency primitive posting relies
    * on. MUST run inside the given queryRunner's active transaction. */
   lockByIdForUpdate(queryRunner: QueryRunner, id: string): Promise<Account | null>;
+  /** Serialize concurrent self-service account creates PER OWNER via a transaction-scoped Postgres
+   * advisory lock (`pg_advisory_xact_lock(hashtext(ownerId))`). There is no owner row to `FOR
+   * UPDATE` lock (the per-customer account CAP is a COUNT invariant, not a single-row one), so this
+   * advisory lock is what makes the "count then insert" critical section atomic: a concurrent
+   * double-create for the same owner blocks here until the first commits, so the cap can never be
+   * exceeded by a race. Released automatically at transaction end (commit/rollback). MUST run inside
+   * the given queryRunner's active transaction. */
+  lockOwnerForAccountCreation(queryRunner: QueryRunner, ownerId: string): Promise<void>;
+  /** Count the owner's CUSTOMER accounts (`owner_id = ownerId AND kind = 'customer'`), joined to the
+   * given queryRunner's transaction — the per-customer account-cap check for self-service creation.
+   * MUST run under {@link lockOwnerForAccountCreation} so the count-then-insert cannot race. */
+  countCustomerAccountsByOwner(queryRunner: QueryRunner, ownerId: string): Promise<number>;
+  /** Insert an account joined to the given queryRunner's transaction (via `queryRunner.manager`, so
+   * the INSERT is part of the locked create critical section — unlike {@link create}, which uses the
+   * default manager and is NOT tx-joined). Returns the persisted entity (its DB-generated `id` is
+   * populated via RETURNING). */
+  createInTx(queryRunner: QueryRunner, data: DeepPartial<Account>): Promise<Account>;
   /** Targeted UPDATE of the materialized `balance` (and `updated_at`) for one account,
    * joined to the given queryRunner's transaction. The posting reducer calls this under the
    * account's `FOR UPDATE` lock, BEFORE inserting the ledger entry (balance-then-ledger,
