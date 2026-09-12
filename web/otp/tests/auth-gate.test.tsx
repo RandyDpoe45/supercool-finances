@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { useAuth, type AuthContextProps } from 'react-oidc-context';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthGate } from '../src/auth/AuthGate';
@@ -83,5 +83,21 @@ describe('AuthGate', () => {
     expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
     expect(screen.queryByText(PROTECTED)).toBeNull();
     expect(signinRedirect).not.toHaveBeenCalled();
+  });
+
+  it('re-initiates sign-in exactly once when the error-state retry button is clicked, leaking no content', () => {
+    const error = Object.assign(new Error('token exchange failed'), {
+      source: 'signinRedirect',
+      args: undefined,
+    });
+    setAuth({ error: error as unknown as AuthContextProps['error'] });
+    renderGate();
+
+    // The one redirect must come from the click, not an auto-redirect on the error state.
+    expect(signinRedirect).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /try again/i }));
+
+    expect(signinRedirect).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(PROTECTED)).toBeNull();
   });
 });
