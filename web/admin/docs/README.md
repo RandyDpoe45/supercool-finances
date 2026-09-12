@@ -34,6 +34,26 @@ Dependency versions are **exact-pinned** and match `web/otp` / `web/client` for 
 7 + plugin-react 5, TypeScript 5.9.x, Vitest 4, MSW 2, react-oidc-context 3 + oidc-client-ts
 3, RTK 2, react-redux 9, react-router-dom 7).
 
+## Styling / theme
+
+The SPA is themed dark, Spotify-inspired: a near-black ground, a single green accent, and
+high-contrast type. Styling is **Tailwind CSS v3 + PostCSS + autoprefixer** (dev deps; v3 is
+pure-JS, so it is reproducible under the hardened `.npmrc` `ignore-scripts=true`). The palette
+tokens (surfaces / accent / ink / line / danger / warn, plus radius + shadow) live in
+[`tailwind.config.js`](../tailwind.config.js) — they are the design contract. `src/index.css`
+wires them up: an `@layer base` for base elements (`body` / `main` / headings / inputs) and an
+`@layer components` that maps the app's existing **BEM class hooks** (`.btn`, `.badge` +
+status variants, `.data-table*`, `.limits-form`, `.reversal-form`, `.audit-*`, `.pagination*`,
+`.report-section`, …) via `@apply`, plus the shared button/alert/field-error/form-actions
+primitives. The app-shell frame (`AppShell`) and the `AuthGate` loading/error states use
+Tailwind utilities directly in JSX. Each SPA keeps its **own copy** of this setup (ADR-16 — the
+monorepo shares conventions, not code; the palette is byte-identical across the three apps).
+
+The restyle is **behavior-preserving**: no markup, text, routing, `data-*`/`aria-label`/role
+test hooks, or BEM class names changed — the theme only drives the existing hooks (the limits
+`<form>` keeps its `limits-form` class, which the tests select). Vitest runs with `css: false`,
+so unit tests never process CSS; the `vite build` DOES emit the compiled stylesheet.
+
 ## Structure
 
 ```

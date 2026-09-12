@@ -12,9 +12,14 @@ export function AppShell({ children }: { children: ReactNode }) {
   const auth = useAuth();
   const subject = auth.user?.profile.sub ?? 'admin';
   return (
-    <div>
-      <header className="app-header">
-        <strong>SuperCool Finances — Admin</strong>
+    <div className="min-h-screen bg-base text-ink">
+      <header className="app-header sticky top-0 z-10 flex flex-wrap items-center gap-4 border-b border-line bg-black/95 px-4 py-3 backdrop-blur sm:px-6">
+        <span className="flex items-center gap-2">
+          <span className="inline-block h-5 w-5 rounded-full bg-accent" aria-hidden="true" />
+          <strong className="text-base font-extrabold tracking-tight">
+            SuperCool Finances — Admin
+          </strong>
+        </span>
         <nav className="app-nav" aria-label="Primary">
           <Link to="/">Home</Link>
           <Link to="/accounts">Accounts</Link>

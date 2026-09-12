@@ -1,340 +1,228 @@
-:root {
-  font-family:
-    system-ui,
-    -apple-system,
-    'Segoe UI',
-    Roboto,
-    sans-serif;
-  line-height: 1.5;
-  color-scheme: light dark;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Admin SPA styling. Palette in tailwind.config.js; this file wires it to base
+ * elements and the app's existing BEM class hooks, so markup (and the tests that
+ * query it) is untouched while the whole surface restyles. Dark, Spotify-inspired. */
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  html,
+  body {
+    @apply bg-base text-ink;
+  }
+  body {
+    @apply font-sans antialiased;
+    margin: 0;
+    min-height: 100vh;
+    line-height: 1.5;
+  }
+  main {
+    @apply mx-auto w-full max-w-5xl px-4 py-6 sm:px-6;
+  }
+  h1 {
+    @apply text-2xl font-extrabold tracking-tight;
+  }
+  h2 {
+    @apply text-xl font-bold tracking-tight;
+  }
+  a {
+    @apply text-ink no-underline transition-colors hover:text-accent;
+  }
+  input:not([type='checkbox']):not([type='radio']),
+  select,
+  textarea {
+    @apply rounded-md border border-line bg-surface-input px-3 py-2 text-ink outline-none transition
+      placeholder:text-ink-subtle focus:border-accent focus:ring-2 focus:ring-accent/40;
+    font: inherit;
+  }
 }
 
-body {
-  margin: 0;
-  min-height: 100vh;
+@layer components {
+  /* Button primitive — pill CTA. Green primary with black text (Spotify style). */
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-full border border-transparent
+      px-5 py-2 text-sm font-bold transition
+      focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent;
+  }
+  .btn--primary {
+    @apply bg-accent text-black hover:-translate-y-px hover:bg-accent-hover active:translate-y-0;
+  }
+  .btn--secondary {
+    @apply border-line bg-transparent text-ink hover:border-ink hover:bg-white/5;
+  }
+  .btn--link {
+    @apply h-auto rounded-none border-none bg-transparent p-0 font-normal text-accent underline hover:text-accent-hover;
+  }
+  .btn:disabled {
+    @apply cursor-not-allowed opacity-50 hover:translate-y-0;
+  }
+
+  /* Alert primitive (otp + admin). */
+  .alert {
+    @apply rounded-md border px-3 py-2;
+  }
+  .alert--error {
+    @apply border-danger/60 bg-danger/10 text-ink;
+  }
+  .alert--warning {
+    @apply border-warn/60 bg-warn/10 text-ink;
+  }
+  .alert--info {
+    @apply border-accent/50 bg-accent/10 text-ink;
+  }
+
+  /* Field error (client + admin). */
+  .field-error {
+    @apply m-0 mt-1 text-sm text-danger;
+  }
+
+  /* Form actions row (client + admin). */
+  .form-actions {
+    @apply mt-3 flex flex-wrap items-center gap-3;
+  }
 }
 
-main {
-  padding: 1rem;
-  max-width: 48rem;
-  margin: 0 auto;
-}
+@layer components {
+  /* Header + primary nav. The header bar itself is styled with utilities in AppShell
+   * (the app-shell pattern); these map the nav + identity hooks it keeps. */
+  .app-nav {
+    @apply flex flex-wrap gap-1;
+  }
+  .app-nav a {
+    @apply rounded-full px-3 py-1.5 text-sm text-ink-muted transition-colors hover:bg-white/5 hover:text-ink;
+  }
+  .app-header__identity {
+    @apply ml-auto text-sm text-ink-muted;
+  }
 
-/* Header + nav ------------------------------------------------------------ */
-.app-header {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  flex-wrap: wrap;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid rgba(128, 128, 128, 0.4);
-}
+  /* Home / identity landing. */
+  .home {
+    @apply flex flex-col gap-4;
+  }
+  .identity {
+    @apply m-0 grid gap-1;
+  }
+  .detail-row {
+    @apply flex gap-2;
+  }
+  .detail-row__label {
+    @apply min-w-[8rem] font-semibold text-ink-muted;
+  }
+  .detail-row__value {
+    @apply m-0;
+  }
 
-.app-nav {
-  display: flex;
-  gap: 1rem;
-}
+  /* Status badges. Neutral outline pill; each variant tints border + text so it stays
+   * readable on the near-black ground. */
+  .badge {
+    @apply inline-flex items-center rounded-full border border-line px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-ink-muted;
+  }
+  .badge--active,
+  .badge--POSTED {
+    @apply border-accent/50 text-accent;
+  }
+  .badge--EXECUTED {
+    @apply border-[#2dd4bf]/50 text-[#2dd4bf];
+  }
+  .badge--PENDING {
+    @apply border-warn/50 text-warn;
+  }
+  .badge--REVERSED {
+    @apply border-[#a78bfa]/50 text-[#a78bfa];
+  }
+  .badge--REJECTED,
+  .badge--FAILED {
+    @apply border-danger/50 text-danger;
+  }
+  .badge--frozen {
+    @apply border-warn/50 text-warn;
+  }
 
-.app-header__identity {
-  margin-left: auto;
-  opacity: 0.85;
-}
+  /* Data tables (accounts / limits / transactions / approvals / audit / reports). */
+  .data-table {
+    @apply my-3 w-full border-collapse text-sm;
+  }
+  .data-table th {
+    @apply border-b border-line px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-ink-muted;
+  }
+  .data-table td {
+    @apply border-b border-line px-3 py-2 text-left align-middle;
+  }
+  .data-table__amount {
+    @apply whitespace-nowrap text-right tabular-nums;
+  }
+  .data-table__ref {
+    @apply font-mono text-xs;
+  }
+  .data-table__muted {
+    @apply text-[0.85em] text-ink-subtle;
+  }
 
-/* Layout ------------------------------------------------------------------ */
-.home {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
+  /* Filter bar. */
+  .filter-bar {
+    @apply my-3 flex flex-wrap items-center gap-2;
+  }
 
-.identity {
-  margin: 0;
-  display: grid;
-  gap: 0.25rem;
-}
+  /* Limits editor (KEEP the .limits-form class — admin tests select form.limits-form). */
+  .limits-form {
+    @apply grid max-w-md gap-2;
+  }
+  .limits-form label {
+    @apply font-semibold text-ink-muted;
+  }
+  .cap-preview {
+    @apply mt-1 text-sm tabular-nums text-ink-subtle;
+  }
 
-.detail-row {
-  display: flex;
-  gap: 0.5rem;
-}
+  /* Reversals — the inline propose-reversal form + per-row decision buttons. */
+  .reversal-form {
+    @apply my-3 grid max-w-lg gap-2 rounded-card border border-line bg-surface p-4;
+  }
+  .reversal-form label {
+    @apply font-semibold text-ink-muted;
+  }
+  .approval-actions {
+    @apply flex flex-wrap gap-2;
+  }
 
-.detail-row__label {
-  min-width: 8rem;
-  font-weight: 600;
-}
+  /* Audit log — mono pill tags + the collapsible metadata blob. */
+  .audit-action,
+  .type-tag {
+    @apply inline-block whitespace-nowrap rounded-md border border-line bg-white/5 px-2 py-0.5 font-mono text-xs;
+  }
+  .audit-meta > summary {
+    @apply cursor-pointer text-sm text-ink-muted;
+  }
+  .audit-meta__list {
+    @apply mt-2 grid gap-1;
+  }
+  .audit-meta__row {
+    @apply flex gap-2;
+  }
+  .audit-meta__row dt {
+    @apply min-w-[10rem] font-mono text-xs font-semibold text-ink-muted;
+  }
+  .audit-meta__row dd {
+    @apply m-0 break-words font-mono text-xs;
+  }
 
-.detail-row__value {
-  margin: 0;
-}
+  /* Pagination. */
+  .pagination {
+    @apply my-3 flex items-center gap-3;
+  }
+  .pagination__status {
+    @apply tabular-nums text-ink-muted;
+  }
 
-/* Buttons ----------------------------------------------------------------- */
-.btn {
-  font: inherit;
-  padding: 0.5rem 1rem;
-  border-radius: 0.375rem;
-  border: 1px solid transparent;
-  cursor: pointer;
-}
-
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.btn--primary {
-  background: #1a56db;
-  color: #fff;
-}
-
-.btn--secondary {
-  background: transparent;
-  border-color: currentColor;
-}
-
-/* Alerts ------------------------------------------------------------------ */
-.alert {
-  border-radius: 0.375rem;
-  padding: 0.5rem 0.75rem;
-  border: 1px solid transparent;
-}
-
-.alert--error {
-  background: rgba(185, 28, 28, 0.12);
-  border-color: #b91c1c;
-}
-
-.alert--warning {
-  background: rgba(180, 83, 9, 0.12);
-  border-color: #b45309;
-}
-
-.alert--info {
-  background: rgba(26, 86, 219, 0.12);
-  border-color: #1a56db;
-}
-
-/* Status badge ------------------------------------------------------------ */
-.badge {
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 0.1rem 0.4rem;
-  border-radius: 0.75rem;
-  border: 1px solid currentColor;
-}
-
-.badge--active {
-  color: #15803d;
-}
-
-.badge--frozen {
-  color: #b45309;
-}
-
-/* Transaction + approval statuses (reversals screen). */
-.badge--POSTED {
-  color: #15803d;
-}
-
-.badge--EXECUTED {
-  color: #0f766e;
-}
-
-.badge--PENDING {
-  color: #1a56db;
-}
-
-.badge--REVERSED {
-  color: #7c3aed;
-}
-
-.badge--REJECTED {
-  color: #b91c1c;
-}
-
-.badge--FAILED {
-  color: #b91c1c;
-}
-
-/* Data tables (accounts / limits) ----------------------------------------- */
-.data-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 0.75rem 0;
-}
-
-.data-table th,
-.data-table td {
-  text-align: left;
-  padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
-  vertical-align: middle;
-}
-
-.data-table__amount {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.data-table__ref {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.8rem;
-}
-
-.data-table__muted {
-  opacity: 0.7;
-  font-size: 0.85em;
-}
-
-/* Filter bar + forms ------------------------------------------------------ */
-.filter-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
-  margin: 0.75rem 0;
-}
-
-.filter-bar input {
-  padding: 0.4rem 0.5rem;
-  font: inherit;
-}
-
-.limits-form {
-  display: grid;
-  gap: 0.4rem;
-  max-width: 26rem;
-}
-
-.limits-form label {
-  font-weight: 600;
-}
-
-.limits-form input,
-.limits-form select {
-  padding: 0.4rem 0.5rem;
-  font: inherit;
-}
-
-.cap-preview {
-  margin: 0.1rem 0 0;
-  font-size: 0.85rem;
-  opacity: 0.8;
-  font-variant-numeric: tabular-nums;
-}
-
-.field-error {
-  color: #b91c1c;
-  margin: 0.1rem 0 0;
-  font-size: 0.9rem;
-}
-
-.form-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  margin-top: 0.75rem;
-  align-items: center;
-}
-
-/* Reversals screen: the inline propose-reversal reason capture + per-row decision buttons. */
-.reversal-form {
-  display: grid;
-  gap: 0.4rem;
-  max-width: 32rem;
-  margin: 0.75rem 0;
-  padding: 0.75rem;
-  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
-  border-radius: 0.375rem;
-}
-
-.reversal-form label {
-  font-weight: 600;
-}
-
-.reversal-form input {
-  padding: 0.4rem 0.5rem;
-  font: inherit;
-}
-
-.approval-actions {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-
-/* Audit log --------------------------------------------------------------- */
-.audit-action {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.75rem;
-  padding: 0.1rem 0.4rem;
-  border-radius: 0.375rem;
-  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
-  background: color-mix(in srgb, currentColor 8%, transparent);
-  white-space: nowrap;
-}
-
-.audit-meta > summary {
-  cursor: pointer;
-  font-size: 0.85rem;
-  opacity: 0.85;
-}
-
-.audit-meta__list {
-  margin: 0.4rem 0 0;
-  display: grid;
-  gap: 0.2rem;
-}
-
-.audit-meta__row {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.audit-meta__row dt {
-  font-weight: 600;
-  min-width: 10rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.8rem;
-}
-
-.audit-meta__row dd {
-  margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.8rem;
-  word-break: break-word;
-}
-
-/* Pagination -------------------------------------------------------------- */
-.pagination {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin: 0.75rem 0;
-}
-
-.pagination__status {
-  font-variant-numeric: tabular-nums;
-  opacity: 0.85;
-}
-
-/* Analytics reports ------------------------------------------------------- */
-.report-section {
-  margin-top: 1.5rem;
-}
-
-.report-section:first-of-type {
-  margin-top: 0.5rem;
-}
-
-/* Transaction-type tag on the daily-aggregates table (matches the audit-action pill). */
-.type-tag {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.75rem;
-  padding: 0.1rem 0.4rem;
-  border-radius: 0.375rem;
-  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
-  background: color-mix(in srgb, currentColor 8%, transparent);
-  white-space: nowrap;
+  /* Analytics report sections. */
+  .report-section {
+    @apply mt-6;
+  }
+  .report-section:first-of-type {
+    @apply mt-2;
+  }
 }
