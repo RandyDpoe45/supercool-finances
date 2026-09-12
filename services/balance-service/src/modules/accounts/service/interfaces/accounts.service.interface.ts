@@ -21,6 +21,17 @@ export interface IAccountsService {
   /** The caller's own accounts only (excludes system accounts). */
   listOwnedAccounts(ownerId: string): Promise<Account[]>;
   /**
+   * Customer self-service account creation (spec 04 `POST /api/accounts`). Mints a NEW customer
+   * account owned by `ownerId` (the trusted gateway identity, never the body), minted at
+   * `balance = 0` / `held = 0` with all spend counters zeroed — a self-service create can NEVER
+   * seed funds and moves no money (no ledger / outbox / OTP / audit row). Under a per-owner
+   * advisory lock: rejects an owner with no `customer` row (→ 404 CUSTOMER_NOT_FOUND) and an
+   * over-cap create (→ 422 ACCOUNT_LIMIT_REACHED); the cap holds even under a concurrent
+   * double-create. Generates a unique 10-digit `account_number` (bounded retry on the rare unique
+   * collision). Returns the created ENTITY; the controller serializes it.
+   */
+  createAccount(ownerId: string, input: { label: string }): Promise<Account>;
+  /**
    * Admin `GET /admin/accounts` — view ANY account (spec 04 "Admin ops"). DELIBERATELY NOT
    * owner-scoped: unlike the owner-scoped `/api` account reads, this returns accounts for any owner
    * (and system/clearing accounts) for the role-gated admin surface only. Clamps the requested

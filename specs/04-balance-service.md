@@ -16,7 +16,10 @@ whole prompt is about — correctness here is the deliverable.
   `available = balance − held`.** `balance` and `held` are caches kept in sync
   transactionally — never mutated except by the posting / hold operations.
   Accounts also have a **kind**: customer accounts, or internal **system accounts**
-  used as per-rail clearing (see external rails).
+  used as per-rail clearing (see external rails). Customer accounts also carry an optional
+  **`label`** (a customer-chosen display name set at self-service creation), and a customer may
+  **self-create** additional customer accounts (up to a small per-customer cap), each minted at
+  **zero balance**.
 - **Ledger** — append-only, double-entry `LedgerEntry` rows summing to zero per
   transaction; each entry records the signed delta and the resulting
   **`balance_after`** for its account (the running fold). The account's
@@ -223,7 +226,7 @@ whole prompt is about — correctness here is the deliverable.
 
 ## Endpoints (representative)
 
-- `/api`: `GET /accounts`, `GET /accounts/:id/transactions`,
+- `/api`: `GET /accounts`, `POST /accounts`, `GET /accounts/:id/transactions`,
   `POST /transfers/resolve-destination`, `POST /transfers`, `POST /transfers/external`,
   `POST /transfers/:id/confirm`, `POST /transfers/:id/cancel`, `POST /otp`, `POST /payees`,
   `GET /payees`, `GET /pending-authorization`.
@@ -232,6 +235,15 @@ whole prompt is about — correctness here is the deliverable.
   (no money moves). `POST /transfers` addresses the payee by
   `destinationAccountNumber` and **requires** that `confirmationToken`.
   `GET /accounts` exposes the owner's own `accountNumber` per account.
+  `POST /accounts` **creates a new customer account** for the caller (self-service): body
+  `{ label }` (a customer-chosen display name, 1–50 chars) yields **201** with the new
+  `AccountDto`. The account is minted at **`balance = 0`, `held = 0`** (money-safety — a
+  self-service create can never seed funds), `kind = customer`, `status = active`,
+  `currency = MXN` (the single seeded currency), with a freshly generated unique 10-digit
+  `account_number`. A customer may hold **at most 5** customer accounts; an over-cap create is
+  rejected **422 `ACCOUNT_LIMIT_REACHED`**, and the cap is enforced under a per-owner lock so a
+  concurrent double-create cannot exceed it. Creating an account moves no money, so it is
+  **not** OTP-gated and writes **no** audit / ledger / outbox row.
   `POST /otp` mints the caller's user-scoped one-time code (the mocked out-of-band delivery to
   the OTP app) — a **dedicated generate endpoint**, singleton-gated; OTP is **not** auto-minted
   at transfer initiation. `POST /transfers/:id/cancel` cancels the caller's pending transfer
@@ -284,7 +296,8 @@ UNIQUE** (email uniqueness is **case-insensitive** — unique on `LOWER(email)`)
 data-model note that said `sub → name` was Keycloak/UI-only** — the balance DB now owns the
 customer profile; Keycloak keeps only auth), `Account` (carries `balance`, `held` + period
 counters, and now a nullable **`account_number`** — a unique 10-digit numeric string on
-customer accounts, NULL on system accounts; `owner_id` is an FK to `Customer`), `LedgerEntry`
+customer accounts, NULL on system accounts; and a nullable **`label`** (a customer-chosen
+display name on self-created accounts, NULL on seeded/system accounts); `owner_id` is an FK to `Customer`), `LedgerEntry`
 (carries `balance_after`), `Hold` (reservation ledger: amount, status, `externalRef`),
 `Transaction`, `ExternalPayee`, `Limit`, `OutboxEvent`, `AuditLog`,
 `ApprovalRequest` (maker-checker), `IdempotencyKey`. (OTP codes and confirmation-of-payee
@@ -326,6 +339,10 @@ role-based.
       publishes it (SKIP LOCKED verified across two instances).
 - [ ] Reconciliation: `sum(ledger delta) == account.balance` **and**
       `sum(active holds) == account.held`; internal accounts net to 0.
+- [ ] **Customer self-service account creation** (`POST /api/accounts`): mints a new customer
+      account at **balance 0 / held 0** (never seeds money), owner-scoped to the caller, with a
+      unique generated 10-digit account number and a validated `label`; the **per-customer cap
+      (5)** holds even under a concurrent double-create; the create emits **no** ledger/outbox row.
 
 ## Open questions
 

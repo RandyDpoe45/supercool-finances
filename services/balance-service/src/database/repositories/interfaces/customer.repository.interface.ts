@@ -1,4 +1,4 @@
-import { DeepPartial } from 'typeorm';
+import { DeepPartial, QueryRunner } from 'typeorm';
 import { Customer } from '../../entities/customer.entity';
 
 /** DI token for {@link ICustomerRepository}. Consumers depend on the interface, never the
@@ -11,4 +11,9 @@ export const CUSTOMER_REPOSITORY = Symbol('CUSTOMER_REPOSITORY');
 export interface ICustomerRepository {
   findById(id: string): Promise<Customer | null>;
   create(data: DeepPartial<Customer>): Promise<Customer>;
+  /** Whether a customer row with this id exists, joined to the given queryRunner's transaction.
+   * Self-service account creation calls this under the per-owner advisory lock: the
+   * `account.owner_id → customer.id` FK requires the caller's customer row to exist, so an absent
+   * one is surfaced as a domain 404 rather than a raw FK violation. */
+  existsByIdInTx(queryRunner: QueryRunner, id: string): Promise<boolean>;
 }

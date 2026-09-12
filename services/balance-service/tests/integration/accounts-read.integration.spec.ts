@@ -244,6 +244,7 @@ suite(
           'held',
           'id',
           'kind',
+          'label',
           'status',
         ].sort(),
       );

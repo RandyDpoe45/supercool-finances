@@ -22,6 +22,8 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   ACCOUNT_NOT_FOUND: HttpStatus.NOT_FOUND,
   TRANSFER_NOT_FOUND: HttpStatus.NOT_FOUND,
   PAYEE_NOT_FOUND: HttpStatus.NOT_FOUND,
+  // Self-service account creation (spec 04): the caller has no `customer` row (FK precondition).
+  CUSTOMER_NOT_FOUND: HttpStatus.NOT_FOUND,
   // External rail webhooks (step 5c): the settlement target / inbound destination is unknown.
   SETTLEMENT_TARGET_NOT_FOUND: HttpStatus.NOT_FOUND,
   INBOUND_DESTINATION_NOT_FOUND: HttpStatus.NOT_FOUND,
@@ -30,6 +32,8 @@ const DOMAIN_ERROR_STATUS: Readonly<Record<string, number>> = {
   CURRENCY_MISMATCH: HttpStatus.UNPROCESSABLE_ENTITY,
   INSUFFICIENT_FUNDS: HttpStatus.UNPROCESSABLE_ENTITY,
   LIMIT_EXCEEDED: HttpStatus.UNPROCESSABLE_ENTITY,
+  // Self-service account creation (spec 04): the per-customer account cap (5) is reached.
+  ACCOUNT_LIMIT_REACHED: HttpStatus.UNPROCESSABLE_ENTITY,
 
   // Conflict with current state / a concurrent or duplicate request.
   ACCOUNT_FROZEN: HttpStatus.CONFLICT,

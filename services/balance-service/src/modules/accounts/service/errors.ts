@@ -26,3 +26,26 @@ export class AccountNotFreezableError extends DomainError {
     super(`Account ${accountId} is a system account and cannot be frozen`);
   }
 }
+
+/** Self-service account creation would exceed the per-customer account cap. A semantically valid
+ * request the money state cannot honor → 422 Unprocessable Entity. The cap is checked under the
+ * per-owner advisory lock, so a concurrent double-create cannot slip past it. */
+export class AccountLimitReachedError extends DomainError {
+  readonly code = 'ACCOUNT_LIMIT_REACHED';
+
+  constructor(max: number) {
+    super(`Account limit reached (max ${max} customer accounts)`);
+  }
+}
+
+/** Self-service account creation was requested for an owner with no `customer` row. The
+ * `account.owner_id → customer.id` FK requires one; its absence is surfaced as a 404 rather than a
+ * raw FK violation. (Unreachable behind the gateway, which only issues ids for provisioned
+ * customers — a fail-closed guard, not an expected path.) */
+export class CustomerNotFoundError extends DomainError {
+  readonly code = 'CUSTOMER_NOT_FOUND';
+
+  constructor(ownerId: string) {
+    super(`Customer ${ownerId} not found`);
+  }
+}

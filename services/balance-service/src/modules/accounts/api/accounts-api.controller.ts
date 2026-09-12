@@ -1,12 +1,14 @@
-import { Controller, Get, Inject, Param, ParseUUIDPipe } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, ParseUUIDPipe, Post } from '@nestjs/common';
 import { Identity } from '../../../common/identity/identity.decorator';
 import { RequestIdentity } from '../../../common/identity/request-identity';
+import { ZodValidationPipe } from '../../../common/validation/zod-validation.pipe';
 import { serializeAccount, serializeStatementEntry } from './serializers/accounts.serializer';
 import {
   ACCOUNTS_SERVICE,
   IAccountsService,
 } from '../service/interfaces/accounts.service.interface';
 import { AccountDto } from './dto/account.dto';
+import { CreateAccountBody, createAccountSchema } from './dto/create-account.schema';
 import { StatementEntryDto } from './dto/statement-entry.dto';
 
 /**
@@ -28,6 +30,19 @@ export class AccountsApiController {
   async listAccounts(@Identity() identity: RequestIdentity): Promise<{ accounts: AccountDto[] }> {
     const accounts = await this.accounts.listOwnedAccounts(identity.userId);
     return { accounts: accounts.map(serializeAccount) };
+  }
+
+  /**
+   * Customer self-service account creation. The owner id comes from the trusted gateway
+   * `@Identity()`, NEVER the body (which carries only the `label`). POST defaults to 201 in Nest.
+   */
+  @Post('accounts')
+  async createAccount(
+    @Body(new ZodValidationPipe(createAccountSchema)) body: CreateAccountBody,
+    @Identity() identity: RequestIdentity,
+  ): Promise<AccountDto> {
+    const account = await this.accounts.createAccount(identity.userId, { label: body.label });
+    return serializeAccount(account);
   }
 
   @Get('accounts/:id/transactions')

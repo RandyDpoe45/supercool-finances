@@ -29,6 +29,8 @@ const ACCOUNT_DTO_KEYS = [
   'status',
   // Confirmation-of-payee follow-up: the human account number is a deliberate, whitelisted field.
   'accountNumber',
+  // Self-service account creation: the customer-chosen display name is a deliberate whitelist field.
+  'label',
 ];
 const ENTRY_DTO_KEYS = ['balanceAfter', 'createdAt', 'currency', 'delta', 'id', 'transactionId'];
 
@@ -52,6 +54,7 @@ function fullAccount(overrides: Record<string, unknown> = {}): any {
     kind: 'customer',
     systemKey: null,
     accountNumber: '1234567890',
+    label: 'My Savings',
     currency: 'MXN',
     status: 'active',
     balance: '5000',
@@ -87,6 +90,7 @@ describe('serializeAccount — entity -> AccountDto whitelist (pure, no DB)', ()
     expect(dto.balance).toBe('5000');
     expect(dto.held).toBe('2000');
     expect(dto.accountNumber).toBe('1234567890'); // the human number is passed through verbatim
+    expect(dto.label).toBe('My Savings'); // the customer-chosen display name is passed through verbatim
     expect(typeof dto.balance).toBe('string');
     expect(typeof dto.available).toBe('string');
   });
@@ -96,6 +100,26 @@ describe('serializeAccount — entity -> AccountDto whitelist (pure, no DB)', ()
     expect(dto.accountNumber).toBeNull();
     // The whitelist is exact even when the number is null — the key is present, not dropped.
     expect(Object.keys(dto).sort()).toEqual([...ACCOUNT_DTO_KEYS].sort());
+  });
+
+  it('passes a null label through unchanged (seeded/system accounts) and a set label verbatim', () => {
+    const nulled = serializeAccount(fullAccount({ label: null }));
+    expect(nulled.label).toBeNull();
+    expect(Object.keys(nulled).sort()).toEqual([...ACCOUNT_DTO_KEYS].sort());
+
+    const set = serializeAccount(fullAccount({ label: 'Rent Money' }));
+    expect(set.label).toBe('Rent Money');
+  });
+
+  it('money-safety at the wire: a self-created account serializes balance/held/available all "0"', () => {
+    // A self-service create mints at balance 0 / held 0 (never seeds funds). The DTO must reflect
+    // that exactly — all three money fields the string "0".
+    const dto = serializeAccount(
+      fullAccount({ balance: '0', held: '0', spentToday: '0', spentMonth: '0' }),
+    );
+    expect(dto.balance).toBe('0');
+    expect(dto.held).toBe('0');
+    expect(dto.available).toBe('0');
   });
 
   it('derives available = balance − held with BigInt math (no float loss near 2^63)', () => {

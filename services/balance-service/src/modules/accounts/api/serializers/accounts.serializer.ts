@@ -23,6 +23,7 @@ export function serializeAccount(account: Account): AccountDto {
     held: account.held,
     available: availableBalance(account.balance, account.held),
     accountNumber: account.accountNumber,
+    label: account.label,
   };
 }
 

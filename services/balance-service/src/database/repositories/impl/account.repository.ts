@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DeepPartial, QueryRunner, Repository } from 'typeorm';
 import { Account } from '../../entities/account.entity';
-import { AccountStatus } from '../../entities/enums';
+import { AccountKind, AccountStatus } from '../../entities/enums';
 import { AccountQueryFilter, IAccountRepository } from '../interfaces/account.repository.interface';
 
 /** TypeORM implementation of {@link IAccountRepository}, bound to `ACCOUNT_REPOSITORY` in
@@ -57,6 +57,24 @@ export class AccountRepository implements IAccountRepository {
       .setLock('pessimistic_write')
       .where('account.id = :id', { id })
       .getOne();
+  }
+
+  async lockOwnerForAccountCreation(queryRunner: QueryRunner, ownerId: string): Promise<void> {
+    // Transaction-scoped advisory lock keyed by the owner id (hashed to the bigint the lock API
+    // takes). Parameterized — ownerId is never interpolated. Released at transaction end.
+    await queryRunner.query('SELECT pg_advisory_xact_lock(hashtext($1))', [ownerId]);
+  }
+
+  countCustomerAccountsByOwner(queryRunner: QueryRunner, ownerId: string): Promise<number> {
+    return queryRunner.manager
+      .createQueryBuilder(Account, 'account')
+      .where('account.ownerId = :ownerId', { ownerId })
+      .andWhere('account.kind = :kind', { kind: AccountKind.Customer })
+      .getCount();
+  }
+
+  createInTx(queryRunner: QueryRunner, data: DeepPartial<Account>): Promise<Account> {
+    return queryRunner.manager.save(queryRunner.manager.create(Account, data));
   }
 
   async updateBalanceInTx(queryRunner: QueryRunner, id: string, newBalance: string): Promise<void> {
