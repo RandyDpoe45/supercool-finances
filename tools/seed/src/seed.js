@@ -16,33 +16,67 @@ const { Client } = pg;
 
 // --- Demo dataset — the shared contract from spec 08 (§Seed data / Demo dataset) ----
 
-// Customer A is the login: its `id` IS the pinned Keycloak `sub` from realm-export.json
-// (so account.owner_id -> this id lines up with the token's sub). Customer B has NO
-// Keycloak login; its id is a synthetic UUID — it exists as a confirmation-of-payee
-// transfer target for the demo.
-const CUSTOMERS = [
-  {
-    id: '11111111-1111-4111-8111-111111111111',
-    name: 'Demo Customer',
-    phone: '5510000001',
-    email: 'demo-customer@example.test',
-  },
-  {
-    id: 'b0000000-0000-4000-8000-000000000002',
-    name: 'Maria Gonzalez',
-    phone: '5520000002',
-    email: 'maria.gonzalez@example.test',
-  },
-];
+// 10 login-capable customers (demo-customer = #1, then demo-customer-2 … demo-customer-10)
+// plus one no-login payee (Maria Gonzalez) = 11 customers + 11 customer accounts. Each
+// login customer's `id` IS the pinned Keycloak `sub` from realm-export.json (so
+// account.owner_id -> this id lines up with the token's sub). Maria has NO Keycloak login;
+// her id is a synthetic UUID — she exists as a confirmation-of-payee transfer target.
+
+// Customer #1 — the primary login.
+const PRIMARY_CUSTOMER = {
+  id: '11111111-1111-4111-8111-111111111111',
+  name: 'Demo Customer',
+  phone: '5510000001',
+  email: 'demo-customer@example.test',
+};
+
+// Customers #2–#10 — additional logins. Generated (rather than 9 copy-pasted literals) so
+// the rows stay readable and match the spec table exactly; `nn` is the zero-padded 2-digit
+// N (02 … 10) used to build the pinned sub, phone, and (below) the account number.
+const LOGIN_CUSTOMERS = Array.from({ length: 9 }, (_, i) => {
+  const n = i + 2; // 2 … 10
+  const nn = String(n).padStart(2, '0');
+  return {
+    id: `c00000${nn}-00${nn}-40${nn}-80${nn}-${String(n).padStart(12, '0')}`,
+    name: `Demo Customer ${n}`,
+    phone: `55100000${nn}`,
+    email: `demo-customer-${n}@example.test`,
+  };
+});
+
+// Maria Gonzalez — the no-login payee (synthetic id, no realm user).
+const MARIA = {
+  id: 'b0000000-0000-4000-8000-000000000002',
+  name: 'Maria Gonzalez',
+  phone: '5520000002',
+  email: 'maria.gonzalez@example.test',
+};
+
+const CUSTOMERS = [PRIMARY_CUSTOMER, ...LOGIN_CUSTOMERS, MARIA];
 
 // One active MXN customer account each. Money (`balance`) is bigint minor units passed
 // as a STRING — never float arithmetic. `held` and the spend counters start at 0 and
 // the fixed-window markers start at the DB's CURRENT_DATE (supplied in SQL below, not
 // as a parameter, so it is the database's notion of "today"). account.id uses the DB
 // default (gen_random_uuid()).
+//
+// Account numbers: #1 = 1000000001; Maria = 1000000002; #2 … #10 = 1000000003 …
+// 1000000011 (1000000001 + N, skipping Maria's 1000000002). Balances: #1 = 100000000
+// (1,000,000.00 MXN); Maria = 50000000 (500,000.00 MXN); #N = N × 10000000 minor units
+// (N × 100,000.00 MXN → #2 = 200,000.00 … #10 = 1,000,000.00).
+const LOGIN_ACCOUNTS = LOGIN_CUSTOMERS.map((customer, i) => {
+  const n = i + 2; // 2 … 10
+  return {
+    ownerId: customer.id,
+    accountNumber: String(1000000001 + n),
+    balance: String(n * 10000000),
+  };
+});
+
 const ACCOUNTS = [
-  { ownerId: CUSTOMERS[0].id, accountNumber: '1000000001', balance: '100000000' },
-  { ownerId: CUSTOMERS[1].id, accountNumber: '1000000002', balance: '50000000' },
+  { ownerId: PRIMARY_CUSTOMER.id, accountNumber: '1000000001', balance: '100000000' },
+  ...LOGIN_ACCOUNTS,
+  { ownerId: MARIA.id, accountNumber: '1000000002', balance: '50000000' },
 ];
 
 const CURRENCY = 'MXN';
