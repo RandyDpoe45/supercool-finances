@@ -158,6 +158,177 @@
       ]
     },
     {
+      "id": "c0000002-0002-4002-8002-000000000002",
+      "username": "demo-customer-2",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Customer 2",
+      "email": "demo-customer-2@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo-customer-2-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "customer"
+      ]
+    },
+    {
+      "id": "c0000003-0003-4003-8003-000000000003",
+      "username": "demo-customer-3",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Customer 3",
+      "email": "demo-customer-3@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo-customer-3-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "customer"
+      ]
+    },
+    {
+      "id": "c0000004-0004-4004-8004-000000000004",
+      "username": "demo-customer-4",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Customer 4",
+      "email": "demo-customer-4@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo-customer-4-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "customer"
+      ]
+    },
+    {
+      "id": "c0000005-0005-4005-8005-000000000005",
+      "username": "demo-customer-5",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Customer 5",
+      "email": "demo-customer-5@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo-customer-5-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "customer"
+      ]
+    },
+    {
+      "id": "c0000006-0006-4006-8006-000000000006",
+      "username": "demo-customer-6",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Customer 6",
+      "email": "demo-customer-6@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo-customer-6-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "customer"
+      ]
+    },
+    {
+      "id": "c0000007-0007-4007-8007-000000000007",
+      "username": "demo-customer-7",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Customer 7",
+      "email": "demo-customer-7@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo-customer-7-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "customer"
+      ]
+    },
+    {
+      "id": "c0000008-0008-4008-8008-000000000008",
+      "username": "demo-customer-8",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Customer 8",
+      "email": "demo-customer-8@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo-customer-8-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "customer"
+      ]
+    },
+    {
+      "id": "c0000009-0009-4009-8009-000000000009",
+      "username": "demo-customer-9",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Customer 9",
+      "email": "demo-customer-9@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo-customer-9-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "customer"
+      ]
+    },
+    {
+      "id": "c0000010-0010-4010-8010-000000000010",
+      "username": "demo-customer-10",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Customer 10",
+      "email": "demo-customer-10@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo-customer-10-pw",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "customer"
+      ]
+    },
+    {
       "id": "22222222-2222-4222-8222-222222222222",
       "username": "demo-admin",
       "enabled": true,

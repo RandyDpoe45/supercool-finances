@@ -65,25 +65,73 @@ working on a clean machine.
   `realm-export.json` (spec 02) to make the `sub` deterministic, and the seed inserts
   the customer row with that SAME id. Realm import is first-boot only, so a clean
   `up --build` is required to (re)align.
-- **Demo dataset** — the shared contract both the seed code and its tests follow:
-  - Pinned Keycloak ids: `demo-customer` = `11111111-1111-4111-8111-111111111111`,
-    `demo-admin` = `22222222-2222-4222-8222-222222222222`,
-    `demo-admin-2` = `33333333-3333-4333-8333-333333333333` (a **second** admin,
-    realm role `admin`) — exists so the maker-checker reversal has a **distinct
-    checker** (four-eyes: checker ≠ maker). It is **admin-only**: admins are not
-    customers, so it carries **no customer/account row** (identity comes from the
-    gateway).
-  - **Customer A** (`demo-customer`, the login): `id` = the demo-customer sub above;
-    `name` "Demo Customer", `phone` "5510000001", `email` "demo-customer@example.test"
-    (matches its realm-export email). One **active MXN customer account**:
-    `account_number` `1000000001`, `balance` `100000000` (1,000,000.00 MXN), `held` 0,
-    spend counters 0, `spent_today_date`/`spent_month_date` = `CURRENT_DATE`.
-  - **Customer B** (transfer destination, NO Keycloak login): synthetic `id`
+- **Demo dataset** — the shared contract both the seed code and its tests follow.
+  There are **10 login-capable customers** (`demo-customer` = #1, then
+  `demo-customer-2` … `demo-customer-10`) plus **one no-login payee** (Maria
+  Gonzalez), so the seed loads **11 customers + 17 customer accounts** in total —
+  most customers own one account, but a few own **2–3** (see "Multiple accounts"
+  below).
+  - Pinned Keycloak ids — **customers** (realm role `customer`; account.owner_id FKs
+    to `customer.id` = this sub, so each is deterministic):
+    - `demo-customer`    = `11111111-1111-4111-8111-111111111111`
+    - `demo-customer-2`  = `c0000002-0002-4002-8002-000000000002`
+    - `demo-customer-3`  = `c0000003-0003-4003-8003-000000000003`
+    - `demo-customer-4`  = `c0000004-0004-4004-8004-000000000004`
+    - `demo-customer-5`  = `c0000005-0005-4005-8005-000000000005`
+    - `demo-customer-6`  = `c0000006-0006-4006-8006-000000000006`
+    - `demo-customer-7`  = `c0000007-0007-4007-8007-000000000007`
+    - `demo-customer-8`  = `c0000008-0008-4008-8008-000000000008`
+    - `demo-customer-9`  = `c0000009-0009-4009-8009-000000000009`
+    - `demo-customer-10` = `c0000010-0010-4010-8010-000000000010`
+  - Pinned Keycloak ids — **admins** (realm role `admin`; **NO customer/account row**,
+    identity comes from the gateway):
+    - `demo-admin`   = `22222222-2222-4222-8222-222222222222`
+    - `demo-admin-2` = `33333333-3333-4333-8333-333333333333` — the **distinct
+      checker** so the maker-checker reversal has four eyes (checker ≠ maker).
+  - **Customer #1** (`demo-customer`, the primary login): `id` = the demo-customer sub
+    above; `name` "Demo Customer", `phone` "5510000001", `email`
+    "demo-customer@example.test" (matches its realm-export email); realm password
+    `demo-customer-pw`. One **active MXN customer account**: `account_number`
+    `1000000001`, `balance` `100000000` (1,000,000.00 MXN), `held` 0, spend counters 0,
+    `spent_today_date`/`spent_month_date` = `CURRENT_DATE`.
+  - **Customers #2–#10** (`demo-customer-2` … `demo-customer-10`, logins): for each `N`
+    in `2..10`, `id` = its pinned sub above; `customer.name` = `"Demo Customer N"`;
+    realm `firstName` "Demo", `lastName` `"Customer N"`, `email`
+    `demo-customer-N@example.test`, `phone` = `55100000` + zero-padded 2-digit `N`
+    (`5510000002` … `5510000010`), realm password `demo-customer-N-pw`, realm role
+    `customer`, `enabled` + `emailVerified` true. Each owns a **primary active MXN
+    account**: `account_number` = `1000000001 + N` (`1000000003` … `1000000011`,
+    skipping `1000000002` which is Maria's); `balance` = `N × 10000000` minor units
+    (N × 100,000.00 MXN → #2 = 200,000.00 … #10 = 1,000,000.00); `held` 0, spend
+    counters 0, dates = `CURRENT_DATE`, same defaults as #1. A few of them **also**
+    own extra accounts — see "Multiple accounts".
+  - **Maria Gonzalez** (transfer destination, **NO Keycloak login**): synthetic `id`
     `b0000000-0000-4000-8000-000000000002`; `name` "Maria Gonzalez", `phone`
     "5520000002", `email` "maria.gonzalez@example.test". One active MXN customer
     account: `account_number` `1000000002`, `balance` `50000000` (500,000.00 MXN),
     same counter defaults. Exists so the demo has a confirmation-of-payee target for
-    the transfer-with-OTP flow.
+    the transfer-with-OTP flow — she has **no realm user** and cannot log in.
+  - **Multiple accounts** — so the apps can be tested with customers holding more than
+    one account, a few login customers own **2–3** MXN accounts (**never more than 3**);
+    every other customer owns exactly its one primary account. `demo-customer` (#1) and
+    Maria are deliberately kept at **one** account each — #1 is the transfer-with-OTP
+    e2e source and Maria its destination, so their single-account shape is load-bearing.
+    Extra accounts are numbered from `1000000012` upward (the primary numbers above are
+    unchanged), so `account_number` stays globally unique. Extra accounts are `active`
+    MXN, `held` 0, counters 0 @ `CURRENT_DATE`, `owner_id` = that customer's sub; a
+    **secondary** account carries `5000000` (50,000.00 MXN), a **tertiary** `2500000`
+    (25,000.00 MXN). Per customer (extras assigned in ascending customer order):
+    - `demo-customer-2` → **3** accounts: `1000000003` (primary, 200,000.00),
+      `1000000012` (50,000.00), `1000000013` (25,000.00)
+    - `demo-customer-3` → **2** accounts: `1000000004` (primary, 300,000.00),
+      `1000000014` (50,000.00)
+    - `demo-customer-4` → **3** accounts: `1000000005` (primary, 400,000.00),
+      `1000000015` (50,000.00), `1000000016` (25,000.00)
+    - `demo-customer-5` → **2** accounts: `1000000006` (primary, 500,000.00),
+      `1000000017` (50,000.00)
+    - every other customer (`demo-customer`, `demo-customer-6` … `-10`, Maria) → **1**
+      account (its primary).
+    Total: **17** customer accounts (11 primaries + 6 extras).
 
 ## Full run
 

@@ -11,10 +11,12 @@
 # code and these tests follow).
 #
 # THE LOAD-BEARING LINK (spec "Sub alignment"): customer.id IS the Keycloak sub and
-# account.owner_id FKs to it, so Customer A's seeded id MUST equal the `demo-customer`
-# user's pinned id in realm-export.json — otherwise a real Keycloak login will never map
-# to the seeded customer. A hardcoded-but-mismatched id fails Check 3 (static, vs the
-# pinned contract) AND R3 (runtime, vs the actually-inserted row).
+# account.owner_id FKs to it, so EACH login customer's seeded id (demo-customer plus
+# demo-customer-2 … demo-customer-10) MUST equal that user's pinned id in
+# realm-export.json — otherwise a real Keycloak login will never map to the seeded
+# customer. A hardcoded-but-mismatched id fails Check 3 (static, vs the pinned contract)
+# AND R3 (runtime, vs the actually-inserted row). Maria Gonzalez is a NO-LOGIN payee, so
+# she must have NO realm user at all.
 #
 # SCOPE: the seed tool + its dataset + idempotency + compose `seed`-profile gating only.
 # The SPA serving plane, Kong auth, and the e2e transfer flow are OTHER spec-08 slices
@@ -42,13 +44,103 @@ PINNED_ADMIN_ID="22222222-2222-4222-8222-222222222222"      # demo-admin sub (re
 # Customer A — the login (demo-customer); its id IS the pinned sub above.
 A_EMAIL="demo-customer@example.test"; A_NAME="Demo Customer"; A_PHONE="5510000001"
 A_ACCT="1000000001"; A_BAL="100000000"                       # 1,000,000.00 MXN
-# Customer B — transfer destination, NO Keycloak login; synthetic id.
+# Maria Gonzalez ("Customer B") — transfer destination, NO Keycloak login; synthetic id.
 B_ID="b0000000-0000-4000-8000-000000000002"
 B_EMAIL="maria.gonzalez@example.test"; B_NAME="Maria Gonzalez"; B_PHONE="5520000002"
 B_ACCT="1000000002"; B_BAL="50000000"                        # 500,000.00 MXN
+
+# --- Login-capable customers #2..#10 (demo-customer-2 … demo-customer-10). ---
+# The EXPECTED per-row values are computed from the spec 08 "Demo dataset" FORMULAS (not
+# read back from the seed code), so a seed that disagrees with the spec fails. For each N
+# in 2..10:
+#   name  = "Demo Customer N",  email = demo-customer-N@example.test,
+#   phone = "55100000" + zero-padded-2-digit N  (5510000002 … 5510000010),
+#   account_number = 1000000001 + N             (1000000003 … 1000000011, skipping
+#                                                 1000000002 which is Maria's),
+#   balance (minor units) = N * 10000000        (20000000 … 100000000),
+#   exactly one active MXN account, held 0, spend counters 0, dates = CURRENT_DATE.
+# The pinned Keycloak subs are taken VERBATIM from the spec's pinned-id table (index = N);
+# the seed must insert customer.id == this sub AND account.owner_id == this sub (R3).
+LOGIN_MIN=2
+LOGIN_MAX=10
+LOGIN_PINNED_ID=(
+  ""                                        # [0] unused
+  "$PINNED_CUSTOMER_ID"                      # [1] demo-customer (asserted via the A_* block)
+  "c0000002-0002-4002-8002-000000000002"    # [2]
+  "c0000003-0003-4003-8003-000000000003"    # [3]
+  "c0000004-0004-4004-8004-000000000004"    # [4]
+  "c0000005-0005-4005-8005-000000000005"    # [5]
+  "c0000006-0006-4006-8006-000000000006"    # [6]
+  "c0000007-0007-4007-8007-000000000007"    # [7]
+  "c0000008-0008-4008-8008-000000000008"    # [8]
+  "c0000009-0009-4009-8009-000000000009"    # [9]
+  "c0000010-0010-4010-8010-000000000010"    # [10]
+)
+# Per-N expected fields (spec formulas). Customer #1 (demo-customer) keeps its own A_*
+# values (its account/balance do NOT follow the #2..#10 formulas).
+login_username() { printf 'demo-customer-%d' "$1"; }
+login_name()     { printf 'Demo Customer %d' "$1"; }
+login_email()    { printf 'demo-customer-%d@example.test' "$1"; }
+login_phone()    { printf '55100000%02d' "$1"; }
+login_acct()     { printf '%d' "$(( 1000000001 + $1 ))"; }
+login_bal()      { printf '%d' "$(( $1 * 10000000 ))"; }
+
+# --- Multiple accounts (spec 08 "Demo dataset" → "Multiple accounts"). ---
+# So the apps can be tested with customers holding more than one account, a few login
+# customers own 2-3 MXN accounts (NEVER more than 3); every other customer owns exactly its
+# one primary. demo-customer (#1) and Maria are deliberately kept at ONE account each — #1
+# is the transfer-with-OTP e2e source and Maria its destination, so their single-account
+# shape is load-bearing. Extra accounts are numbered from 1000000012 upward (the primary
+# numbers above are unchanged), so account_number stays globally unique; a SECONDARY account
+# carries 5000000 (50,000.00 MXN), a TERTIARY 2500000 (25,000.00 MXN). Counts, numbers and
+# balances below are the SPEC's — NOT read back from the seed code.
+SECONDARY_BAL="5000000"    # 50,000.00 MXN — a customer's 2nd (secondary) account
+TERTIARY_BAL="2500000"     # 25,000.00 MXN — a customer's 3rd (tertiary) account
+
+# Expected per-customer account count for the login customers #2..#10 (spec table). #1 and
+# Maria are handled by their own A_*/B_* blocks below (both own exactly 1).
+login_acct_count() {  # $1 = N -> number of MXN accounts demo-customer-N owns
+  case "$1" in
+    2) printf 3 ;;   # 1000000003 (primary) + 1000000012 + 1000000013
+    3) printf 2 ;;   # 1000000004 (primary) + 1000000014
+    4) printf 3 ;;   # 1000000005 (primary) + 1000000015 + 1000000016
+    5) printf 2 ;;   # 1000000006 (primary) + 1000000017
+    *) printf 1 ;;   # -6..-10 own only their primary
+  esac
+}
+
+# The FULL expected customer-account table (all 17) — "account_number|owner_sub|balance"
+# (minor units). Derived from the spec: 11 PRIMARIES (#1, Maria, and #2..#10 via the
+# 1000000001+N / N*10000000 formulas, owner = each customer's pinned sub) + 6 EXTRAS on the
+# multi-account customers, assigned in ascending customer order. Asserted row-by-row against
+# the DB (exists, active MXN, held 0, counters 0 @ CURRENT_DATE, exact balance + owner_id).
+EXPECTED_ACCOUNTS=(
+  "$A_ACCT|$PINNED_CUSTOMER_ID|$A_BAL"    # #1 demo-customer (primary; load-bearing single)
+  "$B_ACCT|$B_ID|$B_BAL"                  # Maria Gonzalez  (primary; load-bearing single)
+)
+for (( _acc_n = LOGIN_MIN; _acc_n <= LOGIN_MAX; _acc_n++ )); do
+  EXPECTED_ACCOUNTS+=("$(login_acct "$_acc_n")|${LOGIN_PINNED_ID[$_acc_n]}|$(login_bal "$_acc_n")")
+done
+unset _acc_n
+# The 6 EXTRAS on the multi-account customers, numbered from 1000000012 upward:
+EXPECTED_ACCOUNTS+=(
+  "1000000012|${LOGIN_PINNED_ID[2]}|$SECONDARY_BAL"   # demo-customer-2 secondary
+  "1000000013|${LOGIN_PINNED_ID[2]}|$TERTIARY_BAL"    # demo-customer-2 tertiary
+  "1000000014|${LOGIN_PINNED_ID[3]}|$SECONDARY_BAL"   # demo-customer-3 secondary
+  "1000000015|${LOGIN_PINNED_ID[4]}|$SECONDARY_BAL"   # demo-customer-4 secondary
+  "1000000016|${LOGIN_PINNED_ID[4]}|$TERTIARY_BAL"    # demo-customer-4 tertiary
+  "1000000017|${LOGIN_PINNED_ID[5]}|$SECONDARY_BAL"   # demo-customer-5 secondary
+)
+
 # System constants the seed must NOT touch (seeded by boot migrations).
 EXPECT_SYSTEM_ACCOUNTS=2   # clearing:rail-outbound + clearing:rail-inbound
 EXPECT_GLOBAL_LIMITS=1     # one global baseline user_limits row
+# Total demo cardinality (spec "Demo dataset" + "Multiple accounts"): 10 login customers +
+# Maria = 11 customers. MOST own exactly one account, but a few login customers own 2-3
+# (demo-customer-2 → 3, -3 → 2, -4 → 3, -5 → 2; every other customer → 1), so the seed
+# loads 11 primaries + 6 extras = 17 customer accounts in total.
+EXPECT_TOTAL_CUSTOMERS=11
+EXPECT_TOTAL_CACCT=17
 
 # Discovered / cached.
 SEED_SVC=""                 # the service gated behind the `seed` profile (discovered)
@@ -63,8 +155,14 @@ BALANCE_ROLE_USER=""; SUPERUSER_PW=""
 # Runtime snapshots (captured while the stack is up, asserted after teardown).
 BASE_MXN=""; BASE_SYS=""; BASE_LIM=""; BASE_CUST=""; BASE_CACCT=""
 SEED1_RC=""; SEED1_ERRMSG=""; SEED1_OK=0
-A1_ROW=""; A1_ACCT_COUNT=""; A1_ID=""; A1_OWNER=""; A1_UPDATED=""
+A1_ROW=""; A1_ACCT_COUNT=""; A1_ID=""; A1_OWNER=""; A1_UPDATED=""; A1_ACCT_BY_SUB=""
 B1_ROW=""; B1_ACCT_COUNT=""
+# Per-N (2..10) login-customer snapshots (index = N): DB row, account count, seeded id,
+# the primary account's owner_id, and the count of accounts whose owner_id == the pinned sub
+# (proves ALL of a multi-account customer's accounts FK to the sub, not just the primary).
+declare -a LOGIN_ROW LOGIN_ACCT_COUNT LOGIN_ID LOGIN_OWNER LOGIN_ACCT_BY_SUB
+# Captured account rows for every expected account_number (all 17), keyed by account_number.
+declare -A ACCT_ROW
 AFTER1_CUR=""; AFTER1_SYS=""; AFTER1_LIM=""; AFTER1_LIM_CUST=""; AFTER1_CUST=""; AFTER1_CACCT=""
 SEED2_RC=""; SEED2_ERRMSG=""
 AFTER2_CUST=""; AFTER2_CACCT=""; AFTER2_SYS=""; AFTER2_CUR=""; AFTER2_LIM=""; A2_UPDATED=""
@@ -190,6 +288,19 @@ for u in d.get('users', []):
     if u.get('username') == want:
         print(u.get(field) or '')
         break
+PY
+}
+
+# realm-export.json reader — how many realm users carry a given email (case-insensitive).
+# Used to prove Maria (a no-login payee) has NO realm user. Returns '' if unreadable.
+realm_email_count() {  # $1 = email
+  [ -n "$PYTHON" ] || { printf ''; return 1; }
+  [ -f "$REALM_EXPORT" ] || { printf ''; return 1; }
+  "$PYTHON" - "$REALM_EXPORT" "$1" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+want = sys.argv[2].lower()
+print(sum(1 for u in d.get('users', []) if (u.get('email') or '').lower() == want))
 PY
 }
 
@@ -367,7 +478,7 @@ PY
 # (spec 08 "Sub alignment" + "Demo dataset".) A MISSING or MISMATCHED pinned id fails
 # here without Docker; the runtime R3 then proves the seeded row actually matches it.
 check_realm_pinned_ids() {
-  section "Check 3 (static) — realm-export pins demo-customer=$PINNED_CUSTOMER_ID, demo-admin=$PINNED_ADMIN_ID (sub alignment)"
+  section "Check 3 (static) — realm-export pins demo-customer + demo-customer-2..10 + demo-admin (sub alignment)"
   [ -f "$REALM_EXPORT" ] || { fail "realm-export.json not found at $REALM_EXPORT — cannot verify pinned subs"; return; }
   [ -z "$PYTHON" ] && { skip "python not available to parse realm-export.json"; return; }
   local cust_id admin_id cust_email problems=""
@@ -376,11 +487,23 @@ check_realm_pinned_ids() {
   cust_email="$(realm_user_field demo-customer email)"
   [ "$cust_id" = "$PINNED_CUSTOMER_ID" ] || problems="$problems\n  - demo-customer id is '${cust_id:-<absent>}', expected the pinned '$PINNED_CUSTOMER_ID' (sub would be non-deterministic / misaligned)"
   [ "$admin_id" = "$PINNED_ADMIN_ID" ]   || problems="$problems\n  - demo-admin id is '${admin_id:-<absent>}', expected the pinned '$PINNED_ADMIN_ID'"
-  [ "$cust_email" = "$A_EMAIL" ]         || problems="$problems\n  - demo-customer email is '${cust_email:-<absent>}', expected '$A_EMAIL' (the seed's Customer A email must match the realm login)"
+  [ "$cust_email" = "$A_EMAIL" ]         || problems="$problems\n  - demo-customer email is '${cust_email:-<absent>}', expected '$A_EMAIL' (the seed's Customer #1 email must match the realm login)"
+  # Login customers #2..#10 — each carries its pinned sub + matching email in realm-export.
+  local n uname nid nemail
+  for (( n = LOGIN_MIN; n <= LOGIN_MAX; n++ )); do
+    uname="$(login_username "$n")"
+    nid="$(realm_user_field "$uname" id)"
+    nemail="$(realm_user_field "$uname" email)"
+    [ "$nid" = "${LOGIN_PINNED_ID[$n]}" ] || problems="$problems\n  - $uname id is '${nid:-<absent>}', expected the pinned '${LOGIN_PINNED_ID[$n]}' (sub non-deterministic / misaligned)"
+    [ "$nemail" = "$(login_email "$n")" ] || problems="$problems\n  - $uname email is '${nemail:-<absent>}', expected '$(login_email "$n")'"
+  done
+  # Maria is a no-login payee — she must NOT appear as a realm user.
+  local maria_count; maria_count="$(realm_email_count "$B_EMAIL")"
+  [ "$maria_count" = "0" ] || problems="$problems\n  - Maria ('$B_EMAIL') matches $maria_count realm user(s) — she is a no-login payee and must have NO realm user"
   if [ -n "$problems" ]; then
     fail "realm-export pinned-sub contract not met:"; printf '%b\n' "$problems" >&2
   else
-    pass "realm-export pins demo-customer=$cust_id, demo-admin=$admin_id, demo-customer email=$cust_email (matches the spec contract)"
+    pass "realm-export pins demo-customer + demo-customer-2..10 (ids+emails) and demo-admin=$admin_id; Maria absent (matches the spec contract)"
   fi
 }
 
@@ -398,14 +521,39 @@ customer_row_sql() {  # $1 = email
   printf "SELECT c.id, c.name, c.phone, c.email, a.account_number, a.currency, a.status::text, a.balance, a.held, a.spent_today, a.spent_month, (a.spent_today_date IS NOT NULL), (a.spent_month_date IS NOT NULL), (a.spent_today_date = CURRENT_DATE), (a.spent_month_date = CURRENT_DATE) FROM customer c JOIN account a ON a.owner_id = c.id AND a.kind='customer' WHERE c.email='%s' ORDER BY a.account_number LIMIT 1" "$1"
 }
 acct_count_sql() { printf "SELECT count(*) FROM account a JOIN customer c ON a.owner_id=c.id WHERE c.email='%s' AND a.kind='customer'" "$1"; }
+# One customer account by account_number -> the fields needed to assert an extra account:
+# account_number|owner_id|currency|status|balance|held|spent_today|spent_month|
+# (spent_today_date=CURRENT_DATE)|(spent_month_date=CURRENT_DATE).
+account_row_sql() {  # $1 = account_number
+  printf "SELECT account_number, owner_id, currency, status::text, balance, held, spent_today, spent_month, (spent_today_date = CURRENT_DATE), (spent_month_date = CURRENT_DATE) FROM account WHERE account_number='%s' AND kind='customer' LIMIT 1" "$1"
+}
 
 snapshot_after1() {
   A1_ROW="$(pg_row "$(customer_row_sql "$A_EMAIL")")"
   A1_ACCT_COUNT="$(pg_scalar "$(acct_count_sql "$A_EMAIL")")"
   B1_ROW="$(pg_row "$(customer_row_sql "$B_EMAIL")")"
   B1_ACCT_COUNT="$(pg_scalar "$(acct_count_sql "$B_EMAIL")")"
+  local n em
+  for (( n = LOGIN_MIN; n <= LOGIN_MAX; n++ )); do
+    em="$(login_email "$n")"
+    LOGIN_ROW[$n]="$(pg_row "$(customer_row_sql "$em")")"
+    LOGIN_ACCT_COUNT[$n]="$(pg_scalar "$(acct_count_sql "$em")")"
+    LOGIN_ID[$n]="$(pg_scalar "SELECT id FROM customer WHERE email='$em'")"
+    LOGIN_OWNER[$n]="$(pg_scalar "SELECT owner_id FROM account WHERE account_number='$(login_acct "$n")'")"
+    # How many customer accounts FK to this customer's PINNED sub — the all-accounts
+    # alignment measure (independent of the seeded customer.id, so it also catches a seed
+    # that inserted a wrong id or gave an extra account the wrong owner_id).
+    LOGIN_ACCT_BY_SUB[$n]="$(pg_scalar "SELECT count(*) FROM account WHERE owner_id='${LOGIN_PINNED_ID[$n]}' AND kind='customer'")"
+  done
+  # Every expected account (all 17, primaries + extras), keyed by account_number.
+  local spec anum
+  for spec in "${EXPECTED_ACCOUNTS[@]}"; do
+    anum="${spec%%|*}"
+    ACCT_ROW[$anum]="$(pg_row "$(account_row_sql "$anum")")"
+  done
   A1_ID="$(pg_scalar "SELECT id FROM customer WHERE email='$A_EMAIL'")"
   A1_OWNER="$(pg_scalar "SELECT owner_id FROM account WHERE account_number='$A_ACCT'")"
+  A1_ACCT_BY_SUB="$(pg_scalar "SELECT count(*) FROM account WHERE owner_id='$PINNED_CUSTOMER_ID' AND kind='customer'")"
   A1_UPDATED="$(pg_scalar "SELECT updated_at FROM customer WHERE email='$A_EMAIL'")"
   AFTER1_CUR="$(pg_scalar "SELECT count(*) FROM currency")"
   AFTER1_SYS="$(pg_scalar "SELECT count(*) FROM account WHERE kind='system'")"
@@ -456,27 +604,50 @@ check_seed_first_run_ok() {
   fi
 }
 
-# R1 — the demo dataset is present and EXACTLY matches the spec for both customers.
-# (spec 08 "Demo dataset" + DoD "Seed data is present".) Fails on any wrong/missing
-# field, a missing customer, or more/fewer than one account per customer.
+# R1 — the FULL demo dataset is present and EXACTLY matches the spec: Customer #1
+# (demo-customer), the 9 login customers #2..#10, Maria, AND every one of the 17 customer
+# accounts (each customer's primary PLUS the 6 extras on the multi-account customers).
+# (spec 08 "Demo dataset" + "Multiple accounts" + DoD "Seed data is present".) Fails on any
+# wrong/missing field, a missing customer, a wrong per-customer account count, a missing or
+# mis-owned extra account, or a wrong total cardinality.
 check_dataset() {
-  section "R1 (runtime) — demo customers + accounts match the spec dataset exactly"
-  assert_customer "Customer A (demo-customer)" "$A1_ROW" "$A1_ACCT_COUNT" "$PINNED_CUSTOMER_ID" "$A_NAME" "$A_PHONE" "$A_ACCT" "$A_BAL"
-  assert_customer "Customer B (Maria Gonzalez)" "$B1_ROW" "$B1_ACCT_COUNT" "$B_ID" "$B_NAME" "$B_PHONE" "$B_ACCT" "$B_BAL"
-  # exactly two customers + two customer accounts — nothing extra crept in.
+  section "R1 (runtime) — the full demo dataset ($EXPECT_TOTAL_CUSTOMERS customers + $EXPECT_TOTAL_CACCT accounts) matches the spec exactly"
+  # Per-customer fields (id/name/phone) + PRIMARY account (lowest account_number) + the
+  # expected per-customer account count. #1 and Maria own exactly 1 (load-bearing).
+  assert_customer "Customer #1 (demo-customer)"     "$A1_ROW" "$A1_ACCT_COUNT" 1 "$PINNED_CUSTOMER_ID" "$A_NAME" "$A_PHONE" "$A_ACCT" "$A_BAL"
+  assert_customer "Maria Gonzalez (no-login payee)" "$B1_ROW" "$B1_ACCT_COUNT" 1 "$B_ID"               "$B_NAME" "$B_PHONE" "$B_ACCT" "$B_BAL"
+  # Login customers #2..#10 — expected id/name/phone/primary account/balance + per-customer
+  # account count derived from the spec (mirroring the spec, not the seed code).
+  local n
+  for (( n = LOGIN_MIN; n <= LOGIN_MAX; n++ )); do
+    assert_customer "Customer #$n (demo-customer-$n)" "${LOGIN_ROW[$n]}" "${LOGIN_ACCT_COUNT[$n]}" "$(login_acct_count "$n")" \
+      "${LOGIN_PINNED_ID[$n]}" "$(login_name "$n")" "$(login_phone "$n")" "$(login_acct "$n")" "$(login_bal "$n")"
+  done
+  # Every one of the 17 expected accounts — including the 6 EXTRAS — exists with the exact
+  # account_number, owner sub, and balance, and the active/MXN/held-0/counters-0-@-CURRENT_DATE
+  # defaults from the spec table.
+  local spec anum aowner abal
+  for spec in "${EXPECTED_ACCOUNTS[@]}"; do
+    IFS='|' read -r anum aowner abal <<EOF
+$spec
+EOF
+    assert_account "$anum" "$aowner" "$abal"
+  done
+  # exactly 11 customers + 17 customer accounts — none missing, nothing extra crept in.
   local problems=""
-  [ "$AFTER1_CUST" = "2" ]  || problems="$problems\n  - customer count after seed is '${AFTER1_CUST:-?}', expected exactly 2"
-  [ "$AFTER1_CACCT" = "2" ] || problems="$problems\n  - customer-account count after seed is '${AFTER1_CACCT:-?}', expected exactly 2"
+  [ "$AFTER1_CUST" = "$EXPECT_TOTAL_CUSTOMERS" ]  || problems="$problems\n  - customer count after seed is '${AFTER1_CUST:-?}', expected exactly $EXPECT_TOTAL_CUSTOMERS (10 logins + Maria)"
+  [ "$AFTER1_CACCT" = "$EXPECT_TOTAL_CACCT" ]     || problems="$problems\n  - customer-account count after seed is '${AFTER1_CACCT:-?}', expected exactly $EXPECT_TOTAL_CACCT (11 primaries + 6 extras)"
   if [ -n "$problems" ]; then
     fail "seeded cardinality is wrong:"; printf '%b\n' "$problems" >&2
   else
-    pass "exactly 2 demo customers + 2 customer accounts were seeded"
+    pass "exactly $EXPECT_TOTAL_CUSTOMERS demo customers + $EXPECT_TOTAL_CACCT customer accounts were seeded"
   fi
 }
 
 assert_customer() {
-  # $1 label $2 rowstring $3 acctcount $4 exp_id $5 exp_name $6 exp_phone $7 exp_acct $8 exp_bal
-  local label="$1" row="$2" acctcount="$3" eid="$4" ename="$5" ephone="$6" eacct="$7" ebal="$8"
+  # $1 label $2 rowstring $3 acctcount $4 exp_acctcount $5 exp_id $6 exp_name $7 exp_phone
+  # $8 exp_acct(primary) $9 exp_bal(primary)
+  local label="$1" row="$2" acctcount="$3" ecount="$4" eid="$5" ename="$6" ephone="$7" eacct="$8" ebal="$9"
   if [ -z "$row" ]; then
     fail "$label: not found in the seeded data (no customer+customer-account row)"; return
   fi
@@ -484,7 +655,7 @@ assert_customer() {
   IFS='|' read -r id name phone email acct cur status bal held st sm stdnn smdnn stdtoday smdtoday <<EOF
 $row
 EOF
-  [ "$acctcount" = "1" ]   || problems="$problems\n  - expected exactly 1 active customer account, found '${acctcount:-?}'"
+  [ "$acctcount" = "$ecount" ] || problems="$problems\n  - expected exactly $ecount active customer account(s), found '${acctcount:-?}'"
   [ "$id" = "$eid" ]       || problems="$problems\n  - customer.id '$id' != expected '$eid'"
   [ "$name" = "$ename" ]   || problems="$problems\n  - name '$name' != '$ename'"
   [ "$phone" = "$ephone" ] || problems="$problems\n  - phone '$phone' != '$ephone'"
@@ -502,29 +673,86 @@ EOF
   if [ -n "$problems" ]; then
     fail "$label dataset mismatch:"; printf '%b\n' "$problems" >&2
   else
-    pass "$label OK: id=$id, '$name', $phone, acct $acct, balance $bal MXN, held 0, counters 0 @ CURRENT_DATE, active (exactly 1 account)"
+    pass "$label OK: id=$id, '$name', $phone, primary acct $acct, balance $bal MXN, held 0, counters 0 @ CURRENT_DATE, active (owns exactly $ecount account(s))"
   fi
 }
 
-# R3 — SUB ALIGNMENT (the load-bearing DoD link): the seeded Customer A id AND the
-# seeded account's owner_id BOTH equal the `demo-customer` pinned sub in realm-export.
-# (spec 08 "Sub alignment" + DoD "Keycloak logins map to seeded customers".) A
-# hardcoded-but-mismatched seed id fails here against the real inserted row.
+assert_account() {
+  # $1 account_number  $2 expected owner sub  $3 expected balance (minor units).
+  # Asserts one seeded customer account exists with the exact number/owner/balance and the
+  # spec defaults (active, MXN, held 0, spend counters 0 @ CURRENT_DATE). Used to prove the
+  # 6 EXTRA accounts (and re-prove every primary) at the account level.
+  local num="$1" eowner="$2" ebal="$3" row="${ACCT_ROW[$1]}"
+  if [ -z "$row" ]; then
+    fail "account $num: not found in the seeded data (expected owner '$eowner', balance $ebal MXN)"; return
+  fi
+  local problems="" anum owner cur status bal held st sm stdtoday smdtoday
+  IFS='|' read -r anum owner cur status bal held st sm stdtoday smdtoday <<EOF
+$row
+EOF
+  [ "$anum" = "$num" ]     || problems="$problems\n  - account_number '$anum' != '$num'"
+  [ "$owner" = "$eowner" ] || problems="$problems\n  - owner_id '$owner' != expected sub '$eowner'"
+  [ "$cur" = "MXN" ]       || problems="$problems\n  - currency '$cur' != 'MXN'"
+  [ "$status" = "active" ] || problems="$problems\n  - status '$status' != 'active'"
+  [ "$bal" = "$ebal" ]     || problems="$problems\n  - balance '$bal' != '$ebal' (minor units)"
+  [ "$held" = "0" ]        || problems="$problems\n  - held '$held' != 0"
+  [ "$st" = "0" ]          || problems="$problems\n  - spent_today '$st' != 0"
+  [ "$sm" = "0" ]          || problems="$problems\n  - spent_month '$sm' != 0"
+  [ "$stdtoday" = "t" ]    || problems="$problems\n  - spent_today_date != CURRENT_DATE"
+  [ "$smdtoday" = "t" ]    || problems="$problems\n  - spent_month_date != CURRENT_DATE"
+  if [ -n "$problems" ]; then
+    fail "account $num dataset mismatch:"; printf '%b\n' "$problems" >&2
+  else
+    pass "account $num OK: owner $eowner, balance $ebal MXN, active, held 0, counters 0 @ CURRENT_DATE"
+  fi
+}
+
+# R3 — SUB ALIGNMENT (the load-bearing DoD link): for EACH login customer the seeded
+# customer.id AND the seeded account's owner_id BOTH equal that user's pinned sub in
+# realm-export. (spec 08 "Sub alignment" + DoD "Keycloak logins map to seeded customers".)
+# A hardcoded-but-mismatched seed id fails here against the real inserted row. Maria has
+# no realm user, so no alignment is required for her — instead she must be ABSENT.
 check_sub_alignment() {
-  section "R3 (runtime, LOAD-BEARING) — seeded Customer A id == demo-customer pinned sub (realm-export)"
+  section "R3 (runtime, LOAD-BEARING) — each login customer's seeded id == its pinned realm sub (realm-export)"
   local realm_id problems=""
   realm_id="$(realm_user_field demo-customer id)"
   if [ -z "$realm_id" ]; then
     fail "realm-export demo-customer has NO pinned id — the Keycloak sub is non-deterministic, so no seeded customer can align to a real login (see static Check 3)"; return
   fi
-  [ -n "$A1_ID" ]                || problems="$problems\n  - no customer row found for '$A_EMAIL' (seed did not create Customer A)"
+  [ -n "$A1_ID" ]                || problems="$problems\n  - no customer row found for '$A_EMAIL' (seed did not create Customer #1)"
   [ "$A1_ID" = "$realm_id" ]     || problems="$problems\n  - seeded customer.id '$A1_ID' != realm-export demo-customer sub '$realm_id' (a Keycloak login would NOT map to this customer)"
   [ "$A1_OWNER" = "$realm_id" ]  || problems="$problems\n  - account $A_ACCT owner_id '$A1_OWNER' != the sub '$realm_id' (the account FKs to the wrong owner)"
+  [ "$A1_ACCT_BY_SUB" = "1" ]    || problems="$problems\n  - demo-customer owns '${A1_ACCT_BY_SUB:-?}' account(s) whose owner_id == the sub, expected 1 (its single load-bearing account)"
   [ "$realm_id" = "$PINNED_CUSTOMER_ID" ] || problems="$problems\n  - realm-export sub '$realm_id' != the pinned contract value '$PINNED_CUSTOMER_ID'"
+
+  # Login customers #2..#10 — each seeded id AND EVERY account it owns (primary + any extras)
+  # must FK to the SAME pinned sub carried by demo-customer-N in realm-export. The by-sub
+  # account count == the spec's per-customer count proves ALL of a multi-account customer's
+  # accounts align, not just the primary (and catches a missing or mis-owned extra).
+  local n uname rid ecount
+  for (( n = LOGIN_MIN; n <= LOGIN_MAX; n++ )); do
+    uname="$(login_username "$n")"
+    rid="$(realm_user_field "$uname" id)"
+    ecount="$(login_acct_count "$n")"
+    if [ -z "$rid" ]; then
+      problems="$problems\n  - realm-export $uname has NO pinned id — its sub is non-deterministic, a login can't map to the seeded customer"
+      continue
+    fi
+    [ "$rid" = "${LOGIN_PINNED_ID[$n]}" ] || problems="$problems\n  - realm-export $uname sub '$rid' != the pinned contract value '${LOGIN_PINNED_ID[$n]}'"
+    [ -n "${LOGIN_ID[$n]}" ]              || problems="$problems\n  - no customer row found for $uname ('$(login_email "$n")') — seed did not create it"
+    [ "${LOGIN_ID[$n]}" = "$rid" ]        || problems="$problems\n  - $uname seeded customer.id '${LOGIN_ID[$n]}' != realm sub '$rid' (a login would NOT map to the seeded customer)"
+    [ "${LOGIN_OWNER[$n]}" = "$rid" ]     || problems="$problems\n  - $uname primary account $(login_acct "$n") owner_id '${LOGIN_OWNER[$n]}' != the sub '$rid' (the account FKs to the wrong owner)"
+    [ "${LOGIN_ACCT_BY_SUB[$n]}" = "$ecount" ] || problems="$problems\n  - $uname owns '${LOGIN_ACCT_BY_SUB[$n]:-?}' account(s) whose owner_id == the sub '$rid', expected $ecount — some account is missing or FKs to the wrong owner (all of a multi-account customer's accounts must align)"
+  done
+
+  # Maria is a NO-LOGIN payee — she must have NO realm user at all (no sub to align to).
+  local maria_count; maria_count="$(realm_email_count "$B_EMAIL")"
+  [ "$maria_count" = "0" ] || problems="$problems\n  - Maria ('$B_EMAIL') matches $maria_count realm user(s) — a no-login payee must have NO realm user"
+
   if [ -n "$problems" ]; then
-    fail "sub alignment is broken — a real demo-customer login would not resolve to the seeded customer:"; printf '%b\n' "$problems" >&2
+    fail "sub alignment is broken — a real login would not resolve to the seeded customer:"; printf '%b\n' "$problems" >&2
   else
-    pass "sub alignment holds: customer.id == account.owner_id == realm-export demo-customer sub == $realm_id"
+    pass "sub alignment holds for demo-customer + demo-customer-2..10 (customer.id == pinned realm sub, and EVERY account each owns — primary + extras — FKs to that sub); Maria has no realm user"
   fi
 }
 
@@ -557,6 +785,9 @@ check_idempotent() {
   fi
   [ "$AFTER2_CUST" = "$AFTER1_CUST" ]   || problems="$problems\n  - customer count changed across the re-run: $AFTER1_CUST -> ${AFTER2_CUST:-?} (duplication)"
   [ "$AFTER2_CACCT" = "$AFTER1_CACCT" ] || problems="$problems\n  - customer-account count changed across the re-run: $AFTER1_CACCT -> ${AFTER2_CACCT:-?} (duplication)"
+  # and both re-run counts still hold at the full-dataset cardinality (11 customers / 17 accounts).
+  [ "$AFTER2_CUST" = "$EXPECT_TOTAL_CUSTOMERS" ] || problems="$problems\n  - customer count after re-run is '${AFTER2_CUST:-?}', expected $EXPECT_TOTAL_CUSTOMERS"
+  [ "$AFTER2_CACCT" = "$EXPECT_TOTAL_CACCT" ]    || problems="$problems\n  - customer-account count after re-run is '${AFTER2_CACCT:-?}', expected $EXPECT_TOTAL_CACCT"
   if [ -n "$A1_UPDATED" ]; then
     [ "$A2_UPDATED" = "$A1_UPDATED" ]   || problems="$problems\n  - Customer A's updated_at changed across the re-run ('$A1_UPDATED' -> '$A2_UPDATED') — the seed did an UPDATE on conflict, not DO NOTHING"
   fi
@@ -567,7 +798,7 @@ check_idempotent() {
   if [ -n "$problems" ]; then
     fail "the seed is NOT idempotent:"; printf '%b\n' "$problems" >&2
   else
-    pass "re-run is a clean no-op: exit 0, 2 customers / 2 accounts unchanged, Customer A row untouched, system constants unchanged"
+    pass "re-run is a clean no-op: exit 0, $EXPECT_TOTAL_CUSTOMERS customers / $EXPECT_TOTAL_CACCT accounts unchanged, Customer #1 row untouched, system constants unchanged"
   fi
 }
 
