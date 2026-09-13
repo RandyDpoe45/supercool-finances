@@ -72,6 +72,11 @@ PREFERRED_CLIENT="admin-app"         # the admin SPA's public client (Authz Code
 ADMIN_TITLE_MARK='Admin</title>'
 SPA_ROOT_MARK='id="root"'            # any served SPA index carries the mount node
 
+# The centralized Spotify-green accent token (tailwind.config.js `colors.accent`),
+# shared by all three SPAs. A Tailwind-COMPILED bundle embeds it; an index.css shipped
+# UNPROCESSED (the build stage that omits postcss.config.js/tailwind.config.js) does not.
+THEME_ACCENT='1db954'
+
 # Isolated compose project for the auto/opt-in LIGHT self-up (never touches a real stack).
 PROJECT="scfin-build-serve-admin-test"
 
@@ -871,6 +876,46 @@ check_admin_whoami_slice() {
   esac
 }
 
+# --- R6 — the served ADMIN stylesheet is TAILWIND-COMPILED (styling regression guard).
+# The build defect: the admin-app Dockerfile build stage omitted postcss.config.js /
+# tailwind.config.js, so Vite ran no PostCSS pass and shipped index.css with its @tailwind
+# directives + @apply rules intact — invalid CSS the browser drops, so the admin app
+# renders completely unstyled (while `npm run dev` and the css:false vitest suites look
+# fine — masking it). Fetch the admin index, find the stylesheet it links, fetch that, and
+# assert PostCSS ran (no literal `@tailwind`) AND the theme compiled in (the palette accent
+# is present). Runs against the light self-up too (admin-app serves its own CSS). ---
+check_admin_css_compiled() {
+  section "R6 (runtime) — the served ADMIN stylesheet is Tailwind-compiled (theme present, no raw @tailwind)"
+  curl_probe "$(internal_base)/"
+  if [ "$PROBE_CODE" != "200" ]; then
+    skip "admin CSS: cannot read the SPA index (GET / -> $PROBE_CODE) — see R1; styling not verifiable here"; return
+  fi
+  local href
+  href="$(printf '%s' "$PROBE_BODY" | grep -oiE 'href="[^"]+\.css"' | head -1 | sed -E 's/^href="//; s/"$//')"
+  if [ -z "$href" ]; then
+    fail "admin CSS: the served index links NO stylesheet (<link ... .css>) — the app ships no CSS at all. Body head: $(printf '%s' "$PROBE_BODY" | head -c 200)"; return
+  fi
+  local css_url
+  case "$href" in
+    http://*|https://*) css_url="$href" ;;
+    /*)                 css_url="$(internal_base)$href" ;;
+    *)                  css_url="$(internal_base)/$href" ;;
+  esac
+  info "admin stylesheet: $href"
+  curl_probe "$css_url"
+  if [ "$PROBE_CODE" != "200" ]; then
+    fail "admin CSS: GET $href -> HTTP $PROBE_CODE (expected 200) — the stylesheet the index links does not load"; return
+  fi
+  if printf '%s' "$PROBE_BODY" | grep -q '@tailwind'; then
+    fail "admin CSS: the served stylesheet still contains a literal '@tailwind' directive — Tailwind/PostCSS did NOT run at build time (the Dockerfile build stage is missing postcss.config.js / tailwind.config.js). The admin app renders unstyled."; return
+  fi
+  if printf '%s' "$PROBE_BODY" | grep -qi "$THEME_ACCENT"; then
+    pass "admin CSS: Tailwind-compiled — no literal @tailwind and the theme accent #$THEME_ACCENT is present ($(printf '%s' "$PROBE_BODY" | wc -c | tr -d ' ') bytes)"
+  else
+    fail "admin CSS: the theme accent #$THEME_ACCENT is absent from the served stylesheet — the Tailwind theme (tailwind.config.js) was not compiled in (config not copied into the build stage, or content globs purged everything)."
+  fi
+}
+
 # ----------------------------------------------------------------------------------
 # Phase runners
 # ----------------------------------------------------------------------------------
@@ -924,6 +969,7 @@ run_runtime() {
   check_admin_deeplink
   check_api_not_shadowed
   check_admin_whoami_slice
+  check_admin_css_compiled
 }
 
 # Idempotent cleanup of anything this suite creates; safe on any exit.

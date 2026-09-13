@@ -29,6 +29,12 @@ RUN npm ci
 # Sources needed to build (this folder only). tsconfig.node.json + tsconfig.app.json
 # are project references of tsconfig.json (tsc -b), so all three must be present.
 COPY tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts index.html ./
+# Tailwind/PostCSS config: Vite auto-detects postcss.config.js and runs the Tailwind
+# pass over index.css (the @tailwind directives + @apply). WITHOUT these two files the
+# build ships index.css unprocessed — @tailwind/@apply survive as invalid CSS the
+# browser drops, so the served SPA is completely unstyled (the dev server reads them
+# from disk, which is why `npm run dev` looked fine while the built image did not).
+COPY tailwind.config.js postcss.config.js ./
 COPY public ./public
 COPY src ./src
 

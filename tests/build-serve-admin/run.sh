@@ -12,7 +12,7 @@
 # Usage:
 #   ./run.sh            # static then runtime (default)
 #   ./run.sh static     # stack-free checks only (Checks 1-4)
-#   ./run.sh runtime    # live-edge checks only (R1-R5)
+#   ./run.sh runtime    # live-edge checks only (R1-R6)
 #
 # Runtime bring-up:
 #   - If the internal edge is ALREADY reachable at http://localhost:${INTERNAL_HTTP_PORT}

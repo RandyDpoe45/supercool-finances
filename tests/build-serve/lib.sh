@@ -58,6 +58,11 @@ CLIENT_TITLE='<title>SuperCool Finances</title>'
 OTP_TITLE_MARK='OTP</title>'
 SPA_ROOT_MARK='id="root"'   # any served SPA index carries the mount node
 
+# The centralized Spotify-green accent token (tailwind.config.js `colors.accent`),
+# shared by all three SPAs. A Tailwind-COMPILED bundle embeds it; an index.css shipped
+# UNPROCESSED (the build stage that omits postcss.config.js/tailwind.config.js) does not.
+THEME_ACCENT='1db954'
+
 # Isolated compose project for the OPT-IN / auto self-up (never touches a real stack).
 PROJECT="scfin-build-serve-test"
 
@@ -677,6 +682,59 @@ check_api_not_shadowed() {
   [ "$bad" -eq 0 ] && pass "the /balance/api route is not shadowed by the SPA catch-all (response is not a SPA index page)"
 }
 
+# --- Shared: prove a served SPA's stylesheet is TAILWIND-COMPILED. The regression guard
+# for the build defect where the SPA Dockerfile build stage omitted postcss.config.js /
+# tailwind.config.js: Vite then runs no PostCSS pass and ships index.css with its
+# @tailwind directives + @apply rules intact — invalid CSS the browser drops, so the app
+# renders completely unstyled (while `npm run dev`, which reads the configs from disk, and
+# the css:false vitest suites both look fine — masking it). Fetch the SPA index, find the
+# stylesheet it links, fetch that, and assert PostCSS ran (no literal `@tailwind`) AND the
+# theme compiled in (the palette accent is present).
+#   $1 = label (e.g. "client"),  $2 = index URL to read the <link> from
+assert_css_compiled() {
+  local label="$1" index_url="$2"
+  curl_probe "$index_url"
+  if [ "$PROBE_CODE" != "200" ]; then
+    skip "$label CSS: cannot read the SPA index ($index_url -> $PROBE_CODE) — styling not verifiable here"; return
+  fi
+  local href
+  href="$(printf '%s' "$PROBE_BODY" | grep -oiE 'href="[^"]+\.css"' | head -1 | sed -E 's/^href="//; s/"$//')"
+  if [ -z "$href" ]; then
+    fail "$label CSS: the served index links NO stylesheet (<link ... .css>) — the app ships no CSS at all. Body head: $(printf '%s' "$PROBE_BODY" | head -c 200)"; return
+  fi
+  local css_url
+  case "$href" in
+    http://*|https://*) css_url="$href" ;;
+    /*)                 css_url="$(edge_base)$href" ;;
+    *)                  css_url="$(edge_base)/$href" ;;
+  esac
+  info "$label stylesheet: $href"
+  curl_probe "$css_url"
+  if [ "$PROBE_CODE" != "200" ]; then
+    fail "$label CSS: GET $href -> HTTP $PROBE_CODE (expected 200) — the stylesheet the index links does not load"; return
+  fi
+  if printf '%s' "$PROBE_BODY" | grep -q '@tailwind'; then
+    fail "$label CSS: the served stylesheet still contains a literal '@tailwind' directive — Tailwind/PostCSS did NOT run at build time (the Dockerfile build stage is missing postcss.config.js / tailwind.config.js). The app renders unstyled."; return
+  fi
+  if printf '%s' "$PROBE_BODY" | grep -qi "$THEME_ACCENT"; then
+    pass "$label CSS: Tailwind-compiled — no literal @tailwind and the theme accent #$THEME_ACCENT is present ($(printf '%s' "$PROBE_BODY" | wc -c | tr -d ' ') bytes)"
+  else
+    fail "$label CSS: the theme accent #$THEME_ACCENT is absent from the served stylesheet — the Tailwind theme (tailwind.config.js) was not compiled in (config not copied into the build stage, or content globs purged everything)."
+  fi
+}
+
+# --- R8 — the served CLIENT stylesheet is Tailwind-compiled (styling regression guard). ---
+check_client_css_compiled() {
+  section "R8 (runtime) — the served CLIENT stylesheet is Tailwind-compiled (theme present, no raw @tailwind)"
+  assert_css_compiled "client" "$(edge_base)/"
+}
+
+# --- R9 — the served OTP stylesheet is Tailwind-compiled (styling regression guard). ---
+check_otp_css_compiled() {
+  section "R9 (runtime) — the served OTP stylesheet is Tailwind-compiled (theme present, no raw @tailwind)"
+  assert_css_compiled "otp" "$(edge_base)/otp/"
+}
+
 # ----------------------------------------------------------------------------------
 # Phase runners
 # ----------------------------------------------------------------------------------
@@ -735,6 +793,8 @@ run_runtime() {
   check_otp_deeplink
   check_otp_asset
   check_api_not_shadowed
+  check_client_css_compiled
+  check_otp_css_compiled
 }
 
 # Idempotent cleanup of anything this suite creates; safe on any exit.

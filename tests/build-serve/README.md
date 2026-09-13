@@ -34,7 +34,7 @@ defect**. Host ports are read from `.env.example`; the client/otp index markers 
 ```bash
 bash tests/build-serve/run.sh            # static then runtime (default = "all")
 bash tests/build-serve/run.sh static     # stack-free checks only (Checks 1-5)
-bash tests/build-serve/run.sh runtime    # live-edge checks only (R1-R7)
+bash tests/build-serve/run.sh runtime    # live-edge checks only (R1-R9)
 ```
 
 - Written for **POSIX bash** (Git Bash on Windows). Not PowerShell.
@@ -86,6 +86,8 @@ money and mutate no state. The suite never tears down a stack it did not create.
 | R4 | `GET /otp/pending` (deep link) → **200**, the otp index | otp SPA history fallback. |
 | R5 | the otp index references an **`/otp/`-prefixed** asset **and** that asset loads **200** | "built for `base: '/otp/'` … its assets … live under `/otp/`" **and** the router serves `/otp/` **without stripping**. Fails if base was not applied (assets under `/assets/` → 404 behind `/otp/`) or the router strips `/otp/` (asset 404). |
 | R6 | `GET /balance/api/whoami` (no token) is **not** a **200 SPA index** — a **401** with the full stack (Kong), a **5xx** with the light self-up | "the service-namespaced API path `/balance/api/` → `public-kong`" — the SPA catch-all must **not** shadow the API. The sharpest routing check: catches a catch-all that swallows gateway traffic. |
+| R8 | the **client** index's linked stylesheet loads **200**, carries **no literal `@tailwind`**, and embeds the theme accent `#1db954` | the SPA Docker build actually **ran Tailwind/PostCSS**. Fails if the build stage omits `postcss.config.js`/`tailwind.config.js` and ships `index.css` unprocessed → the app renders **unstyled**. (The `css:false` vitest suites cannot catch this.) |
+| R9 | the **OTP** index's linked stylesheet loads **200**, carries **no literal `@tailwind`**, and embeds the theme accent `#1db954` | same styling guard, for the otp image. |
 
 ### How "is this a SPA page?" is decided
 
