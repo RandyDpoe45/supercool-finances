@@ -1,0 +1,1153 @@
+ ▐▛███▛█   Claude Code v2.1.268
+▝▜██████▀  Opus 4.8 · Claude Max
+  ▝▝ ▝▝    ~\Documents\personal-projects\supercool-finances
+
+
+● Done. Memory updated. Here's where things landed.
+
+  Public-plane spec-08 pass: complete ✅
+
+  Three stacked PRs, each built through the full harness (implementor +
+  test-writer → verification gate → self-review → PR):
+
+  ┌──────┬─────┬──────────────────────────────────────────┬─────────────────┐
+  │ Step │ PR  │                   What                   │     Review      │
+  ├──────┼─────┼──────────────────────────────────────────┼─────────────────┤
+  │      │     │ Per-SPA atomic images + public-nginx     │ clean (static   │
+  │ 8-A  │ #39 │ router (/→client, /otp/→otp,             │ 4/4 · runtime   │
+  │      │     │ /balance/api/→kong)                      │ 7/7)            │
+  ├──────┼─────┼──────────────────────────────────────────┼─────────────────┤
+  │      │     │ tools/seed/ demo data via compose seed   │ clean (static   │
+  │ 8-B  │ #40 │ profile; pinned demo-user subs           │ 3/3 · runtime   │
+  │      │     │                                          │ 8/8)            │
+  ├──────┼─────┼──────────────────────────────────────────┼─────────────────┤
+  │      │     │ Full-run harness + root README; found &  │ clean (0 High;  │
+  │ 8-C  │ #42 │ fixed the OTP 201→200 service bug +      │ Medium          │
+  │      │     │ regression test                          │ resolved)       │
+  └──────┴─────┴──────────────────────────────────────────┴─────────────────┘
+
+  The DoD is proven end to end: a clean docker compose up --build reaches
+  all-healthy (10 services), the seed loads idempotently, demo-customer logs in
+  through real Keycloak and sees their seeded account, and a full
+  transfer-with-OTP works from the client app (confirmation-of-payee → initiate
+  → code revealed in the real otp-app → confirm → source debited exactly once) —
+  full-run harness 9/9.
+
+  Bonus catch: 8-C's real-stack run surfaced a genuine balance-service defect —
+  POST /api/otp was the lone mutation-POST defaulting to 201 instead of the
+  contract's 200. Escalated, you approved the fix, and it shipped inside 8-C
+  with a no-DB regression test and the stale assertions/doc corrected.
+
+  A couple of things to know
+
+  - The PRs are stacked (#39 ← #40 ← #42), each based on the previous branch,
+    not main. Merge them base-ward — #39 first (GitHub then auto-retargets #40
+    to main), then #40, then #42 — or retarget each to main as the one below it
+    lands. Merging #42 directly first would drag in the whole stack.
+  - Still deferred (unchanged, your earlier call): the admin plane — the admin
+    SPA (not built) and the internal transport edge (#33, still an unmerged
+    orphan cd7fd7b with no open PR). Those gate the two admin-plane DoD items
+    (admin reversal from the admin app + :8081). When you want the full spec-08
+    DoD, that's the remaining work: land #33 + build the admin app, then a 4th
+    step wires the internal plane into the full run.
+
+  Want me to do anything else now — help land the stack, or start scoping the
+  admin-plane work — or leave it here?
+
+✻ Sautéed for 9m 52s · done 12:56 AM
+
+❯ /context 
+  ⎿  Context Usage
+     ⛀ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛀ ⛀ ⛁ ⛀ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   Opus 4.8
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   claude-opus-4-8
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   411.7k/1m tokens (41%)
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ 
+     ⛁ ⛁ ⛁ ⛁ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   Estimated usage by category
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System prompt: 2.6k tokens (0.3%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System tools: 32.5k tokens (3.3%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Custom agents: 210 tokens (0.0%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Memory files: 6.8k tokens (0.7%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝   ⛁ Skills: 2.9k tokens (0.3%)
+                                               ⛁ Messages: 367.4k tokens (36.7%)
+                                               ⛶ Free space: 554.6k (55.5%)
+                                               ⛝ Autocompact buffer: 33k tokens (3.3%)
+
+     Auto-compact window: 1m tokens
+
+     MCP tools · /mcp (loaded on-demand)
+     └ 17 tools · 0 tokens
+
+     Custom agents · .claude/agents/
+     └ 3 agents · 210 tokens
+
+     Skills · /skills
+     └ 18 skills · 2.9k tokens
+
+     /context all to expand
+
+※ recap: Goal: build spec 08 (public-plane) for SuperCool Finances. Done — 8-A, 8-B, 8-C all shipped as stacked PRs #39, #40, #42, with the transfer-with-OTP demo proven end to end. Next: merge the stack base-ward, starting with #39. (disable recaps in /config)
+
+❯ /compact                                                                      
+  ⎿  Compacted (ctrl+o to see full summary)
+  ⎿  Read ..\..\..\.claude\projects\C--Users-rd-crow-shadow-Documents-personal-p
+     rojects-supercool-finances\memory\spec-08-build-serve-roadmap.md (22 lines)
+  ⎿  Read ..\supercool-finances-build\specs\08-build-and-serve.md (118 lines)
+  ⎿  Read ..\supercool-finances-build\infra\nginx-public\nginx.conf (102 lines)
+  ⎿  Read ..\supercool-finances-build\tests\build-serve\README.md (112 lines)
+  ⎿  Read ..\supercool-finances-build\tests\build-serve\run.sh (51 lines)
+
+❯ rebase to the current version of main, now there is the scaffold of the admin 
+  web app and also the admin endpoints in the balance service, analytics is     
+  still underway, so no analytics server wirign yet, clear? so with this in     
+  mind you can start creating the admin plane                                   
+
+● I'll rebase first, but before I touch anything I need an accurate picture of
+  the current main — my memory of its state is from before these merges. Let me
+  fetch and assess.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Big reconciliation: my memory was stale. The current origin/main (6d2d1a7) has
+  moved well past what I had recorded. Let me confirm what's actually in it
+  before planning.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● internal-nginx/internal-kong did not appear in either the compose services or
+  the infra listing. But PR #33 ("Transport internal edge") is merged. Let me
+  resolve that discrepancy and check the admin SPA's build state.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● One hard discrepancy to resolve before I plan anything: PR #33 (internal 
+  transport edge) shows as MERGED, yet there is no infra/nginx-internal or 
+  infra/kong-internal on origin/main. The admin plane's internal front door
+  depends on that config, so I need to know whether it exists. Let me dig into
+  #33.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Now it's clear. PR #33's base was transport-public-edge, not main — it merged
+  into that feature branch (commit 995abc8), which then never went to main. Only
+  the public edge (#30) reached main. So the internal-edge config is real but
+  stranded on origin/transport-public-edge, not on main — my "orphan" memory was
+  right in spirit, wrong in the details.
+
+  Let me see exactly what that stranded config contains and check the admin
+  SPA's current API wiring.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Complete picture now. Let me read the two stranded config files and the
+  compose additions from #33 so my plan and options are concrete — specifically
+  whether internal-nginx is gateway-only (/ → 404) or already expects an admin
+  SPA.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Everything reconciles now. The #33 author explicitly deferred the admin-SPA / 
+  route to spec 08 (internal-nginx is gateway-only: /balance/admin +
+  /analytics/admin → internal-kong, / → 404 placeholder) — the exact mirror of
+  how public-nginx was gateway-only until spec-08's SPA router step. So the work
+  separates cleanly. Let me do the mechanical rebase of the build worktree onto
+  current origin/main.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The build worktree is rebased onto current origin/main (6d2d1a7), on a fresh
+  branch. Before I spawn any agents, here's the assessment — because what I
+  found differs from the premise that main is ready for the admin plane:
+
+  What's actually on main now
+
+  ┌─────────────┬───────────────────────────────────────────────────────────┐
+  │    Piece    │                           State                           │
+  ├─────────────┼───────────────────────────────────────────────────────────┤
+  │ Public      │ ✅ merged (#39/#40/#42) — client+otp served, seed,        │
+  │ plane (spec │ :8080/:8082                                               │
+  │  08)        │                                                           │
+  ├─────────────┼───────────────────────────────────────────────────────────┤
+  │ Balance     │ ✅ merged long ago (#25 single-actor, #28 maker-checker   │
+  │ /admin      │ reversals) — real and complete                            │
+  │ endpoints   │                                                           │
+  ├─────────────┼───────────────────────────────────────────────────────────┤
+  │             │ ⚠️ A1 scaffold only (#44): PKCE auth shell + whoami       │
+  │ Admin SPA   │ round-trip, MSW-stubbed. No Dockerfile/nginx, no          │
+  │ web/admin   │ accounts/limits/reversal/audit screens. (A2 "accounts" is │
+  │             │  in flight in the -web worktree.)                         │
+  ├─────────────┼───────────────────────────────────────────────────────────┤
+  │ Analytics   │ ⚠️ in compose + has an /admin controller skeleton (#43),  │
+  │ server      │ but no consumer/reporting yet — "still underway"          │
+  ├─────────────┼───────────────────────────────────────────────────────────┤
+  │ Internal    │                                                           │
+  │ transport   │ ❌ NOT on main.                                           │
+  │ edge        │                                                           │
+  └─────────────┴───────────────────────────────────────────────────────────┘
+
+  The blocker you'll want to know about
+
+  The internal edge (internal-nginx :8081 + internal-kong for /balance/admin + 
+  /analytics/admin) is not on main. PR #33 is marked "MERGED," but it merged
+  into the transport-public-edge feature branch, not main — so the config is
+  stranded on origin/transport-public-edge (995abc8), based on a pre-spec-08
+  main. Only the public edge (#30) ever reached main.
+
+  Good news: that config is real and reviewed, and its author explicitly 
+  deferred the admin-SPA / route to spec 08 (internal-nginx today is
+  gateway-only, / → 404 placeholder) — the exact mirror of how public-nginx was
+  gateway-only before spec-08's SPA router. So the admin plane splits into two
+  clean steps:
+
+  1. Land the internal edge on main (spec 06 step 2) — re-home the reviewed #33
+     config (the two infra configs apply cleanly; the compose additions need
+     reconciling onto main's grown compose since it was written pre-spec-08).
+     Gateway-only, / → 404, publishes :8081.
+  2. Admin plane (spec 08) — build web/admin as a per-SPA atomic image
+     (root-served, like client-app), flip internal-nginx's / → 404 to / → 
+     admin-app, wire it into compose, and prove demo-admin logs in → reaches a
+     real /balance/admin endpoint through internal-nginx → internal-kong → 
+     balance-service.
+
+  Honest scope limit: because the admin SPA is only A1 (whoami), this pass
+  proves the admin plane is wired and authenticating end-to-end — it cannot yet
+  satisfy the DoD item "maker-checker reversal from the admin app" (that needs
+  the reversal UI, admin-app A3, not built). I'll keep that DoD item explicitly
+  open, not fake it.
+
+  Two decisions are genuinely yours before I start:
+
+● User declined to answer questions
+  ⎿  · The internal edge (spec 06) must land on main before the spec-08 admin 
+     plane can build on it. How do you want that sequenced? (Two stacked PRs / 
+     Edge PR, merge, then admin / One combined PR)
+     · You said 'no analytics server wiring yet.' The reviewed #33 internal edge
+     routes BOTH /balance/admin and /analytics/admin, and the analytics server 
+     (with an /admin skeleton) is already in compose. How should the re-homed 
+     edge treat the analytics route? (Keep /analytics/admin route / Drop it for 
+     now)
+
+✻ Churned for 6m 0s · done 1:44 AM
+
+❯ actually the job was done, can you recreate the pr 33? maybe that work was    
+  merged to a transient branch                                                  
+
+● Got it — the work was done and reviewed for #33; it just landed on the
+  transport-public-edge feature branch instead of main. I'll recreate it as a 
+  fresh PR against current main by re-homing that exact commit (cd7fd7b),
+  reconciling only where main's compose has grown since. That also answers the
+  analytics question implicitly: recreate it intact (both /balance/admin and
+  /analytics/admin).
+
+  Let me cherry-pick it (no auto-commit) so I can inspect and resolve the
+  reconciliation.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The infra configs, spec, and tests applied cleanly; only docker-compose.yml
+  conflicts (expected — main's compose grew a lot since #33). Let me inspect the
+  conflict.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The only conflict is the header "Current state" comment — HEAD describes
+  spec-08 public frontends; cd7fd7b describes spec-06 both-edges. The true
+  reconciled state is both: spec-08 public frontends plus the now-landed
+  internal edge. Let me read the rest of the header and the tail (where the
+  internal services landed) to resolve it coherently and verify the
+  reconciliation.
+
+  Read 1 file (ctrl+o to expand)
+● The header auto-merged with now-stale parentheticals (lines 78-79, 98-100
+  still say the internal edge is a "later pass"). I need to resolve the conflict
+  AND correct those, since the header is documentation. First let me verify the
+  internal services actually landed in the tail and check the port wiring.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Both internal services landed at the tail (604, 649), publishing
+  ${INTERNAL_HTTP_PORT}:80. Let me read those blocks to confirm coherence and
+  check .env.example defines the port.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● All coherent: internal-kong (fronts balance + analytics on app-internal),
+  internal-nginx (:8081, edge-internal), and INTERNAL_HTTP_PORT=8081 is defined.
+  The infra configs, spec, and transport tests applied cleanly. Only the header
+  comment needs resolving, plus two now-false statements it contains. Let me
+  fix those.
+
+● Update(~\Documents\personal-projects\supercool-finances-build\docker-compose.y
+        ml)
+  ⎿  Added 5 lines, removed 7 lines
+       5  # it GROWS ONE SERVICE PER STEP as the specs are built (see spe
+          cs/README.md).
+       6  # It is NOT a final integration task — it exists from step 0 an
+          d accretes.
+       7  #
+       8 -<<<<<<< HEAD                                                   
+       9 -# Current state — Step 5 (spec 08, PUBLIC-PLANE FRONTENDS: clie
+         -nt-app + otp-app,                                              
+      10 -#   served by public-nginx as the router; builds on spec 06's p
+         -ublic edge):                                                   
+      11 -=======                                                        
+      12 -# Current state — Step 4 (spec 06, BOTH edges: public-kong/publ
+         -ic-nginx +                                                     
+      13 -# internal-kong/internal-nginx). The transport layer is complet
+         -e.                                                             
+      14 ->>>>>>> cd7fd7b (Transport internal edge: admin gateway for /ba
+         -lance/admin + /analytics/admin (spec 06, step 2))              
+       8 +# Current state — spec 08 PUBLIC-PLANE FRONTENDS (client-app + 
+         +otp-app, served by                                             
+       9 +#   public-nginx as the router) PLUS the spec 06 INTERNAL EDGE 
+         +(internal-kong +                                               
+      10 +#   internal-nginx on :8081), now landed. The internal front do
+         +or is GATEWAY-ONLY                                             
+      11 +#   for now: it fronts /balance/admin + /analytics/admin -> int
+         +ernal-kong; the admin                                          
+      12 +#   SPA at its `/` root is deferred to the spec 08 admin step (
+         +placeholder 404 until):                                        
+      13  #   - The five networks (§2) are declared. `data` carries the d
+          atastores; `keycloak`
+      14  #     also joins `app-public`, `app-internal` and `data` (spec 
+          00 §2). All four edge
+      15  #     nets now have members: `edge-public`/`app-public` (public
+           gateway + front door)
+
+● Update(~\Documents\personal-projects\supercool-finances-build\docker-compose.y
+        ml)
+  ⎿  Added 2 lines, removed 2 lines
+      73  #     thin ROUTER that assembles them: `/` -> client-app, `/otp
+          /` -> otp-app
+      74  #     (prefix preserved; that bundle is built for base '/otp/')
+          , `/balance/api/`
+      75  #     -> public-kong (unchanged). See infra/nginx-public/nginx.
+          conf + the two
+      76 -#     web/*/docs. (The admin SPA + internal edge are a LATER pa
+         -ss — spec 08 scope                                             
+      77 -#     note; only :8080 + :8082 are published in this pass.)    
+      76 +#     web/*/docs. (The internal edge — internal-kong + internal
+         +-nginx, :8081 — is                                             
+      77 +#     now landed below, GATEWAY-ONLY; the admin SPA at its `/` 
+         +root is a LATER pass.)                                         
+      78  #   - `seed` (spec 08, THIS step): a ONE-SHOT, PROFILE-GATED de
+          mo-data tool
+      79  #     (profiles: ["seed"]) — NOT in the default `up` graph; run
+           explicitly with
+      80  #     `docker compose --profile seed up`. Atomic tool under too
+          ls/seed (its own
+
+● Update(~\Documents\personal-projects\supercool-finances-build\docker-compose.y
+        ml)
+  ⎿  Added 8 lines
+       87  #     balance-service (DB_* <- POSTGRES_BALANCE_* + POSTGRES_D
+           B; composes its own
+       88  #     connection, no *_URL var). Joins `data` ONLY; depends_on
+            balance-service:
+       89  #     service_healthy (migrations run on boot -> schema presen
+           t before the seed runs).
+       90 +#   - `internal-kong` + `internal-nginx` (spec 06 internal edg
+          +e, NOW LANDED): the                                           
+       91 +#     admin plane's gateway + front door. internal-nginx (:808
+          +1, edge-internal) is the                                      
+       92 +#     only host-published internal surface (demo convenience);
+          + it reverse-proxies the                                       
+       93 +#     service-namespaced admin paths /balance/admin/* + /analy
+          +tics/admin/* ->                                               
+       94 +#     internal-kong (ADR-17 strips /<service> -> /admin/*), wh
+          +ich fronts balance-service                                    
+       95 +#     + analytics-server on app-internal and enforces admin au
+          +th (JWKS pre-function,                                        
+       96 +#     realm role `admin`). GATEWAY-ONLY: internal-nginx's `/` 
+          +web root is a placeholder                                     
+       97 +#     404 until the spec 08 admin step wires the admin SPA. Se
+          +e infra/{kong,nginx}-internal.                                
+       98  #
+       99  # What arrives in later steps (do NOT add here early):
+      100  #   - Step 3  (spec 04): `balance-service`     — EXTENDED with
+            the money domain
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Compose validates, no markers left. Let me mark the conflict resolved and
+  verify the re-homed files are byte-identical to the reviewed #33 versions (so
+  I know nothing regressed from the stale base).
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Faithful re-home confirmed: every infra/tests/spec file is byte-identical to
+  the reviewed #33 versions; only docker-compose.yml differs (correctly — the
+  reconciliation onto spec-08's compose + my header doc fixes). The file set is
+  exactly #33's.
+
+  Now the verification gate. Compose already validates; let me validate the two
+  declarative configs the edge depends on — Kong config parse and nginx syntax —
+  using the services' own mounts (avoids Windows path issues).
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● nginx config: PASS ✓. The Kong command's /kong/kong.yml arg got mangled by Git
+  Bash path conversion (→ /C:/Program Files/Git/...). Retrying with path
+  conversion disabled.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gate is green on the fast validators: compose config OK · internal nginx -t OK
+  · internal Kong parse OK, and every non-compose file is byte-identical to the
+  reviewed #33. The real DoD proof for transport is the live tests/transport
+  suite (both edges). Let me check how that suite runs, then bring up the
+  transport services and run it in the background.
+
+  Read 1 file (ctrl+o to expand)
+
+● The suite doesn't self-up — runtime needs the full stack running. Let me run
+  the static transport checks now (fast), and in parallel launch the stack
+  bring-up + runtime suite in the background (skipping the SPA/seed builds —
+  transport only needs the datastores, Keycloak, both services, and both edges).
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Static gate is fully green:
+  - docker compose config ✓ · internal nginx -t ✓ · internal Kong config parse ✓
+  - tests/transport static → PASS=6 FAIL=0 SKIP=0, including all internal-edge
+    config assertions (I1–I3): /balance/admin + /analytics/admin routing with
+    /service-strip, admin-role gate (403), header anti-spoof, RS256/iss/aud/exp
+    verification, identity injection, rate-limiting.
+  - Every re-homed file is byte-identical to the reviewed #33; only
+    docker-compose.yml differs (the reconciliation + header doc fixes).
+
+  The live runtime suite (full transport stack → both edges, tests/transport 
+  runtime) is building + booting in the background now — that's the real
+  integration proof on current main (it'll confirm, among other things, that
+  /analytics/admin/whoami still resolves through internal-kong after the
+  analytics A1 changes). I'll run the focused self-review on the compose
+  reconciliation and open the PR once it's green. Standing by for that job.
+
+✻ Baked for 5m 49s · done 1:51 AM
+
+● Background command "Bring up transport stack and run runtime suite
+(background)" completed (exit code 0)
+
+  Read 1 file (ctrl+o to expand)
+
+● Runtime gate is fully green on current main — PASS=13 FAIL=0 SKIP=0. Every
+  service came up Healthy (including internal-kong/internal-nginx), and the
+  internal-edge slice is proven live:
+
+  - I4: demo-admin token → both /balance/admin/whoami and
+    /analytics/admin/whoami → 200, userId==sub, role admin — so /analytics/admin
+    still resolves through internal-kong after the analytics A1 changes (the
+    integration risk I flagged is cleared).
+  - I5 customer→403 · I6 no/malformed/tampered→401 · I7 anti-spoof header
+    stripping · I8 internal default-deny (bare /admin, */internal, /balance/api
+    all 404) · I9 rate-limit 429. Public edge (6/7/7b/8/9) also green.
+
+  Gate complete (build ✓ · tests 6 static + 13 runtime ✓ · kong/nginx parse ✓).
+  The only artifact not byte-identical to the already-reviewed #33 is the
+  docker-compose.yml reconciliation, so I'll run a focused self-review on
+  exactly that, and tear the gate stack down.
+
+● self-reviewer(Self-review compose reconciliation)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Self-review of the docker-compose.yml reconciliation is running in the
+  background; the gate stack is torn down. Once the review returns clean (or I
+  resolve any findings), I'll commit the re-home and open the PR against main.
+  Standing by.
+
+✻ Crunched for 1m 26s · done 1:52 AM
+
+● Agent "Self-review compose reconciliation" finished · 2m 20s
+
+● Self-review is clean — no High, no Medium. One Low: the "What arrives in later
+  steps" bullet still lumps the already-landed public client+otp SPAs into
+  "arrives later / placeholder," which my header changes now make inconsistent.
+  It's a one-line accuracy fix and I'm already in that comment block, so I'll
+  fold it in. Let me read the exact lines.
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(~\Documents\personal-projects\supercool-finances-build\docker-compose.y
+        ml)
+  ⎿  Added 4 lines, removed 3 lines
+      101  #                        (ledger, transfers, limits, OTP modul
+           e, outbox relay).
+      102  #   - Step 3  (spec 05): `analytics-server`    — EXTENDED with
+            the stream consumer,
+      103  #                        Mongo read model + reporting API (/ad
+           min) over it.
+      104 -#   - Step 5  (spec 07/08): the SPA bundles served BY the two 
+          -nginx front doors                                             
+      105 -#                        (public: client + otp; internal: admi
+          -n) — placeholder web                                          
+      106 -#                        roots today; the gateways/routing bel
+          -ow are already complete.                                      
+      104 +#   - Step 6  (spec 08 admin): the ADMIN SPA bundle served at 
+          +internal-nginx's `/`                                          
+      105 +#                        root — placeholder 404 today; the int
+          +ernal gateway/routing                                         
+      106 +#                        below is already complete. (The publi
+          +c client + otp bundles                                        
+      107 +#                        are already served BY public-nginx, a
+          +bove.)                                                        
+      108  #
+      109  # Startup order (spec 00 §5) is enforced as services arrive vi
+           a
+      110  #   depends_on: { <dep>: { condition: service_healthy } }
+
+● Header is now fully accurate. Let me re-validate, re-stage, and confirm
+  exactly the intended file set is staged (and that the .env I created for the
+  gate is git-ignored, not staged).
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Exactly the 9 intended files staged, nothing stray, .env ignored. Committing
+  the re-home, then pushing and opening the PR against main.
+  Made 1 scratchpad edit +30, cherry-picked 49bb377, pushed to transport-internal-edge-land (ctrl+o to expand)
+
+● Committed (49bb377) and pushed. Now opening the PR against main.
+
+  Made 1 scratchpad edit +35, created PR #46 (ctrl+o to expand)
+
+● PR #46 opened against main:
+  https://github.com/RandyDpoe45/supercool-finances/pull/46
+
+  Let me correct the project memory — the #33 status I had (and that the roadmap
+  recorded) was wrong: it was stranded on a feature branch, never on main. Now
+  it's PR #46.
+
+  Recalled 1 memory, wrote 2 memories (ctrl+o to expand)
+
+● Now the spec-08 roadmap, which recorded the #33 status incorrectly and
+  predates these merges.
+
+  Wrote 2 memories (ctrl+o to expand)
+
+● Now the MEMORY.md index lines for both.
+
+  Wrote 2 memories (ctrl+o to expand)
+
+● PR #46 is open — #33's internal transport edge, recreated on main:
+  https://github.com/RandyDpoe45/supercool-finances/pull/46
+
+  What I did
+
+  You were right — the job was done; it had merged into the
+  transport-public-edge feature branch (995abc8), so it never reached main. I
+  recreated it faithfully:
+
+  - Cherry-picked the reviewed work commit (cd7fd7b) onto current main.
+  - infra/{kong,nginx}-internal/*, specs/06-transport.md, and tests/transport/*
+    are byte-identical to #33 — the only thing I reconciled was
+    docker-compose.yml (its two service blocks are also byte-identical to #33; I
+    replayed them onto main's grown spec-08 compose and fixed the header
+    comments).
+  - Re-verified live on current main, not just trusted the old run: full stack
+    up all-Healthy → tests/transport static 6/6 + runtime 13/13, 0 skip — both
+    edges, including demo-admin → /balance/admin/whoami and
+    /analytics/admin/whoami → 200, customer → 403, anti-spoof strip, internal
+    default-deny, rate-limit. Self-review: 0 High / 0 Medium (1 Low folded in).
+    Memory corrected.
+
+  It's gateway-only exactly as #33 intended: internal-nginx's / is a 404
+  placeholder until the admin SPA is wired. Published ports stay
+  :8080/:8081/:8082.
+
+  Next: the spec-08 admin build/serve step
+
+  With the edge landed, the actual admin-plane build is one more step (full
+  implementor → test-writer → gate → self-review → PR): build web/admin as a
+  per-SPA atomic image (root-served, like client-app — it has no Dockerfile
+  yet), flip internal-nginx's / → 404 to / → admin-app, wire admin-app into
+  compose, and extend the full-run to prove demo-admin logs in and reaches a 
+  real /balance/admin endpoint end-to-end. Analytics stays out of the admin UI
+  (your ruling), and the DoD item "maker-checker reversal from the admin app"
+  stays open — the reversal UI (admin-app A3) isn't built yet.
+
+  One sequencing call before I start it: shall I build that step stacked on #46 
+  now, or wait for #46 to merge to main first? I'll proceed stacked unless you'd
+  rather I hold.
+
+✻ Baked for 6m 43s · done 1:58 AM
+
+※ recap: Goal: build the spec-08 admin plane. I recreated #33's internal transport edge as PR #46 against main, verified live (13/13). Next: build the admin-app image and internal-nginx router, once you say whether to stack it on #46 or wait for merge. (disable recaps in /config)
+
+❯ /context 
+  ⎿  Context Usage
+     ⛀ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛀ ⛁ ⛀ ⛀ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   Opus 4.8
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛶ ⛶ ⛶   claude-opus-4-8
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   176.1k/1m tokens (18%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ 
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   Estimated usage by category
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System prompt: 2.6k tokens (0.3%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System tools: 31k tokens (3.1%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Custom agents: 210 tokens (0.0%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Memory files: 7.7k tokens (0.8%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝   ⛁ Skills: 2.9k tokens (0.3%)
+                                               ⛁ Messages: 132.4k tokens (13.2%)
+                                               ⛶ Free space: 790.2k (79.0%)
+                                               ⛝ Autocompact buffer: 33k tokens (3.3%)
+
+     Auto-compact window: 1m tokens
+
+     MCP tools · /mcp (loaded on-demand)
+     └ 17 tools · 0 tokens
+
+     Custom agents · .claude/agents/
+     └ 3 agents · 210 tokens
+
+     Skills · /skills
+     └ 18 skills · 2.9k tokens
+
+     /context all to expand
+
+❯ pr merged, now that this is out of the way, lets start with the admin web app 
+  wiring and the internal plane, questions?                                     
+
+● Let me ground myself before raising anything — confirm #46 is on main, get the
+  build worktree onto the new main, and look at what the A1 admin app actually
+  does in a production build (that shapes what the full-run can honestly prove).
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● #46 is on main (e8f6fe4); the internal-edge configs are there. And the A1
+  admin app's landing (HomePage) calls GET /balance/admin/whoami and renders the
+  identity — which is exactly the end-to-end proof the full-run should
+  exercise. The admin image will closely mirror client-app (both root-served,
+  base /). Let me check a few things that determine how deep the proof can go
+  and whether there's any collision with the parallel A2 work.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● I have what I need. Quick confirmations, then one real question.
+
+  State is good to go: #46 is merged (e8f6fe4) — the internal edge is on main.
+  The A1 admin app is a clean fit: its landing (HomePage) calls GET 
+  /balance/admin/whoami and renders the identity, AnalyticsPage fetches nothing
+  (pure placeholder — so no analytics coupling, honoring your ruling), and it's
+  root-served (base /), so its image mirrors client-app almost exactly. There's
+  even an existing Playwright tests/e2e/login.e2e.ts + fixtures.
+
+  The step I'll build (one PR, cut fresh from main now that #46 landed; full
+  implementor → test-writer → gate → self-review pipeline):
+  1. web/admin/{Dockerfile,nginx.conf,.dockerignore} — per-SPA atomic image,
+     root-served, mirroring client-app.
+  2. infra/nginx-internal/nginx.conf — flip the / → 404 placeholder to / → 
+     admin-app (mirroring public-nginx's client catch-all).
+  3. docker-compose.yml — add the admin-app service (edge-internal only,
+     host-unpublished, healthcheck) + into internal-nginx's depends_on; update
+     specs/08's admin-plane scope note.
+  4. Full-run proof: demo-admin logs in at :8081 → reaches the real
+     /balance/admin surface through internal-nginx → internal-kong → 
+     balance-service.
+
+  Three things I want to flag rather than assume:
+  - DoD honesty: this satisfies spec-08's "admin SPA served at :8081" + "admin
+    login maps to the plane." It does not satisfy "maker-checker reversal from 
+    the admin app" — that UI (admin-app A3) isn't built. That DoD item stays
+    explicitly open.
+  - Parallel work: admin-app A2 (accounts UI) is in flight in the -web worktree.
+    My step is additive (new build/serve files; no web/admin/src changes). If
+    the prod build turns out to need a source/tsconfig fix, I'll escalate rather
+    than edit around the A2 workstream.
+  - Analytics stays out of the admin UI (your ruling); the edge keeps its
+    reviewed /analytics/admin route, unused.
+
+  The one genuine decision:
+
+● User answered Claude's questions:
+  ⎿  · How deep should the admin-plane full-run prove the flow? The A1 app is 
+     just a whoami landing, but an admin Playwright login.e2e.ts already exists,
+     so a real browser login is achievable. → HTTP + browser e2e
+
+● Decision noted: HTTP + browser e2e — the full proof. (I also see from the
+  memory sync that admin-app A2 is now PR #47 awaiting merge — reinforces my
+  additive-only / escalate-don't-touch-src stance; I'll build off current main,
+  which is still A1.)
+
+  Setting up the branch off fresh main, then I'll run the implementor and
+  test-writer in parallel (each from the spec).
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Main moved again — the branch cut at cb3aebd = #47 (admin-app A2) is now also 
+  merged. So the app I'll be serving is A1+A2 (accounts/limits screens), not
+  just the A1 whoami landing. That changes what the app fetches on load and
+  therefore what the browser e2e will exercise — I need to re-check before
+  spawning agents, or the proof will target the wrong thing.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Critical re-check done — and it's reassuring:
+
+  - The browser proof (login.e2e.ts) asserts only the whoami landing ("Admin
+    console" heading + GET /balance/admin/whoami 200 + admin role + rendered
+    identity). A2 added /accounts + /limits routes but login lands on /
+    (Home/whoami), so the e2e is stable and correct regardless of A2.
+  - GET /admin/whoami exists on balance-service (the endpoint the proof needs).
+  - But GET /admin/accounts and GET /admin/limits do NOT exist yet — A2's
+    Accounts/Limits screens are MSW-stubbed and have no real backend (matches
+    the memory's "read surface to add"). So in a production image those two
+    screens will error; only the whoami landing works end-to-end. That's a known
+    balance-service gap, not this step's job — but I'll scope the proof to
+    whoami and flag it, not pretend accounts/limits work.
+
+  Let me update the spec's scope note to reflect the admin plane is now being
+  built (removing the "deferred" framing), then spawn the two agents against the
+  corrected spec.
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(~\Documents\personal-projects\supercool-finances-build\specs\08-build-a
+        nd-serve.md)
+  ⎿  Added 3 lines, removed 2 lines
+      35    owns its own `try_files … /index.html` history fallback. The 
+          `/<service>/<surface>`
+      36    namespacing (Kong strips `/<service>`) is established in spec
+           06
+      37    ([ADR-17](../docs/DECISIONS.md#adr-17--service-namespaced-edg
+          e-routing)).
+      38 -  `internal-nginx` (admin plane) follows the same router patter
+         -n when it lands: `/` →                                         
+      39 -  the `admin-app` image, `/balance/admin/` and `/analytics/admi
+         -n/` → `internal-kong`.                                         
+      38 +  `internal-nginx` (admin plane) now follows the same router pa
+         +ttern (THIS admin step):                                       
+      39 +  `/` → the `admin-app` image (served, not a placeholder), `/ba
+         +lance/admin/` and                                              
+      40 +  `/analytics/admin/` → `internal-kong` (the internal edge land
+         +ed on main via #46).                                           
+      41  - **Ports & origin.** The SPA images join `edge-public` only an
+          d are **not
+      42    host-published**; only `public-nginx` (:8080) is (spec 00 §3)
+          . The browser must
+      43    reach the apps at `http://localhost:8080` — the OIDC `redirec
+          t_uri` is derived from
+
+● Update(~\Documents\personal-projects\supercool-finances-build\specs\08-build-a
+        nd-serve.md)
+  ⎿  Added 18 lines, removed 9 lines
+       97  - [ ] Re-running up is idempotent (seed doesn't duplicate; mig
+           rations no-op).
+       98  - [ ] Only `:8080`, `:8081`, `:8082` are published.
+       99  
+      100 -> **Scope note — this build pass (public plane only).** The ad
+          -min plane is deferred:                                        
+      101 -> the admin SPA is not yet built and the internal transport ed
+          -ge (spec 06 step 2) is                                        
+      102 -> not merged. So the two admin-plane acceptance items above — 
+          -the **admin                                                   
+      103 -> maker-checker reversal from the admin app** and the **`:8081
+          -`** internal front door                                       
+      104 -> — are OUT of this pass (in this pass only `:8080` and `:8082
+          -` are published). They                                        
+      105 -> remain the eventual target. This pass delivers the PUBLIC pl
+          -ane end to end: the                                           
+      106 -> client + otp SPAs served by `public-nginx`, seed data, and a
+          - clean-machine                                                
+      107 -> `docker compose up --build` proving the **transfer-with-OTP*
+          -* flow from the client                                        
+      108 -> app.                                                        
+      100 +> **Scope note — build passes.** Pass 1 (DONE, merged) deliver
+          +ed the PUBLIC plane end                                       
+      101 +> to end: the client + otp SPAs served by `public-nginx`, seed
+          + data, and a clean-machine                                    
+      102 +> `docker compose up --build` proving the **transfer-with-OTP*
+          +* flow from the client app                                    
+      103 +> (`:8080` + `:8082`).                                        
+      104 +>                                                             
+      105 +> Pass 2 (THIS admin step) delivers the ADMIN plane's **build 
+          +& serve + internal front                                      
+      106 +> door**: the internal transport edge is on main (#46), and th
+          +is step builds the                                            
+      107 +> `admin-app` as a per-SPA atomic image, flips `internal-nginx
+          +`'s `/` from the placeholder                                  
+      108 +> `404` to route `/` → `admin-app`, publishes **`:8081`**, and
+          + proves a **demo-admin                                        
+      109 +> Keycloak login at `:8081` reaches the real `/balance/admin` 
+          +surface** (the whoami                                         
+      110 +> landing) through `internal-nginx → internal-kong → balance-s
+          +ervice`.                                                      
+      111 +>                                                             
+      112 +> Still OPEN after this pass (NOT claimed done): the DoD item 
+          +**"admin maker-checker                                        
+      113 +> reversal from the admin app"** — the reversal UI (admin-app 
+          +A3) is not built. Also, the                                   
+      114 +> admin app's **Accounts/Limits screens** (admin-app A2) call 
+          +balance-service admin READ                                    
+      115 +> endpoints (`GET /admin/accounts`, `GET /admin/limits`) that 
+          +**do not exist yet**, so                                      
+      116 +> those screens are not functional against the real backend; o
+          +nly the whoami landing is                                     
+      117 +> proven end-to-end. Published ports remain `:8080` / `:8081` 
+          +/ `:8082`.                                                    
+      118  
+      119  ## Open questions
+      120  
+
+● Spec updated to reflect Pass 2 (admin plane) is now in scope, with the
+  reversal-UI and accounts/limits-backend gaps explicitly recorded as
+  still-open. Now running the implementor and test-writer in parallel — each
+  against the spec, not each other.
+
+● 2 background agents launched (↓ to manage)
+   ├ implementor (Build admin SPA image + wire internal plane)
+   └ test-writer (Write admin-plane build/serve + e2e tests)
+
+● Both agents are running in parallel (implementor: admin image + internal-plane
+  wiring; test-writer: tests/build-serve-admin + full-run admin e2e). Spec
+  scope note is updated. I'll wait for both to finish, then run the verification
+  gate (build · compose · both suites, with a live full-stack run to exercise
+  the demo-admin login) and the self-review before the PR. Standing by.
+
+✻ Baked for 7m 43s · done 2:20 AM
+
+● Agent "Build admin SPA image + wire internal plane" finished · 4m 46s
+
+● Implementor is done and self-verified clean: admin image builds (tsc -b && 
+  vite build compiled, no src/tsconfig changes needed — no escalation), docker 
+  compose config OK, internal nginx -t OK. It created
+  web/admin/{Dockerfile,nginx.conf,.dockerignore} and wired admin-app into
+  internal-nginx + compose, with docs updated.
+
+  Waiting on the test-writer to finish before I run the full gate (build ·
+  compose · both suites + a live full-stack run for the demo-admin login) and
+  the self-review.
+
+✻ Crunched for 7s · done 2:24 AM
+
+❯ now the analytics server is complete on main, rebase the current worktree to  
+  the latest verison of main please and review the server wiring                
+● Heads-up on sequencing before I touch anything: the test-writer agent is still
+  running in that exact worktree (build-serve-admin), and both agents' changes
+  are currently uncommitted there. Rebasing now would clobber their in-flight
+  work. So I'll do the wiring review immediately (it's read-only, straight off
+  origin/main), and sequence the rebase for the moment the test-writer lands +
+  I've committed the step — that's the only safe order. Let me fetch and assess.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Clean result: Analytics A3 (#48) is service-internal only — the diff
+  cb3aebd..origin/main touches only services/analytics-server/** (new reporting
+  module + tests + docs). No docker-compose.yml, no infra/ changes. So:
+
+  - The rebase will be conflict-free (analytics A3 didn't touch compose; my
+    branch's compose edits are disjoint).
+  - The analytics wiring (compose block + internal-kong /analytics/admin route)
+    is unchanged; A3 just added the reporting surface behind it.
+
+  Now the review you asked for. Let me read the actual wiring on origin/main.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Analytics-server wiring review (origin/main @ 46cad43, incl. A3 #48)
+
+  The server is correctly and fully plumbed into the internal plane — no wiring
+  defects. Details:
+
+  Compose (analytics-server)
+  - Networks: app-internal + data only — never app-public, never edge-* (spec 00
+    §2 isolation holds: the public plane can't reach it even at L3).
+    Host-unpublished. ✓
+  - depends_on: mongo + redis + keycloak (all service_healthy) — redis is now a
+    real dependency because the A2 stream consumer reads events:transactions,
+    and the consumer runs by default (ANALYTICS_CONSUMER_ENABLED defaults true).
+    ✓
+  - Discrete creds only (MONGO_*, REDIS_*, INTERNAL_SERVICE_TOKEN) — no
+    assembled *_URL. Health via GET /internal/health. ✓
+
+  Gateway reachability (the A3 reporting surface)
+  - A3 adds @Controller('admin/reports') → GET /admin/reports/account-summaries
+    and GET /admin/reports/daily-aggregates (plus the pre-existing GET 
+    /admin/whoami).
+  - internal-kong's /analytics/admin route is a prefix match with strip_path →
+    Kong strips /analytics, so :8081/analytics/admin/reports/* reaches the
+    service as /admin/reports/*. The new reporting endpoints are therefore
+    reachable through the internal edge with zero gateway changes, behind the
+    same admin-role gate + header anti-spoof as /balance/admin. ✓
+  - internal-nginx routes /analytics/admin/ → internal-kong (unchanged). Already
+    proven live in the #46 runtime run (I4: demo-admin →
+    /analytics/admin/whoami 200; I5: customer → 403).
+
+  One thing to note (not a defect): the analytics server is complete and
+  edge-reachable, but the admin SPA still has a placeholder AnalyticsPage that
+  fetches nothing — the UI doesn't consume /analytics/admin/reports/* yet.
+  That's consistent with the "analytics out of the admin UI for now" ruling;
+  wiring the analytics RTK slice into the admin app would be a later admin-app
+  step.
+
+  Rebase plan
+
+  A3 (#48) is analytics-src only — it touches no compose/infra — so the rebase
+  of build-serve-admin onto 46cad43 is conflict-free. Correct order (so I don't
+  clobber the running test-writer or its uncommitted work):
+
+  1. Let the test-writer finish → run the gate → commit the admin-plane step.
+  2. Rebase onto origin/main (46cad43).
+  3. Re-run the gate — importantly the full-run, which will now up --build the
+     A3-complete analytics server.
+  4. Self-review → PR.
+
+  I'll proceed through that automatically once the test-writer lands (I'll be
+  notified). Nothing to disrupt in the meantime — the new main content doesn't
+  intersect the in-flight work.
+
+✻ Baked for 2m 39s · done 2:39 AM
+
+● Agent "Write admin-plane build/serve + e2e tests" finished · 19m 33s
+
+● Both agents are done. The test-writer's escalation is valid and important: the
+  Pass-1 suite tests/build-serve Check 2 asserts :8081 is not published — true
+  when the admin plane was deferred, but now the admin plane legitimately
+  publishes :8081, so that check FAILs. It correctly didn't rewrite another
+  step's suite and left the call to me. That reconciliation belongs in this PR
+  (this step is what makes :8081 legitimate). Let me scope it precisely first.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Clear now. Pass-1 Check 2 treats :8081 as a forbidden port ("deferred internal
+  front door — must NOT publish"). The right reconciliation — which belongs in
+  this PR — is to move :8081 into the allowed reserved set (the real spec-08
+  contract is "only :8080/:8081/:8082"), while the public suite keeps asserting
+  its own domain (public-nginx :8080 published, client/otp containers
+  unpublished, no stray ports). That's a test change, so I'll delegate it to a
+  test-writer rather than edit tests myself.
+
+● test-writer(Reconcile Pass-1 build-serve Check 2 for :8081)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Reconciliation delegated (scoped to tests/build-serve/{lib.sh,README.md}
+  only). Both feature agents already landed cleanly:
+
+  - Implementor: web/admin/{Dockerfile,nginx.conf,.dockerignore} +
+    internal-nginx / → admin-app + compose admin-app service + docs. Image
+    builds; compose + nginx -t OK.
+  - Test-writer: new tests/build-serve-admin/ (static 4/4 verified; runtime
+    R1–R5 with self-up) + extended tests/e2e-fullrun/ (admin edge sanity +
+    black-box demo-admin whoami + enables the admin login.e2e.ts browser chain).
+    Scoped correctly to the whoami landing (not the not-yet-built
+    accounts/limits backends).
+
+  Once the Check-2 reconciliation returns green, my path is: commit → rebase 
+  onto 46cad43 (analytics A3, conflict-free) → run the full gate on the rebased 
+  tree (build all images · compose · both build-serve suites · live full-run 
+  incl. the A3 analytics server, seed, client transfer-with-OTP + admin login) →
+  self-review → PR. Standing by for the agent.
+
+✻ Worked for 1m 50s · done 2:41 AM
+
+● Agent "Reconcile Pass-1 build-serve Check 2 for :8081" finished · 2m 40s
+
+● Reconciliation landed — tests/build-serve static is back to 4/4 with :8081
+  admitted to the reserved set. All agents are done. Let me run a quick
+  combined-tree sanity (all changes together) before committing.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Combined-tree sanity green (compose OK · public static 4/4 · admin static
+  4/4). Committing the step, then rebasing onto the analytics-A3 main.
+
+  Made 1 scratchpad edit +37, ran 1 shell command (ctrl+o to expand)
+
+● Committed 789ce7f, .env correctly excluded. (The LF→CRLF warnings are Git's
+  autocrlf notices — the image already built clean from these files; I'll
+  confirm .gitattributes pins them to LF during the gate.) Now the rebase onto
+  analytics-A3 main.
+
+  Rebased onto origin/main (ctrl+o to expand)
+
+● Rebase clean — my commit (aaa84ed) now sits on 46cad43 (analytics A3), and the
+  A3 reporting files are present. Now the authoritative gate on the rebased
+  tree. Fast checks first (compose + the CRLF concern), then I'll launch the
+  heavy live full-run in the background.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● CRLF concern resolved: web/admin/nginx.conf is pinned eol=lf by *.conf, and
+  the Dockerfile/.dockerignore get the exact same text=auto treatment as the
+  already-working web/client equivalents (and the image already built). Compose
+  config OK on the rebased tree.
+
+  Now the authoritative live gate — the full-run, which builds every image
+  (incl. the A3 analytics server), boots the whole stack, seeds, and runs both
+  browser chains (client transfer-with-OTP + admin login). Launching in the
+  background.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The full-run gate is building and booting in the background (all images incl.
+  the A3 analytics server, seed, then both browser chains). It's the heavy one —
+  several minutes. I'll report results when it lands, then run the self-review
+  on the full diff and open the PR (green), or diagnose and fix (red).
+
+  Recap of where we are on the admin-plane step (branch build-serve-admin,
+  committed aaa84ed, rebased onto analytics-A3 main):
+  - Built: admin-app per-SPA image + internal-nginx / → admin-app + compose
+    wiring + docs.
+  - Tested: new tests/build-serve-admin (static 4/4) + extended full-run (admin
+    edge + demo-admin whoami + login.e2e.ts) + reconciled Pass-1
+    tests/build-serve Check 2 for :8081 (back to 4/4).
+  - Static gate green; CRLF/.gitattributes verified; compose valid on the
+    rebased tree.
+
+  Standing by for the live full-run.
+
+✻ Sautéed for 38m 5s · done 2:46 AM
+
+● Background command "Run the live full-run gate (background)" completed (exit
+code 0)
+
+  Read 1 file (ctrl+o to expand)
+
+● Full-run gate: 14 PASS / 1 FAIL, and the one failure is not a 
+  wiring/auth/serve defect — the admin plane is proven end-to-end. Here's the
+  scoreboard:
+
+  - ✅ All 13 services healthy (incl. the A3 analytics server), seed idempotent
+    (2 customers/2 accounts, clean re-run no-op)
+  - ✅ Public plane: client SPA served, transfer-with-OTP e2e passed, login
+    renders seeded account
+  - ✅ Admin edge: SPA served at :8081, no-token /balance/admin/whoami → 401
+    (catch-all doesn't shadow the API)
+  - ✅ Admin whoami slice: demo-admin bearer → /balance/admin/whoami → 200, 
+    userId==sub, role admin through internal-nginx → internal-kong → 
+    balance-service
+  - ❌ Admin browser e2e — failed on a test-locator bug, after the login + auth 
+    all succeeded
+
+  The failure detail: the admin app's own web/admin/tests/e2e/login.e2e.ts:49
+  does getByText(userId, { exact: false }), which now matches two DOM elements —
+  the <dd> identity row and a new AppShell header (— signed in as {userId})
+  that A2 (#47) added. Playwright strict mode requires exactly one match, so it
+  throws. Everything meaningful in that same test passed first: PKCE login
+  succeeded, whoami returned 200 with the admin role, the "Admin console"
+  heading rendered. So the plane works; the test's locator is just stale
+  relative to A2's UI.
+
+  Here's my one hesitation on how to resolve it — because web/admin/tests/
+  belongs to the admin-app workstream (-web, actively developing A2/A3), and I
+  told you earlier I'd escalate rather than edit around it:
+
+● User answered Claude's questions:
+  ⎿  · The admin plane is proven live; the only red is a stale strict-mode 
+     locator in the admin app's OWN e2e (web/admin/tests/e2e/login.e2e.ts:49), 
+     broken by A2's new header that also renders the userId. That file is the 
+     -web workstream's territory. How should I resolve it? → Fix the locator 
+     here
+
+● Delegating the one-line locator fix to a test-writer (scoped strictly to that
+  file), then I'll re-run the full-run for a clean authoritative record and
+  proceed to self-review + PR.
+
+● test-writer(Fix stale admin login e2e locator)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Locator fix is in progress (scoped to web/admin/tests/e2e/login.e2e.ts). Once
+  it lands I'll re-run the full-run for a clean 15/15 record, then amend the
+  commit, run the self-review on the full diff, and open the PR. Standing by.
+
+✻ Churned for 3m 6s · done 2:52 AM
+
+● Agent "Fix stale admin login e2e locator" finished · 1m 13s
+
+● Fix landed cleanly: { exact: false } → { exact: true } (matches only the Home
+  <dd> identity row, not the A2 header), tsc clean, assertion intent preserved,
+  line 50 correctly analyzed and left alone. Re-running the full-run for the
+  authoritative record (images cached — only a test file changed).
+
+  Ran 1 shell command (ctrl+o to expand)
+● The re-gate full-run is running in the background. When it returns 15/15, I'll
+  amend the commit to include the locator fix, run the self-review on the full
+  diff, and open the PR against main. Standing by.
+
+✻ Sautéed for 5m 53s · done 2:54 AM
+
+● Background command "Re-run full-run gate after the locator fix (background)"
+completed (exit code 0)
+
+  Read 1 file (ctrl+o to expand)
+
+● Full-run re-gate: PASS=15 FAIL=0 SKIP=0 — the admin login e2e now passes live
+  (demo-admin PKCE at :8081 → /balance/admin/whoami 200 → "Admin console" with
+  role admin). Gate fully green. Amending the commit to fold in the locator fix.
+
+  Made 1 scratchpad edit +6 -2, ran 1 shell command (ctrl+o to expand)
+
+● Amended (1714106) — final change set is 17 files, coherent. Gate is fully
+  green (compose · build · static 4/4+4/4 · live full-run 15/15). Now the single
+  self-review pass on the code + tests together.
+
+● self-reviewer(Self-review admin-plane step)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Self-review is running on the full diff. When it returns clean (or after I
+  resolve any findings), I'll push build-serve-admin and open the PR against
+  main. Standing by.
+
+✻ Sautéed for 54s · done 2:56 AM
+
+● Agent "Self-review admin-plane step" finished · 4m 56s
+
+● Self-review is a clean pass — no findings (candidates like CRLF and bare
+  /balance/admin→SPA were generated and dismissed with evidence). Gate green,
+  review green. Pushing and opening the PR.
+
+  Made 1 scratchpad edit +36, pushed to build-serve-admin, created PR #49 (ctrl+o to expand)
+
+● PR #49 is open: https://github.com/RandyDpoe45/supercool-finances/pull/49
+
+  Let me record the shipped step in memory.
+
+  Recalled 1 memory, wrote 2 memories (ctrl+o to expand)
+
+● Done — the admin plane is built, wired, verified, and shipped.
+
+  PR #49 — Spec 08 admin plane: build & serve
+
+  https://github.com/RandyDpoe45/supercool-finances/pull/49 (targets main
+  directly; #46 is already merged, so nothing stacked)
+
+  Both things you asked for, in order:
+
+  1. Rebased the worktree onto latest main (46cad43, incl. analytics A3 #48) —
+     conflict-free, since A3 was analytics-src only.
+  2. Reviewed the analytics server wiring — correct and complete:
+     analytics-server on app-internal + data only (host-unpublished), now
+     depends on mongo + redis + keycloak (the A2 consumer reads the stream), and
+     internal-kong's /analytics/admin prefix route now fronts the full A3
+     reporting API (/admin/reports/*) behind the same admin-role gate +
+     anti-spoof — zero gateway changes needed. Live-confirmed (I4/I5) in the #46
+     run and again here.
+
+  The step itself (full pipeline — implementor + test-writer in parallel → gate
+  → self-review → PR):
+  - web/admin per-SPA atomic image (root-served, mirrors client-app),
+    internal-nginx / → admin-app, admin-app compose service (edge-internal only,
+    host-unpublished).
+  - Tests: new tests/build-serve-admin, extended full-run, reconciled the Pass-1
+    tests/build-serve Check 2 for :8081, and fixed a stale strict-mode locator
+    in the admin app's own login.e2e.ts (A2's new header duplicated the userId —
+    you approved fixing it here).
+
+  Verification: live full-run 15/15, 0 skip — all 13 services healthy (incl. A3
+  analytics), seed idempotent, public transfer-with-OTP e2e, and demo-admin PKCE
+  login at :8081 → /balance/admin/whoami 200 (role admin) → "Admin console" 
+  renders. Self-review: clean, 0 findings.
+
+  Still open (honestly, not claimed done):
+  - DoD "maker-checker reversal from the admin app" — the reversal UI (admin-app
+    A3) isn't built.
+  - The A2 Accounts/Limits screens call GET /admin/accounts / GET /admin/limits,
+    which don't exist on balance-service yet — those screens aren't functional
+    against the real backend; only the whoami landing is proven.
+  - Analytics reporting is reachable through the edge but not wired into the 
+    admin UI (AnalyticsPage is still a placeholder) — per your ruling.
+
+  Those three are the natural next moves whenever you want to close the full
+  spec-08 admin DoD. Want me to pick any of them up, or leave it here for
+  review/merge?
+
+✻ Worked for 7m 16s · done 3:03 AM
+
+※ recap: Building spec-08's admin plane. The admin-app build/serve step is shipped as PR #49 (full-run 15/15, self-review clean) and awaiting your review/merge. Next: tell me whether to merge it or start one of the open items (reversal UI, accounts/limits endpoints, or analytics in the admin UI). (disable recaps in /config)

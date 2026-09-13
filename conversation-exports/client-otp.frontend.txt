@@ -1,0 +1,1581 @@
+ ▐▛███▛█   Claude Code v2.1.267
+▝▜██████▀  Opus 4.8 · Claude Max
+  ▝▝ ▝▝    ~\Documents\personal-projects\supercool-finances
+
+
+❯ we need to start building the customer web app and the otp cusomer apps, for  
+  this we already have the api surface defined in the current status of the     
+  @services/balance-service\  this maps directly to @specs/07-frontends.md, we  
+  are actually moving ahead of the spec 06-transport, but the transport layer   
+  implementation can happen after anyway, clear?                                
+  ⎿  Listed directory services\balance-service\
+  ⎿  Read specs\07-frontends.md (64 lines)
+
+● Let me ground my understanding by looking at the actual API surface the
+  frontends will consume, plus the relevant conventions, before I confirm the
+  plan.
+
+  Searched for 1 pattern, read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● No web/ folder yet — this is greenfield. Let me read the actual endpoint
+  surface the two customer apps will consume.
+
+  Read 4 files (ctrl+o to expand)
+
+● Let me check the auth/identity mechanism and whether Keycloak's realm config
+  exists — this is the one genuine integration question for building frontends
+  ahead of transport (spec 06).
+
+  Searched for 2 patterns, read 2 files, ran 2 shell commands (ctrl+o to expand)
+
+● Clear. I've grounded it against the actual repo so we're building to what
+  exists, not to the spec's assumptions. Here's where things stand.
+
+  What's already there (so the frontends have something real to hit)
+
+  Customer /api surface — spec 04, complete:
+  - GET /api/accounts, GET /api/accounts/:id/transactions
+  - POST /api/transfers/resolve-destination (confirmation-of-payee), POST 
+    /api/transfers (internal), POST /api/transfers/external, POST 
+    /api/transfers/:id/confirm, POST /api/transfers/:id/cancel
+  - GET /api/pending-authorization (the OTP app's feed — single active pending),
+    POST /api/otp (mint/reveal the caller's code)
+  - GET /api/payees, POST /api/payees (enrollment with cooling-off)
+
+  Auth — spec 02, done: tools/keycloak/realm-export.json already defines the
+  three public PKCE clients (client-app, otp-app, admin-app), the supercool-api
+  audience mapper, and the customer/admin roles. Redirect URIs are pinned to the
+  nginx origins: client-app→localhost:8080/*, otp-app→localhost:8080/otp/*.
+
+  The one snag from moving ahead of spec 06
+
+  This is a genuine macro-fit point, so I'm surfacing it rather than picking
+  silently. The balance-service does not validate tokens — GatewayIdentityGuard
+  trusts only Kong-injected X-User-Id/X-Roles headers and 401s anything without
+  them. That translation (validate JWT → inject headers) plus the same-origin
+  /api proxy are exactly what spec 06 (nginx + Kong) provides, and we're
+  skipping it for now.
+
+  So building the apps correctly (real OIDC PKCE + Bearer on every call) is
+  unaffected — but running/verifying them against the backend before transport 
+  exists needs a decision. That decision changes each step's Definition of Done
+  and whether the test-writer can prove the end-to-end path now, which is why I
+  want your call before scaffolding.
+
+  Proposed step breakdown (one PR each, orchestrated per CLAUDE.md)
+
+  - F1 — client-app scaffold + auth spine (Vite/React/TS, hardened .npmrc, RTK
+    store, RTK Query base w/ Bearer, OIDC PKCE, atomic skeleton, dev-integration
+    per your choice below)
+  - F2 — accounts + history (UTC↔America/Mexico_City at the edges)
+  - F3 — internal transfers (resolve → confirm-payee UI → initiate w/
+    idempotency key → OTP confirm → cancel; captcha stub)
+  - F4 — payees + external transfers (enrollment w/ cooling-off, hold, OTP
+    confirm)
+  - O1 — otp-app scaffold + auth spine (separate login, own client, /otp base)
+  - O2 — otp-app pending feed + code reveal/approve
+
+  (Captcha is a demo stub — I'll default to a lightweight client-only library
+  unless you have a preference. Admin-app is out of this request.)
+
+  One gating question before I scaffold:
+
+● User declined to answer questions
+  ⎿  · Since we're building ahead of spec 06 (nginx + Kong), how should the apps
+     reach the backend for local dev/verification? The balance-service trusts 
+     only Kong's injected X-User-Id header, so without transport there's no 
+     token→header translation and no same-origin /api proxy. (Dev proxy shim 
+     (recommended) / Build now, defer E2E to spec 06 / Pull minimal transport 
+     forward first)
+
+✻ Crunched for 2m 34s · done 1:33 PM
+
+❯ ask me again please                                                           
+
+● User answered Claude's questions:
+  ⎿  · Since we're building ahead of spec 06 (nginx + Kong), how should the apps
+     reach the backend for local dev/verification? The balance-service trusts 
+     only Kong's injected X-User-Id header, so without transport there's no 
+     token→header translation and no same-origin /api proxy. → actually for this
+     we are going to change a little the approach and start integrating against
+     the api stub, the transport layer is being built as we speak, adn after 
+     that layer exist we just need to integrate and generate the las e2e test, 
+     clear? makes sense? 
+
+● Yes — that makes sense, and it's cleaner than a dev-proxy shim. Here's my read
+  of it, refined:
+
+  Adjusted approach
+
+  - Develop against an API stub that mirrors the /api wire contract — I'll use
+    MSW (Mock Service Worker) as the stub: request-level interception so RTK
+    Query hits real fetch, one set of seeded handlers shared by both local dev 
+    and the component/integration tests. No throwaway proxy glue,
+    balance-service untouched, and each app stays atomic (its own stub, per
+    ADR-16).
+  - The stub mirrors the contract of record (specs/balance-schema.yaml + the
+    real serializers) faithfully — including the non-happy paths that matter 
+    here: 401 without identity, 409 on duplicate/OtpAlreadyActive, cooling-off
+    rejection, idempotency-key replay, confirmation-of-payee token gating.
+    That's what makes the money-safety UX (OTP, holds, confirm-payee) actually
+    exercised rather than just happy-path rendered.
+  - When transport lands: flip the API base URL to the real nginx origin via
+    env, disable MSW, and write the final e2e — that's when the spec-07 DoD
+    items that need the real chain get proven (PKCE login → /api through 
+    nginx/Kong; external transfer including the OTP step). Those specific DoD
+    checkboxes stay honestly open until then; everything else we prove now
+    against the stub.
+
+  Refined step plan (one PR each)
+
+  Step: F1
+  Branch: client-app-scaffold-auth
+  Scope: client-app scaffold (Vite/React/TS, hardened .npmrc, RTK store, RTK
+  Query base w/ Bearer), OIDC PKCE against client-app Keycloak client, atomic
+  skeleton, MSW stub harness
+  ────────────────────────────────────────
+  Step: F2
+  Branch: client-app-accounts
+  Scope: accounts list + balances + statement/history (UTC↔America/Mexico_City
+  at
+  edges)
+  ────────────────────────────────────────
+  Step: F3
+  Branch: client-app-transfers
+  Scope: internal: resolve → confirm-payee UI → initiate (idempotency key) → OTP
+
+  confirm → cancel; captcha stub
+  ────────────────────────────────────────
+  Step: F4
+  Branch: client-app-payees-external
+  Scope: payee enrollment (cooling-off) + external transfer + OTP confirm
+  ────────────────────────────────────────
+  Step: O1
+  Branch: otp-app-scaffold-auth
+  Scope: otp-app scaffold + auth spine (separate login, otp-app client, /otp
+  base)
+  ────────────────────────────────────────
+  Step: O2
+  Branch: otp-app-pending
+  Scope: pending feed (GET /api/pending-authorization) + code reveal/approve
+  (POST /api/otp)
+
+  Captcha: I'll default to a lightweight client-only stub (no external service,
+  since it's a demo) unless you'd rather name one.
+
+  I'll start with F1 now. Let me set up the branch off main and kick off the
+  implementor.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● There's active, uncommitted admin work (step 8a) on the current branch, so I
+  can't cleanly branch in place without dragging it along. The safe,
+  non-destructive move is a git worktree off main — the frontend branch gets its
+  own directory, and the in-progress admin/transport work is left completely
+  untouched. Let me set that up and gather the exact conventions to hand the
+  implementor.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Worktree is up at …/supercool-finances-web on client-app-scaffold-auth (off
+  main), and the in-progress admin work in the main directory is untouched. Let
+  me grab the Keycloak dev defaults so the OIDC config is correct, then brief
+  the implementor.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● OIDC dev config resolves cleanly: authority
+  http://keycloak.localtest.me:8082/realms/supercool, client client-app, and the
+  realm already allowlists http://localhost:8080/* — so the Vite dev server
+  binds localhost:8080 and the redirect matches without touching the realm
+  export.
+
+  I have everything to brief F1. Launching the implementor now (in the worktree;
+  code only — test-writer runs after per the harness).
+
+● implementor(Implement F1 client-app scaffold + auth spine)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F1 implementor is running in the background. Here's the state and what happens
+  next:
+
+  Done this turn
+  - Isolated worktree at …/supercool-finances-web on client-app-scaffold-auth
+    (off main) — your in-progress admin/transport work is untouched.
+  - Confirmed the dev auth story: real PKCE against Keycloak
+    (keycloak.localtest.me:8082/realms/supercool, client client-app), Vite dev
+    server on localhost:8080 to match the realm's redirect allowlist. No
+    realm-export changes needed.
+  - Briefed the F1 implementor: scaffold (Vite/React/TS, hardened .npmrc, strict
+    TS, ESLint/Prettier parity), RTK + RTK Query base with bearer attachment,
+    OIDC PKCE spine, MSW stub mirroring the real /api contract (including the
+    401 identity behavior), and one authenticated GET /api/accounts smoke call
+    to prove the spine end-to-end through the stub.
+
+  Next, per the harness (I'll drive it):
+  1. When the implementor reports done → launch the test-writer (F1 is
+     sequential since it establishes the toolchain; F2+ will run implementor +
+     test-writer in parallel).
+  2. Verification gate — build · test · lint · typecheck must be green.
+  3. Self-reviewer (generate-then-evaluate) → fix loop → open the F1 PR.
+
+  I'll report back when F1 clears the gate. The spec-07 DoD items that need the
+  real chain (PKCE→/api through nginx/Kong; full external transfer with OTP)
+  stay open by design until transport lands and we write the final e2e —
+  everything else we prove now against the stub.
+
+✻ Cooked for 5m 8s · done 1:46 PM
+
+● Agent "Implement F1 client-app scaffold + auth spine" finished · 17m 9s
+
+● F1 scaffold is in and the gate is green (typecheck, lint, build clean; zero
+  tests as expected). Per the harness, the test-writer runs next (F1 is
+  sequential — the toolchain now exists). Launching it to write tests from the 
+  spec/contract, not from the implementor's code.
+
+● test-writer(Write F1 tests from spec/contract)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F1 scaffold landed clean and the gate was green. Test-writer is now running to
+  prove the spine — bearer attachment, auth gating, stub-honors-contract (incl.
+  the 401 identity behavior and the available = balance − held money math), and
+  one end-to-end happy path — all asserted against the balance-service
+  contract, not the app's own fixtures.
+
+  Quick note on what the implementor pinned (sound calls): Vite 7 + plugin-react
+  5 (not the just-released Vite 8 rolldown line) and TypeScript 5.9 (TS 7 would
+  break typescript-eslint's peer range) — stability over bleeding edge, which
+  is right for a money-safety codebase.
+
+  I'll report back once the test-writer finishes and I've run the gate →
+  self-review → F1 PR.
+
+✻ Worked for 46s · done 2:04 PM
+
+● Agent "Write F1 tests from spec/contract" finished · 13m 32s
+
+● Test-writer added 4 suites (11 tests), all passing, with typecheck and lint
+  clean. Before the self-review, I'll run the verification gate myself —
+  mechanically, the full build · test · lint · typecheck with both the
+  implementor's and test-writer's changes present.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gate is green — typecheck clean, lint clean, 11/11 tests pass, build emits
+  dist. Now the self-reviewer runs (code + tests together,
+  generate-then-evaluate, capped at two iterations), which gates the PR.
+
+● self-reviewer(Self-review F1 code and tests)  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Verification gate passed cleanly. The self-reviewer is now doing the combined
+  code+tests review (generate-then-evaluate), with particular attention to
+  money-app risks — chiefly that the MSW stub can never activate in a production
+  build, auth fail-closed behavior, and no committed secrets.
+
+  I'll report back with its verdict: a clean pass opens the F1 PR; any High
+  findings bounce to the implementor/test-writer for a fix loop first.
+
+✻ Cogitated for 1m 1s · done 2:19 PM
+
+● Agent "Self-review F1 code and tests" finished · 4m 35s
+
+● Self-review verdict: clean pass — PR-ready. No High or Medium findings; the
+  money-app risks all checked out explicitly:
+  - MSW is production-inert — worker start is gated on import.meta.env.DEV, so a
+    production build never imports or registers the stub.
+  - Auth fails closed — content renders only when authenticated, not-loading,
+    not-errored; bearer is never a stale/expired token.
+  - No secrets, atomic (no cross-folder imports), hardened .npmrc verbatim,
+    tests segregated, contract fidelity real (the anti-drift test forces held > 
+    0 so available = balance − held can actually fail).
+
+  Only two Low, non-blocking nits remain (silent-renew has no dedicated
+  silent_redirect_uri; a duplicated vi.stubEnv block in two tests). Per the
+  harness, a clean pass is the gate to open the PR — I'll carry these as noted
+  follow-ups rather than muddy the reviewed diff.
+
+  Opening the F1 PR now. Let me commit on the branch and push.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Clean — only new web/ files; dist/ and node_modules/ are properly ignored.
+  Committing and pushing the branch.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Committed (41 files, 37cd12b). The CRLF warnings are just Windows line-ending
+  normalization — harmless. Now pushing and opening the PR.
+
+  Pushed to client-app-scaffold-auth (ctrl+o to expand)
+
+● Branch pushed. Opening the PR against main.
+
+  Created PR #26 (ctrl+o to expand)
+
+● F1 is shipped: PR #26 —
+  https://github.com/RandyDpoe45/supercool-finances/pull/26
+
+  Let me record the frontend roadmap and key decisions to memory so this
+  survives across sessions.
+
+  Recalled 1 memory, wrote 2 memories (ctrl+o to expand)
+
+● F1 is complete and recorded to memory. Summary of where we are:
+
+  F1 — client-app scaffold + auth/data spine → shipped as PR #26 
+  (https://github.com/RandyDpoe45/supercool-finances/pull/26)
+  - Full pipeline run per the harness: implementor → test-writer → green
+    verification gate → self-review clean pass → PR.
+  - Real OIDC PKCE spine + RTK Query + MSW stub mirroring the balance-service
+    /api contract; production-inert stub; fail-closed auth; 11 tests asserting
+    the real behaviors.
+  - In an isolated worktree (…-web), so your parallel admin/transport work was
+    never touched.
+
+  Before I build F2, one sequencing decision — F2 (accounts + history) builds 
+  directly on F1's scaffold, which isn't merged to main yet:
+
+● User answered Claude's questions:
+  ⎿  · F1 is up as PR #26 but not merged. F2–F4 and O1–O2 all build on that 
+     scaffold. How do you want me to proceed? → 3 but also keep working in a 
+     separate worktree please so the job doesnt mix with the other subagets 
+
+● Got it — option 3: I'll stack F2 → F3 → F4 to finish the customer app, then
+  pause before the otp-app for your review. And all of it stays in the dedicated
+  …-web worktree, isolated from the backend subagents working in the main repo
+  directory — no file mixing.
+
+  Setting up the F2 branch (stacked on F1) in that worktree and launching the F2
+  implementor.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● F2 branch client-app-accounts is stacked on F1 in the worktree. Launching the
+  implementor.
+
+● implementor(Implement F2 accounts + history)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F2 implementor is running in the …-web worktree on client-app-accounts
+  (stacked on F1) — building the accounts overview, statement/history view,
+  exact float-free money formatting, and UTC→America/Mexico_City date conversion
+  at the edge, plus the statement stub mirroring the real contract.
+
+  I'll run the same pipeline as F1 (implementor → test-writer → gate →
+  self-review → PR) and then continue into F3 and F4, pausing before the
+  otp-app. I'll surface anything an implementor escalates; otherwise I'll report
+  back when F2's PR is up.
+
+✻ Cogitated for 4m 49s · done 2:45 PM
+
+● Agent "Implement F2 accounts + history" finished · 14m 12s
+
+● The F2 implementor did exactly the right thing: it flagged that F1's
+  spine.test.tsx asserts the raw minor-unit string (1500000), which F2 now
+  correctly formats to 15,000.00 at the edge — and it refused to hack a raw
+  value back into the DOM (that would re-leak raw units into screen-reader
+  text). That's a stale-test update the F2 test-writer owns (option 1), not a
+  design fork. No developer decision needed — the code is spec-correct.
+
+  Launching the F2 test-writer to update that assertion and write the F2 proofs.
+  The exact money formatting is the money-safety crux here, so I'm directing
+  hard against tautological assertions.
+
+● test-writer(Write F2 tests from spec/contract)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F2 code is in (accounts overview, statement view, exact float-free money
+  formatting verified up past 2⁵³, IANA-zone Mexico City timestamps, statement
+  stub mirroring the real contract incl. 400/404/401 semantics). The test-writer
+  is now writing the F2 proofs and fixing the one stale F1 assertion the
+  implementor correctly refused to hack around.
+
+  I'll run the gate → self-review → F2 PR, then move to F3. Back with the F2 PR
+  link.
+
+✻ Cooked for 57s · done 3:00 PM
+
+● Agent "Write F2 tests from spec/contract" finished · 8m 22s
+
+● F2 test-writer done — 43/43 tests pass (F1 + F2), typecheck/lint/prettier
+  clean, the stale F1 assertion fixed (now also asserts raw units are absent).
+  Strong suites: the DST-boundary datetime test (a hardcoded -6 offset would
+  fail it), the >2⁵³ money test, running-fold consistency, and whitelist
+  anti-drift. Running the verification gate mechanically, then the self-review.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gate green for F2 — typecheck, lint, format clean; 43/43 tests; build emits
+  dist. Launching the self-review (code + tests together,
+  generate-then-evaluate) on the F2 changeset.
+
+● self-reviewer(Self-review F2 code and tests)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F2 self-review is running, with the focus on the money-safety crux — verifying
+  no float path ever touches a wire amount, the datetime helper is IANA-zone
+  (not a fixed offset), and the statement contract leaks nothing. I'll report
+  back with the verdict and, on a clean pass (or resolved findings), open the F2
+  PR and move to F3.
+
+✻ Worked for 53s · done 3:10 PM
+
+● Agent "Self-review F2 code and tests" finished · 4m 28s
+
+● F2 self-review: clean pass — PR-ready. No High/Medium. The money-safety
+  substance was verified, not just skimmed:
+  - Zero float paths on any wire amount — a full scan for
+    Number(/parseFloat/toFixed/Intl.NumberFormat/+-coercion came up empty; the
+    only Number.isNaN operates on a Date, never money.
+  - Datetime is genuinely IANA-zone (the DST-split test would fail a hardcoded
+    offset); UTC preserved in <time dateTime>.
+  - Statement contract mirrored exactly (6-key whitelist, running-fold
+    consistent, newest-first); 401/400/404-not-403 all asserted.
+
+  Two Low, non-blocking hardening notes (a /^-?\d+$/ guard before BigInt in
+  money.ts; tightening the stub's UUID regex to match ParseUUIDPipe). I'll carry
+  them as follow-ups — the money.ts guard is more relevant in F3 where the user
+  enters amounts (malformed money becomes reachable from input, not just the
+  wire), so I'll fold it in there.
+
+  Committing and opening the F2 PR stacked on F1 (base = the F1 branch), so the
+  PR diff is F2-only and the chain stays cleanly reviewable.
+  Pushed to client-app-accounts (ctrl+o to expand)
+
+● F2 committed (ccbb399) and pushed. Opening the F2 PR based on the F1 branch
+  (F2-only diff).
+
+  Created PR #27 (ctrl+o to expand)
+
+● F2 is shipped: PR #27 —
+  https://github.com/RandyDpoe45/supercool-finances/pull/27 (stacked on F1,
+  F2-only diff).
+
+  Two customer-app steps done, both clean-pass. Next is F3 — internal transfers,
+  the first money-moving UI, so I'll brief it precisely. Let me read the exact
+  transfer contract (bodies, DTOs, error semantics) before setting the
+  implementor loose.
+
+  Read 2 files (ctrl+o to expand)
+
+● Contracts are clear. Key money-safety points for F3: amount is an unsigned 
+  minor-unit integer string (so the UI must convert the user's major-unit input
+  exactly, float-free), confirmationToken from resolve gates initiate,
+  Idempotency-Key is required, and the serializer whitelists a specific set
+  (never leak initiatedBy, payeeId, failureReason, the raw credit account UUID,
+  etc.).
+
+  Setting up the F3 branch (stacked on F2) and launching the implementor.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● implementor(Implement F3 internal transfers)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F3 implementor is running on client-app-transfers (stacked on F2) — the full
+  internal-transfer journey: confirmation-of-payee → exact float-free amount
+  parsing (with a fail-loud parseAmountToMinor + the F2 money.ts guard folded
+  in) → captcha stub → idempotency-keyed initiate → OTP confirm → cancel, plus
+  RTK Query cache invalidation on posted movements and a stateful MSW stub with
+  a documented dev OTP code.
+
+  I gave it explicit leave to escalate if this money-moving flow is too big to
+  build/review coherently in one step (it may recommend a split). I'll report
+  back with either that escalation or the F3 pipeline result.
+
+✻ Sautéed for 3m 48s · done 3:18 PM
+
+● Agent "Implement F3 internal transfers" finished · 24m 36s
+
+● F3 implementor kept the whole internal-transfer flow as one coherent step (no
+  split needed), gate green — 43/43 existing tests still pass. Standouts: a
+  pure, deterministic transfer state machine (transferFlow.ts), fail-loud
+  parseAmountToMinor (rejects 1.005 MXN rather than truncating), domain-code→UI
+  error mapping, cache-invalidation tags, and a stateful stub with dev OTP
+  123456. It also correctly kept AppShell router-free (reverting a nav Link that
+  broke the isolated auth-gate test) and put the entry point on the accounts
+  page instead.
+
+  Launching the F3 test-writer — this money-moving step gets the most scrutiny.
+
+● test-writer(Write F3 tests from spec/contract)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F3 test-writer is running — proving the transfer state machine's transitions
+  (especially idempotency-key stability across retries and duplicate-confirm — a
+  regenerated key would be a double-spend risk and must fail the test), the
+  fail-loud money parsing, the domain-error mapping, stub anti-drift with all
+  the transfer status codes, captcha gating, and the end-to-end journey with
+  cache invalidation.
+
+  I'll run the gate → self-review → F3 PR, then F4 (the last customer-app step).
+  Back with the F3 result.
+
+✻ Churned for 1m 2s · done 3:43 PM
+
+● Agent "Write F3 tests from spec/contract" finished · 15m 18s
+
+● F3 test-writer done — 161 tests pass (118 new), typecheck/lint clean, no 
+  production defects found. Coverage hits the critical points: idempotency-key
+  stability (byte-for-byte across retry and duplicate-confirm — the double-spend
+  guard), 1.005 MXN rejected not truncated, int64-max boundary, whitelist
+  anti-drift with leaked fields asserted absent, 404-not-403 anti-enumeration,
+  and cache invalidation proven via a counting handler. Running the gate.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gate green for F3 — 161/161 tests, typecheck/lint/format clean, build emits
+  dist. Launching the self-review on the money-moving changeset with maximum
+  scrutiny.
+
+● self-reviewer(Self-review F3 code and tests)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F3 self-review is running with focus on the double-spend guard
+  (idempotency-key reuse across retries and duplicate-confirm),
+  float-free/fail-loud money parsing, confirmation-token binding, and OTP
+  handling. On a clean pass I'll open the F3 PR and move to F4; if it surfaces a
+  High, it bounces back to the implementor/test-writer first. Back with the
+  verdict.
+
+✻ Baked for 1m 3s · done 4:00 PM
+
+● Agent "Self-review F3 code and tests" finished · 6m 59s
+
+● F3 self-review: clean pass — PR-ready, no High. The money-safety spine all
+  verified correct: idempotency key minted once and reused byte-for-byte (never
+  in render, so StrictMode can't churn it; and confirmDuplicate isn't part of
+  the server fingerprint, so "Send anyway" reuse is safe), float-free/fail-loud
+  money, token↔destination binding, no POST /api/otp in the client, no leaked
+  fields, correct cache invalidation.
+
+  It surfaced one Medium worth fixing even though it's non-blocking — and I'll
+  fix it, because it's money-code fidelity: the stub models "same idempotency
+  key, different details" as a silent replay of the original, but the real
+  service throws 409 IDEMPOTENCY_KEY_REUSED on a fingerprint mismatch. The test
+  currently ratifies the wrong behavior. Leaving a test that asserts the
+  opposite of the backend contract is a latent trap in a financial service, so
+  I'll correct the stub + split the test (this also closes the one real e2e
+  gap). Plus a cheap Low (assert an internal cancel does not refetch accounts).
+
+  The stub change is implementor territory; the test split is the test-writer's.
+  Running the stub fix first (the test depends on it).
+
+● implementor(Fix F3 stub idempotency-reuse fidelity)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Applying the stub-fidelity fix now (stub stores each idempotency key's
+  fingerprint and returns 409 IDEMPOTENCY_KEY_REUSED on mismatch, while keeping
+  byte-identical replay and the safe confirmDuplicate re-submit). Once it's in,
+  the test-writer splits that contract test into the two cases and adds the Low
+  cancel assertion, then gate → commit → F3 PR. Back shortly.
+
+✻ Cooked for 1m 12s · done 4:08 PM
+
+● Agent "Fix F3 stub idempotency-reuse fidelity" finished · 3m 39s
+
+● Stub fix landed exactly as specified (fingerprint =
+  sourceAccountId|destinationAccountNumber|amount|currency, confirmDuplicate
+  excluded and confirmed against the real fingerprint.ts); 160/161 pass with the
+  single expected failure being the stale test to split. Launching the
+  test-writer to split that test and add the Low cancel assertion.
+
+● test-writer(Split F3 idempotency test, add cancel assertion)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Test fixes are being applied (splitting the idempotency test into
+  identical-replay vs. different-details→409, and adding the cancel
+  negative-invalidation assertion). Once green, I'll run the gate, verify the
+  fixes match the reviewer's spec, then commit and open the F3 PR — and move on
+  to F4, the final customer-app step.
+
+✻ Churned for 23s · done 4:12 PM
+
+● Agent "Split F3 idempotency test, add cancel assertion" finished · 5m 35s
+
+● Both fixes in — 162/162 green, typecheck/lint clean, no production code
+  touched (stub was the earlier implementor fix). Running the full gate (build +
+  format included) before committing.
+
+  Ran 1 shell command (ctrl+o to expand)
+● Gate green after the fixes — 162/162, typecheck/lint/format/build all clean.
+  Committing F3 and opening the PR (stacked on F2, F3-only diff).
+
+  Pushed to client-app-transfers (ctrl+o to expand)
+
+● F3 committed (cb5da6b) and pushed. Opening the F3 PR based on the F2 branch
+  (F3-only diff).
+
+  Created PR #29 (ctrl+o to expand)
+
+● F3 is shipped: PR #29 —
+  https://github.com/RandyDpoe45/supercool-finances/pull/29 (Medium + Low
+  resolved in-PR).
+
+  Now F4 — payees + external transfers, the last customer-app step. Reading the
+  payee contract and external-transfer specifics (cooling-off, holds) before
+  briefing.
+
+  Searched for 1 pattern, read 2 files (ctrl+o to expand)
+
+● Payee contract is clear. Notable F4 specifics: enrollment body is { 
+  displayName, destinationRef (6–20 digits) } .strict() (rail is server-side);
+  PayeeDto exposes a usable hint (now ≥ coolingOffUntil) but the server is
+  authoritative; and — critically — external transfers place a hold at initiate,
+  so unlike internal, external initiate/confirm/cancel all move the available
+  balance. That asymmetry drives cache invalidation and needs care (F3's test
+  asserts an internal cancel does not refetch accounts).
+
+  Setting up the F4 branch (stacked on F3) and launching the implementor.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● implementor(Implement F4 payees + external transfers)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F4 implementor is running on client-app-payees-external (stacked on F3) —
+  payee enrollment with the cooling-off period shown, payee list with
+  usable/cooling-off status, and the external-transfer flow (payee-addressed,
+  hold-at-initiate, reusing the OTP-confirm machinery). I emphasized the
+  hold→cache-invalidation asymmetry: external initiate/cancel move the available
+  balance and must invalidate Account, while internal cancel must stay
+  refetch-free (preserving F3's test).
+
+  This is the last customer-app step. I'll run the pipeline (test-writer → gate
+  → self-review → PR), then pause for your review of the whole customer app
+  before starting the otp-app (O1/O2), as you asked. Back with the F4 result.
+
+✻ Baked for 2m 53s · done 4:20 PM
+
+● Agent "Implement F4 payees + external transfers" finished · 26m 58s
+
+● F4 code is in, gate green (162/162 still pass). Clean design: a sibling
+  externalTransferFlow reducer (internal transferFlow left byte-for-byte
+  untouched), the cache-invalidation asymmetry handled correctly (external
+  initiate invalidates Account; cancelTransfer is now type-aware so external
+  cancel refetches but internal doesn't), cooling-off shown with
+  server-authoritative gating, and stub hold coherence via a projectAccounts()
+  fold. Launching the F4 test-writer.
+
+● test-writer(Write F4 tests from spec/contract)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F4 test-writer is running — proving the external flow reducer (incl.
+  idempotency-key stability), payee/external contract anti-drift with leaked
+  fields asserted absent, the hold→cache-invalidation asymmetry via counting
+  handlers (external initiate/cancel/confirm refetch; internal cancel does not),
+  hold coherence on the projected balances, cooling-off server-authoritative
+  gating, captcha gating, and the end-to-end external journey.
+
+  Then gate → self-review → F4 PR, and I'll stop there for your review of the
+  whole customer app before the otp-app. Back with the result.
+
+✻ Brewed for 48s · done 4:48 PM
+
+● Agent "Write F4 tests from spec/contract" finished · 15m 9s
+
+● F4 test-writer done — 220 tests pass (58 new), typecheck/lint clean, no
+  production defects. Strong coverage: the hold projection coherence (available
+  drops → restored → balance decremented in exact bigint minor-units), the
+  cache-invalidation asymmetry via a live getAccounts subscription, .strict()
+  rejecting smuggled confirmationToken (proving external has no resolve step),
+  and authoritative cooling-off rejection. Running the gate.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gate green for F4 — 220/220, typecheck/lint/format/build clean. Launching the
+  final customer-app self-review.
+
+● self-reviewer(Self-review F4 code and tests)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● F4 self-review is running with focus on the hold→cache-invalidation asymmetry,
+  the external double-spend guard, .strict() enrollment (no cooling-off
+  bypass), and confirming F3's internal path is untouched. On a clean pass (or
+  resolved findings) I'll open the F4 PR — then stop and hand the whole customer
+  app back to you for review before starting the otp-app, as you asked. Back
+  with the verdict.
+
+✻ Brewed for 56s · done 5:29 PM
+
+● Agent "Self-review F4 code and tests" finished · 6m 30s
+
+● F4 self-review: clean pass — PR-ready, no High/Medium. All the money-safety
+  targets verified against the contract of record: the hold→cache-invalidation
+  asymmetry is correct (external initiate/cancel/confirm refetch; internal
+  cancel doesn't — F3's property survives, guarded by a live-subscription test),
+  the external idempotency key is stable (double-spend guard), .strict()
+  prevents cooling-off bypass, no leakage, and the internal path is untouched.
+  Only optional Low notes (a couple of stub-fidelity test gaps that need extra
+  fixtures) — carrying as follow-ups.
+
+  Committing F4 and opening its PR.
+
+  Pushed to client-app-payees-external (ctrl+o to expand)
+
+● F4 committed (0495f92) and pushed. Opening the F4 PR (stacked on F3, F4-only
+  diff).
+
+  Created PR #31 (ctrl+o to expand)
+
+● The customer app is complete — all four steps shipped as clean-pass PRs:
+
+  Step: F1
+  PR: #26 (https://github.com/RandyDpoe45/supercool-finances/pull/26)
+  What: Scaffold + OIDC PKCE + RTK Query + MSW spine
+  ────────────────────────────────────────
+  Step: F2
+  PR: #27 (https://github.com/RandyDpoe45/supercool-finances/pull/27)
+  What: Accounts overview + statement/history
+  ────────────────────────────────────────
+  Step: F3
+  PR: #29 (https://github.com/RandyDpoe45/supercool-finances/pull/29)
+  What: Internal transfers (confirm-payee, OTP, idempotency)
+  ────────────────────────────────────────
+  Step: F4
+  PR: #31 (https://github.com/RandyDpoe45/supercool-finances/pull/31)
+  What: Payees + external transfers (cooling-off, holds)
+
+  Let me update the roadmap memory before I pause.
+
+  Recalled 1 memory, wrote 1 memory (ctrl+o to expand)
+
+● Now the index pointer.
+
+  Recalled 1 memory, wrote 1 memory (ctrl+o to expand)
+
+● Customer app is done — all four steps shipped as stacked, clean-pass PRs, and
+  I've paused here for your review as you asked.
+
+  The customer SPA (F1–F4)
+
+  ┌──────────────┬─────────────────────────────────────────────┬─────┬─────┐
+  │     Step     │                     PR                      │ Bas │ Tes │
+  │              │                                             │  e  │ ts  │
+  ├──────────────┼─────────────────────────────────────────────┼─────┼─────┤
+  │ F1 scaffold  │ #26 (https://github.com/RandyDpoe45/superco │ mai │     │
+  │ + auth/data  │ ol-finances/pull/26)                        │ n   │ 11  │
+  │ spine        │                                             │     │     │
+  ├──────────────┼─────────────────────────────────────────────┼─────┼─────┤
+  │ F2 accounts  │ #27 (https://github.com/RandyDpoe45/superco │     │     │
+  │ + statement/ │ ol-finances/pull/27)                        │ F1  │ 43  │
+  │ history      │                                             │     │     │
+  ├──────────────┼─────────────────────────────────────────────┼─────┼─────┤
+  │ F3 internal  │ #29 (https://github.com/RandyDpoe45/superco │ F2  │ 162 │
+  │ transfers    │ ol-finances/pull/29)                        │     │     │
+  ├──────────────┼─────────────────────────────────────────────┼─────┼─────┤
+  │ F4 payees +  │ #31 (https://github.com/RandyDpoe45/superco │     │     │
+  │ external     │ ol-finances/pull/31)                        │ F3  │ 220 │
+  │ transfers    │                                             │     │     │
+  └──────────────┴─────────────────────────────────────────────┴─────┴─────┘
+
+  Stacked chain — each PR's base is the prior branch, so each diff is one step.
+  Merge in order #26 → #27 → #29 → #31 (GitHub retargets each to main as its
+  parent merges); or squash the chain. Everything lives in the …-web worktree,
+  isolated from your backend/transport work.
+
+  What works now (against the MSW stub): PKCE login → accounts + balances +
+  statement/history (Mexico City times, exact money) → internal transfers
+  (confirm-payee → idempotent initiate → OTP confirm → cancel) → payee
+  enrollment with cooling-off → external transfers with holds. To try it: cd 
+  web/client && npm run dev → sign in → the flows are reachable from the
+  accounts page; dev OTP is 123456.
+
+  Money-safety that's proven: float-free amounts (BigInt/string, 1.005 rejected
+  not truncated), idempotency-key stability as a double-spend guard, DTO
+  whitelists with leaked fields asserted absent, 404-not-403, and the
+  hold→cache-invalidation asymmetry (external initiate/cancel refetch balances;
+  internal cancel doesn't).
+
+  Honestly still open (by design): the spec-07 DoD items needing the real chain
+  — PKCE→/api through nginx/Kong and a full external transfer end-to-end — get
+  proven in the post-transport integration + final e2e. I see transport's public
+  edge just landed (PR #30) in parallel, so that integration is getting closer.
+  Two optional Low test follow-ups are noted in the F4 PR (a
+  same-key/different-payeeId reuse case and an ACCOUNT_FROZEN path — both need
+  extra stub fixtures).
+
+  When you've had a look and want me to continue, say the word and I'll start
+  the otp-app (O1 scaffold → O2 pending-feed + code reveal) — its own atomic
+  project under web/otp/, separate otp-app OIDC login, no shared code.
+
+✻ Baked for 3h 59m 54s · done 5:37 PM
+
+※ recap: Building the spec-07 frontends against an MSW stub: the customer app (F1–F4) is complete and shipped as four stacked clean-pass PRs (#26, #27, #29, #31), paused for your review. Next: say go and I'll start the otp-app (O1 scaffold). (disable recaps in /config)
+
+❯ /context 
+  ⎿  Context Usage
+     ⛀ ⛁ ⛁ ⛁ ⛁ ⛁ ⛀ ⛀ ⛁ ⛀ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   Opus 4.8
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   claude-opus-4-8
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   243k/1m tokens (24%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ 
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   Estimated usage by category
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System prompt: 2.6k tokens (0.3%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System tools: 28k tokens (2.8%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Custom agents: 210 tokens (0.0%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Memory files: 5.8k tokens (0.6%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝   ⛁ Skills: 2.9k tokens (0.3%)
+                                               ⛁ Messages: 204.2k tokens (20.4%)
+                                               ⛶ Free space: 723.2k (72.3%)
+                                               ⛝ Autocompact buffer: 33k tokens (3.3%)
+
+     Auto-compact window: 1m tokens
+
+     MCP tools · /mcp (loaded on-demand)
+     └ 17 tools · 0 tokens
+
+     Custom agents · .claude/agents/
+     └ 3 agents · 210 tokens
+
+     Skills · /skills
+     └ 18 skills · 2.9k tokens
+
+     /context all to expand
+❯ now please start with the otp web app implementation please                   
+
+● On it — starting the otp-app (O1 scaffold + auth spine, then O2). Let me
+  confirm the worktree is clean, then read the OTP contract so both O1's smoke
+  call and O2's reveal flow are briefed accurately.
+
+  Read 3 files, ran 1 shell command (ctrl+o to expand)
+
+● Worktree is clean; contracts confirmed. The otp-app consumes just two
+  endpoints — GET /api/pending-authorization ({ authorization: 
+  PendingAuthorizationDto | null }, a 2-min-expiry pending) and POST /api/otp
+  (OtpDto { code, ttlSeconds }, revealed once, singleton-gated → 409). It's a
+  fresh atomic project under web/otp/ (no shared code with client-app per
+  ADR-16), served at base path /otp, so I'll branch it off main (independent of
+  the client-app chain).
+
+  Setting up the O1 branch and launching the scaffold implementor.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● implementor(Implement O1 otp-app scaffold + auth spine)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● O1 implementor is running — a fresh atomic otp-app under web/otp/ (branched
+  off main, independent of the client-app chain): OIDC PKCE against the separate
+  otp-app client at base path /otp, RTK Query + bearer spine, dev/test-only MSW
+  stub mirroring GET /api/pending-authorization, and a bare "pending / none"
+  smoke indicator. No shared code with client-app per ADR-16.
+
+  I'll run the pipeline (test-writer → gate → self-review → O1 PR), then O2 (the
+  full pending-feed UI + POST /api/otp code reveal with the
+  singleton/one-time-shown and 2-min-expiry UX). Back with O1's result.
+
+✻ Crunched for 2m 6s · done 5:51 PM
+
+● Agent "Implement O1 otp-app scaffold + auth spine" finished · 10m 45s
+
+● O1 scaffold is in, gate green (typecheck/lint/format/build clean, zero tests,
+  MSW dead-code-eliminated from the prod bundle). One notable, well-reasoned
+  wrinkle: since the app is based at /otp but calls origin-root /api, the dev
+  MSW worker registers with scope: '/' via a dev-only Vite plugin sending
+  Service-Worker-Allowed: / — the self-reviewer will confirm that never touches
+  the production build. Launching the O1 test-writer.
+
+● test-writer(Write O1 otp-app tests from spec/contract)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● O1 test-writer is running (bearer attachment, auth gating,
+  pending-authorization stub anti-drift incl. the internal-vs-external
+  nullability rules and the null case, and the spine happy path). Then gate →
+  self-review → O1 PR, then O2. Back shortly.
+
+✻ Crunched for 31s · done 6:03 PM
+
+● Agent "Write O1 otp-app tests from spec/contract" finished · 13m 36s
+
+● O1 test-writer done — 15 tests, typecheck/lint clean, several
+  mutation-verified (they fail when the behavior is broken — real
+  discrimination, not tautology). Running the full gate.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gate green for O1 — 15/15, typecheck/lint/format/build clean. Launching the O1
+  self-review.
+
+● self-reviewer(Self-review O1 otp-app scaffold)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● O1 self-review is running — checking ADR-16 atomicity (no imports from
+  web/client), the dev-only worker-scope plugin never leaking into production,
+  auth fail-closed, and contract fidelity. On a clean pass I'll open the O1 PR
+  and start O2 (the real pending-feed UI + POST /api/otp code reveal). Back with
+  the verdict.
+
+✻ Brewed for 45s · done 6:17 PM
+
+● Agent "Self-review O1 otp-app scaffold" finished · 5m 9s
+
+● O1 self-review: clean pass — PR-ready. Verified atomicity (no imports from
+  web/client), MSW production-inert (dev-only configureServer plugin,
+  dead-code-eliminated build), fail-closed auth, contract fidelity, and
+  mutation-sensitive tests. Two Low non-blocking notes (a missing .catch on the
+  dev mock-start; HomePage error branch untested — HomePage gets reworked in O2
+  anyway), carried as follow-ups.
+
+  Committing O1 and opening its PR (based on main — the otp-app is independent
+  of the client-app chain).
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Commit landed (9a6a8fc), but the push hit a transient network error
+  (Connection was reset). Retrying.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Confusing output — but "Everything up-to-date" suggests the first attempt
+  actually landed the ref server-side despite the read error. Verifying the
+  remote.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The branch isn't on the remote yet — the push genuinely failed (transient
+  network). The commit is safe locally. Retrying the push.
+
+  Pushed to otp-app-scaffold-auth (ctrl+o to expand)
+
+● Push succeeded on retry. Opening the O1 PR against main.
+
+  Created PR #32 (ctrl+o to expand)
+
+● O1 is shipped: PR #32 —
+  https://github.com/RandyDpoe45/supercool-finances/pull/32
+
+  Now O2 — the pending-feed UI + code reveal, the final frontend step. Setting
+  up the branch (stacked on O1) and launching the implementor.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● implementor(Implement O2 pending feed + code reveal)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● O2 implementor is running — the full pending-authorization card
+  (type-dependent destination rendering, Mexico City times, 2-min expiry), the
+  code-reveal action (POST /api/otp → prominent code + ttl countdown +
+  shown-once warning + 409 OtpAlreadyActive handling), its own float-free money
+  / IANA datetime helpers (copied per ADR-16), and the singleton/ttl stub. Then
+  the pipeline (test-writer → gate → self-review → O2 PR) completes the
+  frontends. Back with the result.
+
+✻ Churned for 3m 7s · done 6:25 PM
+❯ /context 
+  ⎿  Context Usage
+     ⛀ ⛁ ⛁ ⛁ ⛁ ⛁ ⛀ ⛀ ⛁ ⛀ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   Opus 4.8
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   claude-opus-4-8
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛀ ⛶   282.9k/1m tokens (28%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ 
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   Estimated usage by category
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System prompt: 2.6k tokens (0.3%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System tools: 28k tokens (2.8%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Custom agents: 210 tokens (0.0%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ Memory files: 5.8k tokens (0.6%)
+     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝   ⛁ Skills: 2.9k tokens (0.3%)
+                                               ⛁ Messages: 243.4k tokens (24.3%)
+                                               ⛶ Free space: 684.1k (68.4%)
+                                               ⛝ Autocompact buffer: 33k tokens (3.3%)
+
+     Auto-compact window: 1m tokens
+
+     MCP tools · /mcp (loaded on-demand)
+     └ 17 tools · 0 tokens
+
+     Custom agents · .claude/agents/
+     └ 3 agents · 210 tokens
+
+     Skills · /skills
+     └ 18 skills · 2.9k tokens
+
+     /context all to expand
+
+● Agent "Implement O2 pending feed + code reveal" finished · 16m 9s
+
+● O2 code is in, 13/15 pass — the 2 failures are exactly the expected stale-test
+  situation: O1's home-spine tests asserted the bare placeholder strings that
+  O2 correctly replaced with the real pending card (the render itself is
+  verified correct: $1,250.00 MXN, type-dependent rows, countdown). The
+  auth/bearer/contract suites all still pass. The O2 test-writer owns rewriting
+  that spine test and adding the reveal coverage. Launching it.
+
+● test-writer(Write O2 tests from spec/contract)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● O2 test-writer is running — rewriting the stale spine test to assert the real
+  card, plus proving the money/datetime/countdown helpers, OTP contract
+  anti-drift ({ code, ttlSeconds }, 409 OTP_ALREADY_ACTIVE), the reveal flow
+  (code shown once + ttl expiry via fake timers + singleton), and type-dependent
+  pending rendering. Then gate → self-review → O2 PR completes the frontends.
+
+  One useful note from parallel work: transport landed both edges, and its
+  routing is service-namespaced (/balance/api, Kong strips /balance) — so the
+  eventual post-transport integration is just pointing VITE_API_BASE_URL at
+  /balance/api (a one-line env change, since we built everything env-driven
+  behind MSW). I'll flag that explicitly when I wrap up. Back with O2's result.
+
+✻ Worked for 53s · done 6:42 PM
+
+● Agent "Write O2 tests from spec/contract" finished · 13m 59s
+
+● O2 test-writer done — 55 tests (10 files), typecheck/lint clean, no defects,
+  ran 5× without flakiness. The >2⁵³ money gate, the datetime shift proof, the
+  reveal/singleton/ttl-clear flow, and the type-dependent feed rendering are all
+  covered; the spine test is rewritten to the real card. Running the full gate.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gate green for O2 — 55/55, typecheck/lint/format/build clean. Launching the
+  final self-review.
+
+● self-reviewer(Self-review O2 pending feed + reveal)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● O2 self-review is running — focused on one-time-code hygiene (never
+  logged/persisted, dropped at ttl), the singleton 409 path, float-free money /
+  IANA datetime, contract fidelity, and ADR-16 atomicity. On a clean pass I'll
+  open the O2 PR — which completes the entire spec-07 frontend build (both
+  customer apps) — and give you the full wrap-up. Back with the verdict.
+
+✻ Churned for 42s · done 6:57 PM
+
+● Agent "Self-review O2 pending feed + reveal" finished · 5m 10s
+
+● O2 self-review: clean pass on the blocking gate — no High, but one Medium I'll
+  fix before the PR because it's on the code-reveal security path: the minted
+  OTP code lingers in RTK Query's in-memory mutation cache past its ttl (the
+  ttl-clear only nulls local state), and a comment/doc falsely claims it "never
+  lingers in the store" — a latent High if redux-persist is ever added. The fix
+  is small and reviewer-specified: call the mutation's reset() in lockstep with
+  the ttl-clear, and correct the docs. Then a matching test asserts the store no
+  longer holds the code after ttl.
+
+  Applying the production fix first.
+
+● implementor(Fix O2 OTP code store-hygiene)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Applying the store-hygiene fix (reset() the mutation in lockstep with the
+  ttl-clear and on error, and correct the docs). Then the test-writer adds the
+  matching assertion (store no longer holds the code after ttl), gate, and the
+  O2 PR completes the frontends. Back shortly.
+
+✻ Brewed for 33s · done 7:02 PM
+
+● Agent "Fix O2 OTP code store-hygiene" finished · 2m 14s
+
+● Store-hygiene fix applied cleanly (reset() on both ttl-clear paths and on
+  error; docs corrected), gate still green (55/55). Adding the matching
+  assertion to lock it in.
+
+● test-writer(Add O2 store-hygiene assertion)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Adding the store-hygiene assertion now. Once green, I'll run the gate, commit
+  O2, and open the final PR — completing the entire spec-07 frontend build. Back
+  with the wrap-up.
+
+✻ Sautéed for 18s · done 7:05 PM
+
+● Agent "Add O2 store-hygiene assertion" finished · 7m 45s
+
+● The store-hygiene assertion is in (56 tests, verified it actually catches a
+  store leak a DOM-only check would miss). The test-writer flagged one honest
+  discrepancy: the error-path reset() doesn't actually evict the rejected
+  mutation entry (it runs synchronously in the catch before the hook settles),
+  so a comment overclaims about the error path. Crucially, that lingering entry
+  holds only the 409 envelope — no plaintext code — so there's no secret at
+  risk; the security-relevant success/ttl purge works and is now tested.
+
+  So the right fix is proportionate: correct the doc to be accurate rather than
+  add timing machinery to evict a secret-free entry (that would be
+  over-engineering for zero security gain, and risk flakiness). Not leaving
+  another inaccurate invariant comment, though — that was the whole point of the
+  Medium.
+
+● implementor(Correct O2 error-path doc claim)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Correcting the doc to accurately describe the error-path behavior (no false
+  invariant left behind). Once green, I'll run the gate, commit O2, and open the
+  final PR completing the frontends. Back with the wrap-up.
+
+✻ Cooked for 59s · done 7:13 PM
+
+● Agent "Correct O2 error-path doc claim" finished · 1m 36s
+
+● All O2 findings resolved — the Medium (store hygiene via reset()), its locking
+  assertion, and the doc accuracy. Running the gate once more to confirm
+  mechanical greenness across all the edits, then committing and opening the
+  final PR.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gate green — 56/56, typecheck/lint/format/build clean. Committing O2 and
+  opening the final PR.
+
+  Pushed to otp-app-pending-reveal (ctrl+o to expand)
+
+● O2 committed (661f4ad) and pushed. Opening the final PR (stacked on O1).
+  Created PR #34 (ctrl+o to expand)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ all the transport layer has been built and is now on the main branch, after   
+  the O2 is done and merged, rebase the worktree to the latest verison of main  
+  an update the uri definitions, so it matches the transport layer definition.  
+  and we can finally build the end to end tests, clear? questions? also O1 has  
+  already been merged as well                                                   
+
+● Understood — and O2 is up: PR #34 —
+  https://github.com/RandyDpoe45/supercool-finances/pull/34 (clean-pass
+  pipeline; the store-hygiene Medium resolved in-PR). It's awaiting your
+  review/merge.
+
+  Here's my read of the plan, to confirm:
+
+  1. You merge O2 (and, I assume, the client-app chain F1–F4) to main.
+  2. I rebase the …-web worktree onto latest main (which now has transport + all
+     app code).
+  3. I update the URI definitions so the apps target the real transport path
+     instead of /api. Per the transport work (ADR-17 service-namespaced routing)
+     that's /balance/api for the public plane — but I'll read the actual 
+     nginx/Kong config on main to get the exact prefix/rewrite rather than
+     trusting my notes. Since everything is env-driven (VITE_API_BASE_URL), the
+     app-side change is small; I'll move the MSW stub paths to match so
+     component tests stay green. I'd do this as its own PR (URI alignment), then
+     e2e as the next.
+  4. Build the end-to-end tests — the real chain: PKCE login → public nginx →
+     Kong (JWT→X-User-Id) → balance-service → response, and the cross-app flow
+     (client-app initiates an external transfer → otp-app reveals the code →
+     client-app confirms).
+
+  Clear on 1–3. A few real questions on the e2e (step 4), since they change what
+  I build:
+
+● User answered Claude's questions:
+  ⎿  · The end-to-end tests need the full stack up AND data to act on: seeded 
+     customers/accounts/payees plus Keycloak users to actually log in as (PKCE).
+     My notes say seed data + demo users are spec-08 territory and may not 
+     exist yet. What's the state, and how far should I take "green"? → Not ready
+     — write, leave pending
+     · The end-to-end flow spans BOTH SPAs (client-app initiates, otp-app 
+     reveals the code, client-app confirms) plus the real backend — so it can't 
+     live inside either atomic app. What harness should I use and where? → 2, 
+     anyway both spa targuet different api surface, so this hsould be the 
+     structure
+     · Before I do the URI update + e2e, I need all the app code on main. What 
+     will be merged, and how do I start? → f1 to o2 merged, so you are clear to 
+     start the update now 
+
+● Answers noted:
+  - E2E: per-app Playwright specs (in each app's tests/), written now but left 
+    pending on spec-08 seed + Keycloak users — documented, not run green yet.
+  - Go now: F1→O2 are all merged; I'm clear to start the URI alignment
+    immediately.
+
+  Starting with the rebase onto latest main and grounding the exact transport
+  prefix from the real config (not my notes). Let me get the worktree onto a
+  fresh branch off main and inspect what's there.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● O2 is merged (bc3cdd7), both apps are on main, and the public transport lives
+  in infra/nginx-public + infra/kong-public. Let me read the actual public
+  config to get the exact API prefix and rewrite, and scope how the apps
+  currently reference /api.
+
+  Searched for 2 patterns, ran 1 shell command (ctrl+o to expand)
+
+● Grep defaulted to the main repo dir — I need absolute worktree paths. Reading
+  the transport configs and scoping the /api usage in both apps.
+
+  Searched for 1 pattern, read 2 files (ctrl+o to expand)
+
+● Now I have the exact contract. The public external path is /balance/api/*:
+  nginx proxies /balance/api/ → Kong, which matches route /balance/api with
+  strip_path: true, then prepends the service's own /api — so
+  /balance/api/accounts → upstream /api/accounts. CORS allows only
+  http://localhost:8080 (our dev origin). So the one app-side change is the base
+  path /api → /balance/api.
+
+  Let me confirm the endpoint/handler style in both apps so the change is scoped
+  precisely (are RTK Query endpoints relative to the base, and do MSW handlers
+  hardcode /api/...?).
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Fully scoped. The change is clean because RTK Query endpoints are already
+  relative to the base ('accounts', `transfers/${id}/confirm`, etc.), so only
+  the base default flips. The literal /api/... paths that must move to
+  /balance/api/... live in the MSW handlers (client: 10, otp: 2) and the test 
+  files (hardcoded URLs + the VITE_API_BASE_URL stubs). One nuance: the
+  balance-service's own surface stays /api (Kong strips /balance), so docs must
+  distinguish the SPA's outbound /balance/api from the service's upstream /api —
+  not a blind replace.
+
+  Dispatching the implementor (app + MSW + docs, both apps); the test-writer
+  updates the test paths next.
+
+● implementor(Align frontends API base to /balance/api)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Clear — no more questions; your answers cover it. I've verified the exact
+  transport contract from the real config and started the alignment.
+
+  In flight: the implementor is switching both SPAs' API base from /api →
+  /balance/api (baseApi default, .env.example, the MSW handler literals, and
+  docs — keeping the distinction that the balance-service's own surface stays
+  /api since Kong strips /balance). RTK Query endpoints are already relative, so
+  they're untouched.
+
+  Then:
+  1. Test-writer updates the hardcoded /api/... paths + VITE_API_BASE_URL stubs
+     in both apps' test suites to /balance/api (assertions unchanged).
+  2. Gate both apps → self-review → PR: frontends API base alignment (off latest
+     main).
+  3. Per-app Playwright e2e (client-app + otp-app tests/), written against the
+     real chain but left pending (documented) until spec-08 seed + Keycloak
+     users exist — as you chose. The full external-transfer-with-OTP journey
+     inherently spans both apps (every confirm needs a code the otp-app
+     reveals), so I'll surface how the client-app spec obtains that code when I
+     get there.
+
+  I'll report when the alignment PR is up.
+
+✻ Baked for 6m 26s · done 7:32 PM
+
+● Agent "Align frontends API base to /balance/api" finished · 15m 4s
+
+● The alignment landed cleanly (8 files; RTK Query relative paths untouched),
+  and the test failures are exactly as expected — all /api/... → no-match, zero
+  logic regressions. Two things now: the test-writer updates the test paths
+  (independent, needed regardless), and one genuine snag the implementor
+  surfaced that I want your call on.
+
+  The snag: the client app's local lint/format gate is red purely on line 
+  endings. .gitattributes pins *.ts/*.json to eol=lf but not *.tsx/*.css/*.md,
+  so on this Windows worktree those check out as CRLF and Prettier (endOfLine: 
+  lf) flags 2977 Delete ␍. The committed blobs are LF (CI/Linux would be green),
+  and earlier PRs only dodged it because their files were freshly written as LF
+  rather than checked out. It's pre-existing and orthogonal to the URI change —
+  but it blocks a clean local gate, and the fix touches shared repo-root
+  config, so it's your call.
+
+  Launching the test-writer now and asking you in parallel:
+
+● test-writer(Update test API paths to /balance/api)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● User answered Claude's questions:
+  ⎿  · The client app's local lint/format gate is red purely on CRLF line 
+     endings (`.gitattributes` pins `*.ts`/`*.json` to eol=lf but not 
+     `*.tsx`/`*.css`/`*.md`, so they check out as CRLF on Windows). Committed 
+     blobs are LF, so CI/Linux is green. How should I handle it for this PR? → 
+     Fix .gitattributes now (recommended)
+
+● Got it — I'll fix .gitattributes repo-wide as part of this PR. Let me read the
+  current one now (while the test-writer runs) so I match its existing style
+  and see exactly what's pinned.
+
+  Read 1 file (ctrl+o to expand)
+
+● The existing .gitattributes already pins *.ts/*.json to eol=lf specifically 
+  because the prettier gate (endOfLine=lf) must pass on Windows — the frontend
+  just introduced new prettier-linted extensions (.tsx, .css, .md, .html) that
+  didn't exist when this was written (backend is .ts-only). So extending it is
+  squarely consistent with the file's own stated intent. Making that edit now
+  (it's independent of the test-writer's work in tests/):
+
+● Update(C:/Users/rd-crow-shadow/Documents/personal-projects/supercool-finances-
+        web/.gitattributes)
+  ⎿  Added 10 lines
+      24  *.mjs   text eol=lf
+      25  *.cjs   text eol=lf
+      26  *.json  text eol=lf
+      27 +                                                               
+      28 +# Frontend source/docs (SPAs, spec 07). Same rationale as *.ts 
+         +above: these are                                               
+      29 +# all covered by the prettier gate (endOfLine=lf), so a native 
+         +CRLF checkout on                                               
+      30 +# Windows would fail lint/format:check. The backend is *.ts-onl
+         +y, so these                                                    
+      31 +# extensions were absent when the rules above were written — pi
+         +n them too.                                                    
+      32 +*.tsx   text eol=lf                                            
+      33 +*.jsx   text eol=lf                                            
+      34 +*.css   text eol=lf                                            
+      35 +*.html  text eol=lf                                            
+      36 +*.md    text eol=lf                                            
+
+● .gitattributes updated (pinning *.tsx/*.jsx/*.css/*.html/*.md to eol=lf,
+  mirroring the existing *.ts rule and its rationale). The test-writer is
+  updating the test paths in parallel. Once it's done I'll LF-normalize the
+  working tree (npm run format), run the full gate on both apps, self-review,
+  and open the alignment PR. Back shortly.
+
+✻ Cogitated for 5m 10s · done 7:54 PM
+
+● Agent "Update test API paths to /balance/api" finished · 7m 48s
+
+● Test-writer done — client 220 passed, otp 56 passed, typecheck clean in both
+  (otp fully green including lint/format). Only the client CRLF remains. Now
+  LF-normalizing the client working tree and confirming the diff scope stays
+  clean.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● A lot of client files show as modified — I need to confirm that's purely
+  line-ending normalization (the expected one-time renormalization), not
+  content. Diagnosing before committing anything.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Confirmed clean: with --ignore-cr-at-eol, only 27 files have real content
+  changes — exactly my intended set (both apps' baseApi, handlers, .env.example,
+  docs, the test path updates, and .gitattributes). The Money.tsx sample diff
+  is empty under that flag → the other ~33 client files are pure CRLF→LF (the
+  previously-CRLF-committed blobs being normalized — the actual hygiene bug, now
+  fixed). otp had no line-ending churn (it was already LF).
+
+  Running the full gate on both apps now that the working tree is normalized.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Both apps fully green — typecheck, lint, format:check clean, tests (220 + 56),
+  build. CRLF resolved. Running the self-review on the alignment changeset (it
+  should separate the content change from the line-ending renorm and verify
+  completeness against the real transport config).
+● self-reviewer(Self-review URI alignment + gitattributes)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Both apps are fully green (typecheck · lint · format:check · test · build),
+  and the CRLF hygiene bug is fixed. Self-review is running on the alignment
+  changeset — verifying the /balance/api change is complete against the real
+  nginx/Kong config, docs correctly distinguish the SPA's outbound path from the
+  service's upstream /api, tests changed paths only, and the line-ending renorm
+  is content-neutral.
+
+  On a clean pass I'll commit (splitting the line-ending renorm from the content
+  change for a reviewable diff) and open the alignment PR. Then the per-app
+  Playwright e2e (written, left pending on spec-08 seed/users). Back with the
+  verdict.
+
+✻ Sautéed for 3m 29s · done 8:01 PM
+
+● Agent "Self-review URI alignment + gitattributes" finished · 3m 56s
+
+● Self-review: clean pass — PR-ready, no High/Medium. Verified the path change
+  is complete and correct against the real nginx/Kong config, docs draw the
+  outbound-vs-service-surface distinction correctly, tests are path-only, and
+  the renorm is content-neutral and scoped to web/.
+
+  One Low note worth fixing (it's the same stale-comment-drift class I've been
+  careful about): a handful of untouched source comments still say /api for the
+  SPA's outbound path while their docs twins now say /balance/api. The reviewer
+  pinned the exact 6 lines and — importantly — which /api references to leave
+  alone (the ones naming the service's own surface in contracts/, error.ts,
+  money.ts). Fixing those now so source and docs agree.
+
+● implementor(Align outbound-path source comments)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Fixing the 6 outbound-path comments so source and docs agree. Once green, I'll
+  commit (splitting the line-ending renorm from the content change for a clean,
+  reviewable diff) and open the alignment PR — then move to the per-app
+  Playwright e2e (written, pending on spec-08 seed/users). Back shortly.
+
+✻ Baked for 44s · done 8:05 PM
+
+● Agent "Align outbound-path source comments" finished · 1m 6s
+
+● All findings resolved, both apps green. Committing as two commits for a
+  reviewable diff — the line-ending renormalization separated from the content
+  change.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Commit A took only .gitattributes (1 file), commit B took 32 — but earlier
+  there were ~60 modified. That means the ~27 pure line-ending files dropped out
+  of "modified" once .gitattributes eol=lf landed. I need to verify the
+  committed blobs are actually LF (the whole point of the fix) and nothing's
+  dangling before I push.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now it's clear and clean: the committed blobs were always LF — the CRLF was
+  only a transient Windows-checkout artifact, which npm run format reverted. So
+  git add --renormalize stages nothing, the working tree is clean, and there's
+  no noisy line-ending diff. Result:
+  - Commit A (8c0d41e): .gitattributes only — ensures future Windows checkouts
+    are LF so the gate won't fail for the next person.
+  - Commit B (c8959a9): 32 files — the /balance/api alignment (14 app/docs + 18
+    test files).
+
+  Pushing and opening the PR.
+
+  Pushed to frontends-transport-uri-align, created PR #35 (ctrl+o to expand)
+
+● URI-alignment shipped: PR #35 —
+  https://github.com/RandyDpoe45/supercool-finances/pull/35 (clean two-commit
+  split: .gitattributes hygiene + the /balance/api alignment).
+
+  Now the final piece: the per-app Playwright e2e, written against the real
+  chain but left pending on spec-08 (seed + Keycloak users), as you chose.
+  Setting up a branch stacked on the alignment (so it has the /balance/api
+  paths) and launching the test-writer.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● test-writer(Write pending Playwright e2e for both SPAs)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● The e2e test-writer is running — per-app Playwright suites in each app's
+  tests/e2e/, kept skipped/pending (so they never fail while the stack + seed +
+  Keycloak users don't exist) and kept out of the Vitest run. The client suite
+  encodes the headline DoD (external transfer with the OTP code read from the
+  otp-app, driven via a second browser context); the otp suite covers login →
+  pending feed → reveal + the 409 singleton. Real-Keycloak PKCE login helper is
+  parameterized on spec-08-seeded creds.
+
+  Once it's done I'll gate both apps (Vitest still green, Playwright specs
+  parse/list without running), self-review, and open the final e2e PR. Back with
+  the result.
+
+✻ Crunched for 5m 18s · done 8:12 PM
+
+● Agent "Write pending Playwright e2e for both SPAs" finished · 19m 2s
+
+● E2e test-writer done — both apps clean (typecheck/lint/format), Vitest still
+  green (220 + 56, e2e not picked up), and playwright test --list enumerates the
+  pending specs (client 4/3 files, otp 3/2 files) with no browser launch.
+  Pending via test.describe.fixme gated on E2E_ENABLED. Running the gate myself
+  to confirm before self-review.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Gate green — both apps: typecheck/lint/format clean, Vitest 220 + 56, build
+  clean, and the pending e2e specs list correctly (client 4/3 files, otp 3/2
+  files) without executing. Launching the self-review on the e2e changeset.
+
+● self-reviewer(Self-review pending e2e suites)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Self-review running on the e2e suites — checking pending-safety (can't run or
+  download browsers by default; Vitest/Playwright cleanly separated), no
+  committed secrets, DoD fidelity against the real /balance/api chain, and that
+  the specs would actually catch defects when enabled (float-free money-movement
+  asserts, real cross-app OTP retrieval, the 409 singleton). On a clean pass
+  I'll open the final e2e PR and give you the full wrap-up. Back with the
+  verdict.
+
+✻ Sautéed for 1m 13s · done 8:32 PM
+
+● Agent "Self-review pending e2e suites" finished · 6m 55s
+
+● E2e self-review: clean pass — PR-ready, no High/Medium. Verified
+  pending-safety (can't run or download browsers by default), clean
+  Vitest/Playwright separation, real-DOM selector fidelity, float-free
+  money-movement asserts, genuine cross-app OTP retrieval, and the 409 singleton
+  asserting no plaintext.
+
+  One Low advisory worth acting on given this repo's strict "never commit
+  secrets" posture: the login fixture ships default placeholder creds
+  (demo-customer / demo-customer-pw). They authenticate nothing today, but I'd
+  rather not leave a password literal that could later be mistaken for — or
+  seeded as — a real credential. Applying the reviewer's fix: no committed
+  password default; require E2E_PASSWORD at run-time when enabled (kept lazy so
+  --list and the pending state stay intact).
+
+● test-writer(Remove placeholder e2e password default)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Applying the credential-hygiene fix (lazy-required E2E_PASSWORD, no committed
+  default, --list/pending state preserved). Once green I'll commit and open the
+  final e2e PR, then give you the full wrap-up. Back shortly.
+
+✻ Cogitated for 50s · done 8:40 PM
+
+● Agent "Remove placeholder e2e password default" finished · 4m 22s
+
+● All e2e findings resolved — both apps green (Vitest 220 + 56,
+  typecheck/lint/format clean, --list parses without throw), credential literals
+  gone. Committing and opening the final PR (stacked on the URI-alignment,
+  since the e2e targets /balance/api).
+
+  Pushed to frontends-e2e-pending (ctrl+o to expand)
+● Committed (84c23b2) and pushed — all 12 changed paths under web/ (e2e dirs,
+  per-app playwright.config.ts, package.json/lockfiles, .gitignore, docs).
+  Opening the final PR (stacked on the URI-alignment).
+
+  Created PR #37 (ctrl+o to expand)
+
+● E2e shipped: PR #37 —
+  https://github.com/RandyDpoe45/supercool-finances/pull/37. That completes
+  everything you asked for. Let me update the roadmap memory to reflect the
+  final state (it's stale), then give you the wrap-up.
+
+  Recalled 1 memory, wrote 1 memory (ctrl+o to expand)
+
+● Now the index pointer.
+
+  Recalled 1 memory, wrote 1 memory (ctrl+o to expand)
+
+● Done — everything you asked for is complete. Here's the wrap-up.
+
+  This request: transport integration + e2e
+
+  PR: #35 (https://github.com/RandyDpoe45/supercool-finances/pull/35)
+  What: URI alignment — both SPAs /api → /balance/api (ADR-17), + .gitattributes
+
+  CRLF fix
+  State: clean pass
+  ────────────────────────────────────────
+  PR: #37 (https://github.com/RandyDpoe45/supercool-finances/pull/37)
+  What: Pending Playwright e2e — per-app, real chain, fixme-gated
+  State: clean pass
+
+  What I did:
+  1. Rebased the …-web worktree onto latest main (which now has transport + all
+     six merged frontend PRs).
+  2. Aligned the URIs to the real transport path — verified against
+     infra/nginx-public/nginx.conf + infra/kong-public/kong.yml that the public
+     path is /balance/api (Kong strip_path → service still serves /api).
+     Env-driven base, so it was a small change; MSW + tests moved with it. Along
+     the way I hit a genuine snag — the client's lint/format gate was red
+     purely on CRLF because .gitattributes pinned *.ts but not *.tsx/*.css/*.md
+     — and (per your call) fixed it repo-wide so it won't bite the next Windows
+     checkout.
+  3. Wrote the e2e — per-app Playwright in each app's tests/e2e/, encoding the
+     real-chain DoD (PKCE→nginx→Kong→service; the external-transfer-with-OTP
+     journey reads the code from the real otp-app in a second browser context;
+     otp reveal + 409 singleton). Left pending via
+     test.describe.fixme/E2E_ENABLED, so a bare run skips everything and
+     downloads no browser; Vitest (220 + 56) never touches them.
+
+  To turn the e2e on (spec-08 work, no code edit)
+
+  docker compose up (public plane :8080) + seed data (funded account, an
+  internal destination, a usable payee, a pending) + a Keycloak customer login
+  user + npx playwright install chromium, then E2E_ENABLED=1 E2E_USERNAME=… 
+  E2E_PASSWORD=… npm run test:e2e. (Login helper uses stock Keycloak-theme
+  selectors — the one spot to adjust if a custom theme ships.)
+
+  Merge order
+
+  The frontend feature chain (#26→#27→#29→#31, #32→#34) is already merged. The
+  two new ones are stacked: merge #35 first, then #37 (GitHub will retarget #37
+  to main once #35 lands).
+
+  Still open (by design / out of scope)
+
+  - The e2e stays pending until the spec-08 seed + Keycloak users exist.
+  - Admin-app was never in scope — its DoD (analytics dashboard + maker-checker
+    reversal UI on internal-nginx :8081) is a separate later workstream.
+
+  Memory's updated to reflect all of it. Both customer apps are now built,
+  tested, transport-aligned, and have their end-to-end suites staged for the
+  moment the full stack can run.
+
+✻ Brewed for 1h 30m 0s · done 8:46 PM
+
+※ recap: Goal: build the spec-07 customer web apps. Both client and otp SPAs are built, merged, and aligned to the transport's /balance/api path, with pending e2e staged. Next: merge PR #35 then #37. (disable recaps in /config)

@@ -1,0 +1,3412 @@
+ ▐▛███▛█   Claude Code v2.1.266
+▝▜██████▀  Opus 4.8 · Claude Max
+  ▝▝ ▝▝    ~\Documents\personal-projects\supercool-finances
+
+
+❯ context: the current state of the project is that we already have scafolded   
+  scpecs from 0 to 3 so we are ready to start with the balance service scpec    
+  @specs\ , for this please lets start by the entity design, for this lets      
+  first draft the entity diagram for the postgres db, when we have this         
+  finished we will move ahead with the collection definitions for the analytics 
+  service. clear?                                                               
+  ⎿  Listed directory specs\
+
+● I'll start by reading the relevant specs to ground the entity design in the
+  source of truth. Let me pull the balance service spec plus the storage and
+  analytics specs for context.
+
+  Read 3 files (ctrl+o to expand)
+
+● Now let me read the storage spec, the backend foundation spec, and the key
+  ADRs so the entity design lands on the actual data-layer decisions already
+  made.
+
+  Read 3 files (ctrl+o to expand)
+
+● I have the specs and ADRs. Let me check the existing balance-service scaffold
+  to see what's already there (entities, config, migrations) and confirm the
+  event contract shape from ARCHITECTURE.md.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Let me look at the existing entity/migration conventions and the event
+  contract in ARCHITECTURE.md so the design matches what's already established.
+
+  Read 1 file (ctrl+o to expand)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ also the collection and entity diagrams lets define them inside a new         
+  document in the spec folder, clear?                                           
+
+● Let me read the migration example and the ARCHITECTURE.md event contract
+  section to nail the conventions and event shape before drafting.
+
+  Read 3 files (ctrl+o to expand)
+
+● I have everything I need — spec 04, spec 05, the storage spec, all 16 ADRs,
+  the event pipeline, and the existing entity/migration conventions in the
+  scaffold. The macro is fully locked (spec 04 has no open questions), so I can
+  derive the entity model directly from it.
+
+  Per your sequencing, I'll create the new document in specs/ now with the 
+  Postgres entity design (balance service) complete, and hold the Mongo
+  collections as a clearly-marked next section until you've signed off on the
+  entities. Here's the document:
+
+● Write(specs\DATA-MODEL.md)
+  ⎿  Wrote 287 lines to specs\DATA-MODEL.md
+      1 # Data Model — Balance Service (Postgres) & Analytics Server (Mon
+      2 
+      3 Companion design doc for [`04-balance-service.md`](./04-balance-s
+      4 [`05-analytics-server.md`](./05-analytics-server.md). It fixes th
+        e **entity shapes**
+        mns, indexes,
+      6 invariants) falls out of the macro already locked in the specs an
+      7 [`../docs/DECISIONS.md`](../docs/DECISIONS.md).
+      8 
+        s/DECISIONS.md#adr-11--service-boundaries--data-ownership)):
+     … +362 lines (ctrl+o to expand)
+
+● Done. Created specs/DATA-MODEL.md with the complete Postgres entity design.
+  Here's what's in it and what I need from you before we move on.
+
+  What's in Part 1 (Postgres entities)
+
+  A mermaid ER diagram plus, for each entity, a field table, the enumerations,
+  and the money-safety invariants/indexes that make each table do its job. The
+  11 entities from spec 04 §"Data model":
+
+  account · ledger_entry · transaction · hold · external_payee · limit ·
+  outbox_event · audit_log · approval_request · idempotency_key — with OTP codes
+  correctly absent (they live in Redis).
+
+  Every choice is anchored to a locked decision — e.g. materialized balance/held
+  as projections (ADR-13 (docs/DECISIONS.md)/14 (docs/DECISIONS.md)), bigint
+  minor units (ADR-4 (docs/DECISIONS.md)), the partial index the relay polls
+  with SKIP LOCKED (ADR-5 (docs/DECISIONS.md)), maker-checker on
+  approval_request (ADR-8 (docs/DECISIONS.md)).
+
+  Three design calls worth surfacing (your word is final)
+
+  Two are boundary decisions I made deliberately — please confirm:
+
+  1. No Customer table. Customers live in Keycloak; the balance DB references
+     them only by opaque owner_id (the Keycloak sub), with no FK crossing the
+     service boundary. This is the ADR-11 ownership rule, but it's the single
+     most consequential shape decision so I'm calling it out.
+  2. transaction carries denormalized debit_account_id/credit_account_id header 
+     FKs for authz/query speed, while ledger_entry stays the source of truth.
+     It's convenience denormalization — fine as long as we agree the ledger, not
+     the header, is authoritative.
+
+  And four smaller open choices (currency columns despite single-currency,
+  bigint-identity ledger PK, explicit velocity window on limit, the header FKs
+  above) are listed at the end of Part 1 with my recommendation on each — all
+  lean "keep."
+
+  Part 2 (Mongo collections) — intentionally stubbed
+
+  Left as a marked ⏳ placeholder, per your sequencing ("when we have this
+  finished we will move ahead").
+
+  Want to review/adjust the Postgres entities first — or should I go ahead and
+  fill in the analytics collections now? And on the calls above: any objection,
+  or is it a green light to lock them?
+
+✻ Worked for 3m 8s · done 7:47 PM
+
+※ recap: Goal: design the balance service data model. I drafted the Postgres entities in specs/DATA-MODEL.md with an ER diagram and flagged a few choices for your sign-off. Next: you review the entities, then I add the Mongo analytics collections. (disable recaps in /config)
+
+❯ in the map you did explain to me better what is the role of the approbal      
+  request and when would it happen? 2) hwo exactly is the idenpotency key       
+  calcualated? does it really make sense to add all those values? also part of  
+  the idenpotency key must be supplied by the client, how do we reconcile it?   
+  3) i understand the lefger entry as the first layer of relation between the   
+  account and the transaction, meaning each account has its own ledger to query 
+  transactions, i like the approach and also makes sense for the hold to work,  
+  but i am wondering if the hold should also be related to the external         
+  account to which we are sending money. 4) the external_payee is the external  
+  account to which the user is sending money? 5) the audit log is going to be   
+  written as a reducer result for each transaction? or what?                    
+
+● Good questions — these are exactly the joints where the entity model has to be
+  pinned down. Answers, grounded in the specs/ADRs, one by one.
+
+  1) approval_request — what it's for and when it fires
+
+  It's the persistence of maker-checker (four-eyes) for admin money operations
+  (ADR-8 (docs/DECISIONS.md)). It exists only on the /admin plane, and only for
+  privileged actions that can move or reshape money across customers — never on
+  the normal customer transfer path.
+
+  It fires when an admin initiates one of the approval_action operations:
+  - reversal — undo a posted transaction (compensating entries).
+  - limit_change — change a customer's or global limits.
+  - adjustment — a manual balance correction.
+
+  Lifecycle:
+
+  Admin A submits reversal of tx X  → approval_request{ status: PENDING,
+  maker_id: A, checker_id: NULL, payload: {…} }
+  Admin B (≠ A) approves            → status: APPROVED, checker_id: B,
+  decided_at
+  Service executes the approved op  → status: EXECUTED, executed_at  +  writes
+  the real ledger/reversal  +  writes audit_log
+  Admin B rejects instead           → status: REJECTED, decided_at (nothing
+  moves)
+
+  The point is that no single admin can unilaterally move money — the row
+  records the proposer, the approver, the proposed payload, and enforces
+  checker_id <> maker_id. Only an APPROVED row can transition to EXECUTED. The
+  actual money movement (the reversal's compensating ledger entries) happens at 
+  execution, not at submission.
+
+  2) idempotency_key — the client half vs. the server half
+
+  You've spotted the real subtlety: there are two different things in that row,
+  and only one is client-supplied.
+
+  - key — client-supplied. The client generates a unique token (a UUID) per
+    logical operation and sends it in the Idempotency-Key header. On a retry
+    (timeout, dropped response) it sends the same key. We never compute this;
+    it's opaque to us. It answers: "is this the same logical attempt?"
+  - request_fingerprint — server-computed. A guard against the client reusing a 
+    key for a different request. It answers: "…and is it really the same 
+    request, or did you accidentally reuse the key?"
+
+  How they reconcile on each request:
+
+  ┌──────────────────────────┬──────────────────────────────────────────────┐
+  │        Situation         │                  What we do                  │
+  ├──────────────────────────┼──────────────────────────────────────────────┤
+  │ Key not seen (for this   │ Insert in_progress, process, store           │
+  │ owner_id)                │ response_body, mark completed.               │
+  ├──────────────────────────┼──────────────────────────────────────────────┤
+  │ Key seen, completed,     │ Replay the stored response — money moved     │
+  │ fingerprint matches      │ once.                                        │
+  ├──────────────────────────┼──────────────────────────────────────────────┤
+  │ Key seen, in_progress    │ A concurrent retry is mid-flight → return    │
+  │                          │ "in progress", don't double-process.         │
+  ├──────────────────────────┼──────────────────────────────────────────────┤
+  │ Key seen, fingerprint    │ 409 Conflict — key reused with different     │
+  │ differs                  │ parameters (Stripe-style).                   │
+  └──────────────────────────┴──────────────────────────────────────────────┘
+
+  Now your sharper question — "does it make sense to hash all those values 
+  (method+path+body)?" No, and you're right to push. Hashing the raw body is
+  brittle (whitespace, field ordering, extra fields all change the hash and
+  cause false 409s). The fingerprint should be a hash of the canonical business 
+  tuple only:
+
+  fingerprint = hash( type, source_account_id, destination (payee_id |
+  dest_account_id), amount, currency )
+
+  Method+path are already implied by the endpoint. That's the refinement I'd
+  make to the doc: request_fingerprint = hash of the semantic transfer 
+  parameters, not the raw HTTP body. And the unique index stays (owner_id, key)
+  so keys are namespaced per caller (two customers can independently pick the
+  same UUID; one user can't probe another's key).
+
+  3) Should the hold relate to the external account too?
+
+  Your mental model is right — ledger_entry is the per-account view of a
+  transaction (each account effectively has its own ledger), and hold is the
+  reservation analog. But here's the key timing fact that answers your question:
+
+  At PLACED, no money has moved yet. A hold reserves funds on one account — the
+  customer's — bumping account.held so available drops. Nothing touches the
+  destination or the clearing account until SETTLED, and that's the moment the
+  double-entry ledger posts (debit customer, credit clearing:rail-outbound). So
+  the hold is fundamentally a single-account reservation; a hold doesn't have a
+  "both sides" the way a ledger transaction does.
+
+  The destination is reachable, just not by a direct FK on the hold:
+  - hold.transaction_id → transaction.payee_id → external_payee = who the money
+    is going to.
+  - hold.rail + hold.external_ref = the handle that reconciles the hold against
+    that rail's settlement feed (ADR-14 (docs/DECISIONS.md)).
+
+  So the linkage you want exists, via the transaction. I'd not add a direct
+  hold.payee_id — it would be denormalization derivable through the transaction.
+  The only reason to add one is if we needed fast "all holds against payee X"
+  queries, which no spec-04 requirement calls for. My recommendation: leave the
+  hold single-account, keep rail/external_ref for reconciliation.
+
+  4) Is external_payee the external account the user sends to?
+
+  Yes — it's the enrolled external beneficiary/destination (with the cooling-off
+  gate before it can receive money, spec 04). destination_ref is the masked
+  identifier of that external account.
+
+  One important distinction, though: the payee is not an account row in our 
+  ledger. External money's counter-leg in the double-entry is the clearing 
+  account (clearing:rail-outbound), not the payee (ADR-15 (docs/DECISIONS.md)).
+  The payee is metadata about the beneficiary (name, rail, masked ref,
+  cooling-off status) used for authorization and display; the clearing account
+  is what keeps double-entry balanced across the boundary. So: payee = who,
+  clearing account = the accounting counter-leg.
+
+  5) Is audit_log a per-transaction reducer result?
+
+  No — and this is worth separating cleanly, because the word "reducer" is doing
+  two different jobs:
+
+  - The reducer is the posting operation on the ledger: balance_after = 
+    balance_before + delta. That's how balance/held stay synced with the ledger
+    (ADR-13 (docs/DECISIONS.md)). It has nothing to do with the audit log.
+  - audit_log is not written per customer transaction. Ordinary transfers are
+    already fully recorded by transaction + ledger_entry + outbox_event — that
+    chain is the money audit trail.
+
+  audit_log records privileged /admin-plane actions — the "who did what, when"
+  for elevated operations: account freeze/unfreeze, limit changes, reversal
+  approvals and executions, triggering a simulated inbound. It's
+  append-only/immutable (ADR-8 (docs/DECISIONS.md)), one row per admin action.
+  So it's admin-scoped governance, not a per-transaction fold.
+
+  ---
+
+  Net change to the doc from this discussion: refine request_fingerprint (point
+  2) to hash the canonical business tuple, not the raw body. Everything else
+  confirms the current model as drafted.
+
+  Want me to fold that fingerprint refinement into specs/DATA-MODEL.md now — and
+  are 1, 3, 4, 5 settled to your satisfaction so we can lock Part 1 and move to
+  the Mongo collections?
+
+✻ Worked for 1m 16s · done 8:11 PM
+
+❯ fold in the fingerprint refinement and move to Mongo collections              
+
+● Folding in the fingerprint refinement, and reading spec 07 (frontends) since
+  the analytics read model is shaped by the admin screens.
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 2 lines, removed 2 lines
+      170      }
+      171  
+      172      IDEMPOTENCY_KEY {
+      173 -        varchar key PK "Idempotency-Key header value"         
+      173 +        varchar key PK "Idempotency-Key header value (client-s
+          +upplied)"                                                     
+      174          varchar owner_id "scopes the key to the caller"
+      175 -        varchar request_fingerprint "hash(method+path+body)"  
+      175 +        varchar request_fingerprint "hash of canonical busines
+          +s tuple"                                                      
+      176          uuid transaction_id FK
+      177          enum status "in_progress | completed"
+      178          int response_status
+
+● Now let me refine the idempotency invariant note to specify what the
+  fingerprint actually hashes:
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 9 lines, removed 2 lines
+      255  - Only `APPROVED` may transition to `EXECUTED`; execution writ
+           es an `audit_log` row.
+      256  
+      257  **`idempotency_key`** — replay safety (spec 04).
+      258 -- Unique `uq_idem (owner_id, key)`. Same key + same `request_f
+          -ingerprint` → replay                                          
+      259 -  stored `response_body`; same key + **different** fingerprint
+          - → `409` (key reuse).                                         
+      258 +- `key` is **client-supplied** (the `Idempotency-Key` header);
+          + `request_fingerprint`                                        
+      259 +  is **server-computed** to detect key reuse. The fingerprint 
+          +hashes the **canonical                                        
+      260 +  business tuple** — `hash(type, source_account_id, destinatio
+          +n[payee_id |                                                  
+      261 +  credit_account_id], amount, currency)` — **not** the raw HTT
+          +P body (raw-body                                              
+      262 +  hashing is brittle to whitespace/field-order and yields fals
+          +e conflicts).                                                 
+      263 +- Unique `uq_idem (owner_id, key)` (keys namespaced per caller
+          +). On a hit:                                                  
+      264 +  `completed` + fingerprint **matches** → replay stored `respo
+          +nse_body` (money moved                                        
+      265 +  once); `in_progress` → concurrent retry, return "in progress
+          +", do not re-process;                                         
+      266 +  fingerprint **differs** → `409` (key reused with different p
+          +arameters).                                                   
+      267  
+      268  ### Open modeling choices (want your call before we lock migra
+           tions)
+      269  
+
+● Fingerprint refinement is folded in. Now let me read the storage spec's Mongo
+  setup detail once more and check the analytics scaffold's config to ground the
+  collections, then write Part 2.
+
+  Now I'll write Part 2 — the Mongo collections. The critical constraint driving
+  the whole design: analytics owns Mongo and has no access to Postgres
+  (database-per-service, ADR-11), so the event the outbox emits must be fully 
+  self-contained — analytics can never join back to account. That makes the
+  event contract the real thing to pin down first; the collections fall out of
+  it.
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 175 lines, removed 5 lines
+      287  
+      288  ## Part 2 — Mongo collections (analytics read model)
+      289  
+      290 -> ⏳ **Next.** Deferred until the Postgres entity design above
+          - is signed off, per the                                       
+      291 -> agreed sequence. Will cover `transactions` (flattened), `dai
+          -lyAggregates`,                                                
+      292 -> `accountSummaries`, the `event_id` unique index (at-least-on
+          -ce dedup), and how each                                       
+      293 -> collection is shaped by the admin screens (spec 07) — driven
+          - by the **event                                               
+      294 -> contract** the outbox emits, kept in sync via the spec ([ADR
+          --16](../docs/DECISIONS.md#adr-16--self-contained-components-no
+          --shared-code)).                                               
+      290 +### Boundary notes (read first)                               
+      291 +                                                              
+      292 +- **Analytics owns Mongo and cannot touch Postgres** ([ADR-11]
+          +(../docs/DECISIONS.md#adr-11--service-boundaries--data-ownersh
+          +ip)).                                                         
+      293 +  It never joins back to `account`/`ledger_entry` — so **the e
+          +vent must carry                                               
+      294 +  everything analytics needs** (owner ids, amounts, balances, 
+          +timestamps, type).                                            
+      295 +  A thin event that forced a lookup would be a cross-store joi
+          +n, which is forbidden.                                        
+      296 +- **The event contract is duplicated** (producer in balance se
+          +rvice, consumer in                                            
+      297 +  analytics), kept in sync via **this spec as the contract of 
+          +record** ([ADR-16](../docs/DECISIONS.md#adr-16--self-contained
+          +-components-no-shared-code)).                                 
+      298 +  So it is defined here, not in a shared package.             
+      299 +- **`transactions` is the authoritative flattened event log**;
+          + `accountSummaries`                                           
+      300 +  and `dailyAggregates` are **rollups derived from it**. Their
+          + exact fields firm up                                         
+      301 +  with the admin screens (spec 07) — matching spec 05's own op
+          +en question — so the                                          
+      302 +  shapes below are a defensible v1, not a locked surface.     
+      303 +- Money stays **`bigint` minor units + currency**, carried ver
+          +batim from the ledger                                         
+      304 +  (never re-derived, never floated).                          
+      305 +                                                              
+      306 +### The transaction event contract (contract of record)       
+      307 +                                                              
+      308 +One outbox row → one Redis Stream entry → one event. `event_id
+          +` **is**                                                      
+      309 +`outbox_event.id`, and it is the dedup key end-to-end. The eve
+          +nt is self-contained                                          
+      310 +and **double-entry-preserving** (legs sum to zero), so analyti
+          +cs can even re-assert                                         
+      311 +the invariant on the read side.                               
+      312 +                                                              
+      313 +```jsonc                                                      
+      314 +{                                                             
+      315 +  "event_id":       "uuid",              // = outbox_event.id 
+          +— dedup key (unique)                                          
+      316 +  "event_type":     "transaction.posted | transaction.reversed
+          + | transaction.failed",                                       
+      317 +  "schema_version": 1,                    // bump on any contr
+          +act change                                                    
+      318 +  "occurred_at":    "2026-09-08T12:00:00Z",                   
+      319 +  "transaction": {                                            
+      320 +    "id":                      "uuid",                        
+      321 +    "type":                    "internal | external_outbound |
+          + external_inbound",                                           
+      322 +    "status":                  "POSTED | REVERSED | FAILED",  
+      323 +    "amount":                  50000,     // positive magnitud
+          +e, minor units                                                
+      324 +    "currency":                "USD",                         
+      325 +    "initiated_by":            "sub-or-admin",                
+      326 +    "reverses_transaction_id": "uuid | null",                 
+      327 +    "payee":  { "id": "uuid", "display_name": "ACME", "rail": 
+          +"rail-outbound" }, // or null                                 
+      328 +    "created_at":              "2026-09-08T12:00:00Z",        
+      329 +    "posted_at":               "2026-09-08T12:00:01Z"   // or 
+          +null                                                          
+      330 +  },                                                          
+      331 +  "legs": [                               // the ledger entrie
+          +s; SUM(delta) == 0                                            
+      332 +    { "account_id": "uuid", "owner_id": "sub",  "account_kind"
+          +: "customer",                                                 
+      333 +      "system_key": null,                    "delta": -50000, 
+          +"balance_after": 150000, "currency": "USD" },                 
+      334 +    { "account_id": "uuid", "owner_id": null,  "account_kind":
+          + "system",                                                    
+      335 +      "system_key": "clearing:rail-outbound", "delta":  50000,
+          + "balance_after": 900000, "currency": "USD" }                 
+      336 +  ]                                                           
+      337 +}                                                             
+      338 +```                                                           
+      339 +                                                              
+      340 +| Field | Why analytics needs it |                            
+      341 +|---|---|                                                     
+      342 +| `event_id` | Idempotent upsert / stream dedup ([ADR-5](../do
+          +cs/DECISIONS.md#adr-5--transactional-outbox-postgres--redis-st
+          +reams-transport)). |                                          
+      343 +| `event_type` / `transaction.status` | Distinguish posted vs.
+          + reversed vs. failed in the history and rollups. |            
+      344 +| `schema_version` | Consumer can evolve without a shared pack
+          +age (ADR-16). |                                               
+      345 +| `legs[].owner_id` | **Per-customer** aggregation without a P
+          +ostgres join — the whole reason it's on the event. |          
+      346 +| `legs[].account_kind` / `system_key` | Separate customer vol
+          +ume from clearing (in-transit) movement. |                    
+      347 +| `legs[].balance_after` | Lets `accountSummaries` show a bala
+          +nce view without reading Postgres. |                          
+      348 +| `amount` / `currency` | Volume/total aggregates; carried as 
+          +minor units. |                                                
+      349 +                                                              
+      350 +### Consumer idempotency & ordering                           
+      351 +                                                              
+      352 +`XREADGROUP` → **write Mongo** → `XACK` (write-then-ack, so a 
+          +redelivery re-writes                                          
+      353 +rather than loses). Stuck entries recovered with `XPENDING` + 
+          +`XCLAIM`. The unique                                          
+      354 +`event_id` index is the dedup gate that makes at-least-once sa
+          +fe (spec 05 DoD):                                             
+      355 +                                                              
+      356 +1. **Upsert `transactions`** with `_id = event_id`. Same event
+          + → same `_id` → the                                           
+      357 +   upsert is a no-op replay (exactly one document, even redeli
+          +vered).                                                       
+      358 +2. **Refresh the rollups** for the touched accounts/day (see t
+          +he atomicity note).                                           
+      359 +3. **`XACK`.**                                                
+      360 +                                                              
+      361 +### Collections                                               
+      362 +                                                              
+      363 +```mermaid                                                    
+      364 +flowchart LR                                                  
+      365 +    ev["transaction event<br/>(event_id)"] -->|"upsert _id=eve
+          +nt_id"| tx[("transactions<br/>flattened event log")]          
+      366 +    tx -->|"derived rollup"| acc[("accountSummaries<br/>per ac
+          +count")]                                                      
+      367 +    tx -->|"derived rollup"| day[("dailyAggregates<br/>per day
+          + × currency × type")]                                         
+      368 +    acc --> rep["/admin reporting API"]                       
+      369 +    day --> rep                                               
+      370 +    tx --> rep                                                
+      371 +```                                                           
+      372 +                                                              
+      373 +**`transactions`** — flattened, one document **per event** (a 
+          +posting and its later                                         
+      374 +reversal are two documents — a faithful money history).       
+      375 +                                                              
+      376 +```jsonc                                                      
+      377 +{                                                             
+      378 +  "_id":            "<event_id>",         // dedup key = _id →
+          + idempotent upsert                                            
+      379 +  "transactionId":  "uuid",                                   
+      380 +  "eventType":      "transaction.posted",                     
+      381 +  "type":           "external_outbound",                      
+      382 +  "status":         "POSTED",                                 
+      383 +  "amount":         50000,                                    
+      384 +  "currency":       "USD",                                    
+      385 +  "initiatedBy":    "sub",                                    
+      386 +  "reversesTransactionId": null,                              
+      387 +  "payee":          { "id": "uuid", "displayName": "ACME", "ra
+          +il": "rail-outbound" },                                       
+      388 +  "legs":           [ /* as in the event */ ],                
+      389 +  "owners":         ["sub"],              // distinct customer
+          + owner_ids across legs (filter helper)                        
+      390 +  "occurredAt":     ISODate("2026-09-08T12:00:00Z")           
+      391 +}                                                             
+      392 +```                                                           
+      393 +Indexes: **unique `{ _id }`** (event dedup, spec 05) · `{ tran
+          +sactionId: 1 }` ·                                             
+      394 +`{ occurredAt: -1 }` (time series / recent) · `{ owners: 1, oc
+          +curredAt: -1 }`                                               
+      395 +(per-customer history) · `{ type: 1, occurredAt: -1 }`.       
+      396 +                                                              
+      397 +**`accountSummaries`** — per-account rollup (`_id = account_id
+          +`), a read-model view                                         
+      398 +of activity + latest known balance without touching Postgres. 
+      399 +                                                              
+      400 +```jsonc                                                      
+      401 +{                                                             
+      402 +  "_id":          "<account_id>",                             
+      403 +  "ownerId":      "sub",           // null for system/clearing
+          + accounts                                                     
+      404 +  "accountKind":  "customer",                                 
+      405 +  "systemKey":    null,            // e.g. "clearing:rail-outb
+          +ound" for system accounts                                     
+      406 +  "currency":     "USD",                                      
+      407 +  "lastBalanceAfter": 150000,      // from the most recent leg
+          + for this account                                             
+      408 +  "txnCount":     42,                                         
+      409 +  "totalDebited": 1200000,                                    
+      410 +  "totalCredited": 1350000,                                   
+      411 +  "lastActivityAt": ISODate("2026-09-08T12:00:00Z")           
+      412 +}                                                             
+      413 +```                                                           
+      414 +Indexes: `{ ownerId: 1 }` · `{ accountKind: 1 }`.             
+      415 +                                                              
+      416 +**`dailyAggregates`** — per-day × currency × type volume/count
+          + for the dashboard's                                          
+      417 +time series and totals.                                       
+      418 +                                                              
+      419 +```jsonc                                                      
+      420 +{                                                             
+      421 +  "_id":       "2026-09-08|USD|external_outbound",  // determi
+          +nistic composite                                              
+      422 +  "date":      "2026-09-08",                                  
+      423 +  "currency":  "USD",                                         
+      424 +  "type":      "external_outbound",                           
+      425 +  "count":     17,                                            
+      426 +  "totalAmount": 830000,          // minor units              
+      427 +  "updatedAt": ISODate("2026-09-08T12:00:00Z")                
+      428 +}                                                             
+      429 +```                                                           
+      430 +Indexes: `{ date: 1 }` · `{ date: 1, currency: 1, type: 1 }` (
+          +unique).                                                      
+      431 +                                                              
+      432 +### Atomicity of the rollups — open decision (needs your call)
+      433 +                                                              
+      434 +`transactions` is trivially idempotent (upsert on `_id = event
+          +_id`). The **rollups**                                        
+      435 +are the subtle part: a redelivered event must **not** double-c
+          +ount them, and a                                              
+      436 +single-node Mongo cannot span the `transactions` write + rollu
+          +p updates in one                                              
+      437 +transaction unless it's run as a **single-node replica set**. 
+          +Two ways to satisfy                                           
+      438 +"exactly-once effect," pick one:                              
+      439 +                                                              
+      440 +1. **Query-time aggregation (recommended for the demo).** Don'
+          +t maintain                                                    
+      441 +   `dailyAggregates`/`accountSummaries` incrementally — comput
+          +e them on demand with                                         
+      442 +   Mongo aggregation pipelines over `transactions` at reportin
+          +g time. **Inherently                                          
+      443 +   idempotent** (recomputed from deduped source docs — no doub
+          +le-count possible),                                           
+      444 +   fewer moving parts, and dataset size here is small. The two
+          + rollup collections                                           
+      445 +   become **optional materialized caches** only if a screen ne
+          +eds them.                                                     
+      446 +2. **Materialized rollups + single-node replica set.** Keep th
+          +e incremental                                                 
+      447 +   collections and wrap "upsert `transactions` + apply rollup 
+          +deltas" in one Mongo                                          
+      448 +   multi-document transaction keyed by the new `event_id`. Req
+          +uires configuring                                             
+      449 +   `mongo:7` as a **single-node replica set** (spec 01 current
+          +ly implies standalone).                                       
+      450 +                                                              
+      451 +**Recommendation:** option 1 — it removes the double-count haz
+          +ard entirely and keeps                                        
+      452 +spec 01 unchanged; materialize later only if a dashboard query
+          + proves slow. If you'd                                        
+      453 +rather pre-compute, we take option 2 and I'll flag the replica
+          +-set change back to                                           
+      454 +spec 01.                                                      
+      455 +                                                              
+      456 +### Open questions (carry with spec 07)                       
+      457 +                                                              
+      458 +- **Exact dashboard aggregates/screens** — the precise fields 
+          +on the two rollups                                            
+      459 +  (and whether they're materialized at all) resolve with spec 
+          +07, as spec 05 states.                                        
+      460 +- **Rollup strategy** — the atomicity decision above (query-ti
+          +me vs. materialized +                                         
+      461 +  replica set).                                               
+      462 +- **Customer display names** — per-customer analytics key on `
+          +owner_id` (the                                                
+      463 +  Keycloak `sub`); resolving a `sub` to a human name is a UI c
+          +oncern (spec 07 via                                           
+      464 +  Keycloak), **not** part of the read model.                  
+
+● Both changes are in. specs/DATA-MODEL.md now has the fingerprint refinement
+  and a complete Part 2 — Mongo collections.
+
+  What Part 2 contains
+
+  The design pivot: analytics can't touch Postgres (ADR-11 (docs/DECISIONS.md)),
+  so the event has to carry everything — no join-back. That makes the
+  transaction event contract the linchpin, and I defined it as the contract of 
+  record here (it's duplicated producer/consumer per ADR-16 (docs/DECISIONS.md),
+  so this spec is where it lives):
+
+  - Event contract — self-contained and double-entry-preserving (legs sum to
+    zero). Crucially each leg carries owner_id + account_kind/system_key +
+    balance_after, which is what lets analytics do per-customer and
+    customer-vs-clearing aggregation without a Postgres read. Field-by-field
+    justification table included.
+  - Consumer idempotency — write-then-XACK, event_id as the dedup gate,
+    XPENDING/XCLAIM for stuck entries (spec 05 DoD).
+  - Three collections with concrete JSON shapes + indexes:
+    - transactions — flattened, one doc per event (_id = event_id → idempotent
+      upsert; a posting and its later reversal are two docs = faithful history).
+    - accountSummaries — per-account rollup with lastBalanceAfter (a balance
+      view with no Postgres read).
+    - dailyAggregates — per-day × currency × type volumes for the dashboard.
+
+  One decision I need from you
+
+  Rollup atomicity. transactions is trivially idempotent (upsert on _id), but
+  the two rollups mustn't double-count a redelivered event — and a standalone
+  Mongo can't wrap the transactions-write + rollup-updates in one transaction.
+  Two options, laid out in the doc:
+
+  1. Query-time aggregation (my recommendation) — don't maintain the rollups
+     incrementally; compute them from transactions at report time. Inherently
+     idempotent (no double-count possible), small dataset, and spec 01 stays 
+     untouched. Rollup collections become optional caches.
+  2. Materialized rollups — keep incremental collections, but this needs mongo:7
+     run as a single-node replica set to get multi-doc transactions, which is a
+     change back to spec 01.
+
+  I flagged this rather than silently picking, since option 2 pushes a change up
+  to an earlier locked spec.
+
+  Two things deliberately left open (tied to spec 07, not built yet)
+
+  Per spec 05's own open question, the exact rollup fields and whether they're 
+  materialized at all firm up with the admin screens (spec 07). The shapes above
+  are a defensible v1, not a locked surface. Also noted: per-customer analytics
+  key on owner_id (the Keycloak sub); resolving that to a human name is a UI
+  concern, not read-model data.
+
+  Which rollup strategy do you want — query-time (1) or materialized + replica 
+  set (2)? Once that's settled, Part 1 and Part 2 are both lockable and we can
+  move to the first implementation step.
+
+✻ Cooked for 2m 57s · done 8:43 PM
+
+※ recap: We're designing the balance service data model in specs/DATA-MODEL.md; the Postgres entities and Mongo collections are both drafted. Next: you decide the rollup strategy (query-time vs materialized plus replica set) so we can lock both parts. (disable recaps in /config)
+
+❯ yes query time aggregation for everything regarding analytics, the idea is to 
+  have maximum flexibility for the quesries and dashboards, clear?              
+
+● Locked. Query-time aggregation it is — that maximizes dashboard flexibility (a
+  new report is a new pipeline, never a schema migration or a rebuild) and
+  removes the double-count hazard entirely. Let me update Part 2 to reflect the
+  decision: transactions becomes the single stored collection, and the other two
+  become query-time aggregation shapes rather than materialized collections.
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 6 lines, removed 4 lines
+      296  - **The event contract is duplicated** (producer in balance se
+           rvice, consumer in
+      297    analytics), kept in sync via **this spec as the contract of 
+           record** ([ADR-16](../docs/DECISIONS.md#adr-16--self-contained
+           -components-no-shared-code)).
+      298    So it is defined here, not in a shared package.
+      299 -- **`transactions` is the authoritative flattened event log**;
+          - `accountSummaries`                                           
+      300 -  and `dailyAggregates` are **rollups derived from it**. Their
+          - exact fields firm up                                         
+      301 -  with the admin screens (spec 07) — matching spec 05's own op
+          -en question — so the                                          
+      302 -  shapes below are a defensible v1, not a locked surface.     
+      299 +- **`transactions` is the single stored collection** — the aut
+          +horitative flattened                                          
+      300 +  event log. **Every dashboard view is a query-time aggregatio
+          +n pipeline over it**                                          
+      301 +  (decided: max flexibility, no rebuilds, inherently idempoten
+          +t). `accountSummaries`                                        
+      302 +  and `dailyAggregates` below are **pipeline output shapes**, 
+          +not materialized                                              
+      303 +  collections. Their exact fields firm up with the admin scree
+          +ns (spec 07) — matching                                       
+      304 +  spec 05's own open question — so the shapes are a defensible
+          + v1, not a locked surface.                                    
+      305  - Money stays **`bigint` minor units + currency**, carried ver
+           batim from the ledger
+      306    (never re-derived, never floated).
+      307  
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 5 lines, removed 2 lines
+      357  
+      358  1. **Upsert `transactions`** with `_id = event_id`. Same event
+            → same `_id` → the
+      359     upsert is a no-op replay (exactly one document, even redeli
+           vered).
+      360 -2. **Refresh the rollups** for the touched accounts/day (see t
+          -he atomicity note).                                           
+      361 -3. **`XACK`.**                                                
+      360 +2. **`XACK`.**                                                
+      361  
+      362 +The consumer's **only** write is that single upsert — there ar
+          +e no rollup writes to                                         
+      363 +keep consistent — so redelivery is safe by construction, on a 
+          +**standalone** Mongo,                                         
+      364 +with no multi-document transaction needed.                    
+      365 +                                                              
+      366  ### Collections
+      367  
+      368  ```mermaid
+
+● Now the collections section — the diagram and the two rollups reframed as
+  pipeline outputs, plus the decided atomicity section:
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 9 lines, removed 5 lines
+      363  keep consistent — so redelivery is safe by construction, on a 
+           **standalone** Mongo,
+      364  with no multi-document transaction needed.
+      365  
+      366 -### Collections                                               
+      366 +### Collections & views                                       
+      367  
+      368 +The read model is **one stored collection** (`transactions`); 
+          +every dashboard figure                                        
+      369 +is an **aggregation pipeline** run against it at query time.  
+      370 +                                                              
+      371  ```mermaid
+      372  flowchart LR
+      370 -    ev["transaction event<br/>(event_id)"] -->|"upsert _id=eve
+          -nt_id"| tx[("transactions<br/>flattened event log")]          
+      371 -    tx -->|"derived rollup"| acc[("accountSummaries<br/>per ac
+          -count")]                                                      
+      372 -    tx -->|"derived rollup"| day[("dailyAggregates<br/>per day
+          - × currency × type")]                                         
+      373 +    ev["transaction event<br/>(event_id)"] -->|"upsert _id=eve
+          +nt_id"| tx[("transactions<br/>flattened event log · STORED")] 
+      374 +    tx -.->|"$group by owner/account<br/>(query time)"| acc["a
+          +ccountSummaries<br/>pipeline output"]                         
+      375 +    tx -.->|"$group by day × currency × type<br/>(query time)"
+          +| day["dailyAggregates<br/>pipeline output"]                  
+      376 +    tx -.->|"ad-hoc pipelines"| more["future dashboards"]     
+      377      acc --> rep["/admin reporting API"]
+      378      day --> rep
+      379      tx --> rep
+      380  ```
+      381  
+      378 -**`transactions`** — flattened, one document **per event** (a 
+          -posting and its later                                         
+      382 +**`transactions`** (STORED) — flattened, one document **per ev
+          +ent** (a posting and its later                                
+      383  reversal are two documents — a faithful money history).
+      384  
+      385  ```jsonc
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 33 lines, removed 35 lines
+      403  `{ occurredAt: -1 }` (time series / recent) · `{ owners: 1, oc
+           curredAt: -1 }`
+      404  (per-customer history) · `{ type: 1, occurredAt: -1 }`.
+      405  
+      406 -**`accountSummaries`** — per-account rollup (`_id = account_id
+          -`), a read-model view                                         
+      407 -of activity + latest known balance without touching Postgres. 
+      406 +**`accountSummaries`** (VIEW — pipeline output, not stored) — 
+          +per-account activity +                                        
+      407 +latest known balance, produced by `$group` on `legs.account_id
+          +`. Shape returned:                                            
+      408  
+      409  ```jsonc
+      410  {
+      411 -  "_id":          "<account_id>",                             
+      411 +  "accountId":    "<account_id>",                             
+      412    "ownerId":      "sub",           // null for system/clearing
+            accounts
+      413    "accountKind":  "customer",
+      414    "systemKey":    null,            // e.g. "clearing:rail-outb
+           ound" for system accounts
+      415    "currency":     "USD",
+      416 -  "lastBalanceAfter": 150000,      // from the most recent leg
+          - for this account                                             
+      416 +  "lastBalanceAfter": 150000,      // $last balance_after by o
+          +ccurredAt for this account                                    
+      417    "txnCount":     42,
+      418    "totalDebited": 1200000,
+      419    "totalCredited": 1350000,
+      420    "lastActivityAt": ISODate("2026-09-08T12:00:00Z")
+      421  }
+      422  ```
+      423 -Indexes: `{ ownerId: 1 }` · `{ accountKind: 1 }`.             
+      423  
+      425 -**`dailyAggregates`** — per-day × currency × type volume/count
+          - for the dashboard's                                          
+      426 -time series and totals.                                       
+      424 +**`dailyAggregates`** (VIEW — pipeline output, not stored) — p
+          +er-day × currency ×                                           
+      425 +type volume/count for time series and totals, produced by `$gr
+          +oup` on the date +                                            
+      426 +currency + type. Shape returned:                              
+      427  
+      428  ```jsonc
+      429  {
+      430 -  "_id":       "2026-09-08|USD|external_outbound",  // determi
+          -nistic composite                                              
+      430    "date":      "2026-09-08",
+      431    "currency":  "USD",
+      432    "type":      "external_outbound",
+      433    "count":     17,
+      435 -  "totalAmount": 830000,          // minor units              
+      436 -  "updatedAt": ISODate("2026-09-08T12:00:00Z")                
+      434 +  "totalAmount": 830000            // minor units             
+      435  }
+      436  ```
+      439 -Indexes: `{ date: 1 }` · `{ date: 1, currency: 1, type: 1 }` (
+          -unique).                                                      
+      437  
+      441 -### Atomicity of the rollups — open decision (needs your call)
+      438 +> These may be exposed as MongoDB **views** (`db.createView`) 
+          +so a screen can query                                         
+      439 +> them like a collection while they stay computed-on-read — or
+          + run as ad-hoc                                                
+      440 +> pipelines from the reporting service. Either way, **nothing 
+          +is materialized**, so                                         
+      441 +> there is no rollup to keep consistent and no double-count un
+          +der redelivery.                                               
+      442  
+      443 -`transactions` is trivially idempotent (upsert on `_id = event
+          -_id`). The **rollups**                                        
+      444 -are the subtle part: a redelivered event must **not** double-c
+          -ount them, and a                                              
+      445 -single-node Mongo cannot span the `transactions` write + rollu
+          -p updates in one                                              
+      446 -transaction unless it's run as a **single-node replica set**. 
+          -Two ways to satisfy                                           
+      447 -"exactly-once effect," pick one:                              
+      443 +### Aggregation strategy (decided: query-time, everywhere)    
+      444  
+      449 -1. **Query-time aggregation (recommended for the demo).** Don'
+          -t maintain                                                    
+      450 -   `dailyAggregates`/`accountSummaries` incrementally — comput
+          -e them on demand with                                         
+      451 -   Mongo aggregation pipelines over `transactions` at reportin
+          -g time. **Inherently                                          
+      452 -   idempotent** (recomputed from deduped source docs — no doub
+          -le-count possible),                                           
+      453 -   fewer moving parts, and dataset size here is small. The two
+          - rollup collections                                           
+      454 -   become **optional materialized caches** only if a screen ne
+          -eds them.                                                     
+      455 -2. **Materialized rollups + single-node replica set.** Keep th
+          -e incremental                                                 
+      456 -   collections and wrap "upsert `transactions` + apply rollup 
+          -deltas" in one Mongo                                          
+      457 -   multi-document transaction keyed by the new `event_id`. Req
+          -uires configuring                                             
+      458 -   `mongo:7` as a **single-node replica set** (spec 01 current
+          -ly implies standalone).                                       
+      445 +`transactions` is the only stored, authoritative collection; *
+          +*all** analytics —                                            
+      446 +account summaries, daily aggregates, and any future dashboard 
+          +— are **aggregation                                           
+      447 +pipelines computed at query time** over it. Consequences (all 
+          +upside for this                                               
+      448 +prototype):                                                   
+      449  
+      460 -**Recommendation:** option 1 — it removes the double-count haz
+          -ard entirely and keeps                                        
+      461 -spec 01 unchanged; materialize later only if a dashboard query
+          - proves slow. If you'd                                        
+      462 -rather pre-compute, we take option 2 and I'll flag the replica
+          --set change back to                                           
+      463 -spec 01.                                                      
+      450 +- **Idempotent by construction** — figures are recomputed from
+          + deduped source docs                                          
+      451 +  (`_id = event_id`), so a redelivered event can never double-
+          +count.                                                        
+      452 +- **Maximum flexibility** — a new dashboard/report is a new pi
+          +peline, never a schema                                        
+      453 +  migration or a backfill/rebuild.                            
+      454 +- **Standalone Mongo is sufficient** — no multi-document trans
+          +action, no single-node                                        
+      455 +  replica set; **spec 01 is unchanged**.                      
+      456 +- **Trade-off (accepted):** heavier per-query compute. Fine at
+          + prototype data                                               
+      457 +  volumes; if a specific screen ever proves slow, that *one* v
+          +iew can be materialized                                       
+      458 +  later behind the same reporting DTO without touching the ing
+          +est path.                                                     
+      459  
+      460 +To keep the pipelines fast, `transactions` carries the indexes
+          + listed above                                                 
+      461 +(`occurredAt`, `owners`, `type`, and the `legs.account_id` mul
+          +tikey below). Add                                             
+      462 +`{ "legs.account_id": 1 }` (multikey) for the per-account `$gr
+          +oup`.                                                         
+      463 +                                                              
+      464  ### Open questions (carry with spec 07)
+      465  
+      467 -- **Exact dashboard aggregates/screens** — the precise fields 
+          -on the two rollups                                            
+      468 -  (and whether they're materialized at all) resolve with spec 
+          -07, as spec 05 states.                                        
+      469 -- **Rollup strategy** — the atomicity decision above (query-ti
+          -me vs. materialized +                                         
+      470 -  replica set).                                               
+      466 +- **Exact dashboard aggregates/screens** — the precise fields 
+          +the two views project                                         
+      467 +  (and whether any single hot view gets materialized) resolve 
+          +with spec 07, as spec                                         
+      468 +  05 states. The **query-time strategy itself is decided** and
+          + not re-opened.                                               
+      469  - **Customer display names** — per-customer analytics key on `
+           owner_id` (the
+      470    Keycloak `sub`); resolving a `sub` to a human name is a UI c
+           oncern (spec 07 via
+      471    Keycloak), **not** part of the read model.
+
+● Let me add the legs.account_id multikey index to the transactions index list
+  so it's declared where the collection is defined, not only referenced later:
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 2 lines, removed 1 line
+      401  ```
+      402  Indexes: **unique `{ _id }`** (event dedup, spec 05) · `{ tran
+           sactionId: 1 }` ·
+      403  `{ occurredAt: -1 }` (time series / recent) · `{ owners: 1, oc
+           curredAt: -1 }`
+      404 -(per-customer history) · `{ type: 1, occurredAt: -1 }`.       
+      404 +(per-customer history) · `{ type: 1, occurredAt: -1 }` · `{ "l
+          +egs.account_id": 1 }`                                         
+      405 +(multikey — per-account `$group`).                            
+      406  
+      407  **`accountSummaries`** (VIEW — pipeline output, not stored) — 
+           per-account activity +
+      408  latest known balance, produced by `$group` on `legs.account_id
+           `. Shape returned:
+
+● Done — the decision is folded through the whole of Part 2, consistently.
+
+  What changed
+
+  - transactions is now the single stored collection; accountSummaries and
+    dailyAggregates are reframed as query-time pipeline outputs (VIEWs), not
+    materialized collections — with the $group basis noted for each.
+  - Consumer flow simplified to its safe minimum: the only write is the
+    transactions upsert (_id = event_id), then XACK. No rollups to keep
+    consistent → redelivery-safe on standalone Mongo, no multi-doc transaction, 
+    spec 01 untouched.
+  - Replaced the "open decision" section with a "decided: query-time, 
+    everywhere" section spelling out the consequences: idempotent by
+    construction, new dashboard = new pipeline (never a migration/rebuild), and
+    the accepted trade-off (heavier per-query compute, fine at prototype volumes
+    — one hot view can be materialized later behind the same DTO without
+    touching ingest).
+  - Added the { "legs.account_id": 1 } multikey index to transactions so the
+    per-account $group stays fast, and kept the query-time strategy explicitly
+    out of the remaining open questions (only the exact spec-07 dashboard fields
+    stay open).
+
+  Where the data model stands now
+
+  specs/DATA-MODEL.md is complete and internally consistent:
+
+  - Part 1 — Postgres (balance service): 11 entities, ER diagram, enums,
+    per-entity invariants/indexes. Locked calls: no Customer table (Keycloak sub
+    as owner_id), ledger as source of truth with materialized balance/held
+    projections, client-supplied idempotency key + server-computed
+    canonical-tuple request_fingerprint.
+  - Part 2 — Mongo (analytics): self-contained event contract (the contract of
+    record), one stored transactions collection, all analytics as query-time
+    aggregation.
+
+  The only genuinely open item left is spec-07-coupled (exact dashboard fields),
+  which is correct to defer — it's spec 05's own open question and spec 07
+  isn't built yet.
+
+  The entity/collection design phase is finished and consistent. Next natural
+  move is to turn Part 1 into the first implementation step — I'd size it as the
+  schema/migrations + core entities (accounts, ledger, transaction, holds) as
+  one reviewable PR, before layering transfers/limits/OTP/outbox on top. Want me
+  to draft that step breakdown, or do you want to review the full document
+  first?
+
+✻ Baked for 1m 36s · done 8:49 PM
+
+※ recap: Goal: design the balance service data model before implementation. We finished specs/DATA-MODEL.md with the Postgres entities and Mongo collections (query-time aggregation locked). Next: draft the first implementation step, the schema and core entity migrations, or review the doc first. (disable recaps in /config)
+
+❯ did you updated the indempotecy key entity? or not so much?                   
+
+● Honest answer: I refined its semantics, not its columns. The fields stayed the
+  same — what changed is what request_fingerprint means (from "hash of
+  method+path+body" → "hash of the canonical business tuple") in both the ER
+  diagram and the invariant note. Let me show you exactly what's there now.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Right — so to be precise about the scope of that change:
+
+  The columns are unchanged. All 8 fields are exactly as first drafted: key,
+  owner_id, request_fingerprint, transaction_id, status, response_status,
+  response_body, created_at.
+
+  What I actually changed was semantic, in two spots:
+  1. ER diagram (line 175): request_fingerprint comment "hash(method+path+body)"
+     → "hash of canonical business tuple", and key annotated (client-supplied).
+  2. Invariant note (lines 257–266): spelled out client-supplied key vs.
+     server-computed request_fingerprint = hash(type, source_account_id, 
+     destination, amount, currency), why not raw-body, and the full hit-handling
+     (match → replay, in_progress → concurrent retry, differ → 409).
+
+  So: the design decision from our discussion is captured, but the entity's 
+  structure didn't need to move — the refinement was about what one field means,
+  not about adding/removing fields.
+
+  The one thing I did not add, and arguably should consider, is a
+  retention/expiry on the key. Real idempotency stores don't keep keys forever —
+  they age out after a window (e.g. 24–72h), after which the same key is
+  treated as new. Right now the model keeps keys indefinitely. Options:
+
+  - Add expires_at (and a cleanup/TTL sweep) — a key is only replayable within
+    its window; past it, it's a fresh request. This is the production-shaped
+    choice.
+  - Leave it unbounded for the prototype — simplest, and spec 04 doesn't call
+    for expiry; the table just grows with seed/demo volume.
+
+  That's the only genuinely open structural question I see on this entity. Want
+  me to add expires_at, or leave it unbounded for the prototype?
+
+✻ Worked for 35s · done 8:55 PM
+
+※ recap: We're designing the balance service data model in specs/DATA-MODEL.md; Postgres entities and Mongo collections (query-time aggregation) are both drafted. Next: you decide whether the idempotency_key entity gets an expires_at field or stays unbounded for the prototype.
+
+❯ add expires_at with a 24h window but also lets remove the response body as i  
+  dont see any reason to keep it in the table, wdyt?                            
+
+● Good instinct — and it actually forces a cleaner design. Here's my take, then
+  the edit:
+
+  Removing response_body is right, because every idempotent op here is linked to
+  a transaction (that's the FK). The response can be regenerated from the 
+  transaction (the source of truth) on replay, rather than replayed from a
+  redundant JSON snapshot that can drift from the row it mirrors. DRY, smaller
+  table, no stale-snapshot risk.
+
+  But it drags response_status out with it. If we regenerate the body from the
+  current transaction state but keep a frozen response_status, they can disagree
+  — e.g. stored 202 PENDING while the transaction is now POSTED. That's an
+  incoherent reply. So the coherent choices are "freeze both" or "regenerate
+  both" — and you've chosen regenerate. I'm removing both response_body and
+  response_status; replay = load the linked transaction, regenerate DTO + status
+  from its current state. (Shout if you'd rather keep response_status — but I
+  think it has to go for consistency.)
+
+  Let me check nothing else references those fields, then make the edits.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Both references are contained to the two spots I'm editing. Making the
+  changes:
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 2 lines, removed 3 lines
+      173          varchar key PK "Idempotency-Key header value (client-s
+           upplied)"
+      174          varchar owner_id "scopes the key to the caller"
+      175          varchar request_fingerprint "hash of canonical busines
+           s tuple"
+      176 -        uuid transaction_id FK                                
+      176 +        uuid transaction_id FK "replay regenerates the respons
+          +e from this tx"                                               
+      177          enum status "in_progress | completed"
+      178 -        int response_status                                   
+      179 -        jsonb response_body "original result to replay"       
+      178          timestamptz created_at
+      179 +        timestamptz expires_at "created_at + 24h; past it the 
+          +key is treated as new"                                        
+      180      }
+      181  ```
+      182  
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 12 lines, removed 3 lines
+      259    business tuple** — `hash(type, source_account_id, destinatio
+           n[payee_id |
+      260    credit_account_id], amount, currency)` — **not** the raw HTT
+           P body (raw-body
+      261    hashing is brittle to whitespace/field-order and yields fals
+           e conflicts).
+      262 -- Unique `uq_idem (owner_id, key)` (keys namespaced per caller
+          -). On a hit:                                                  
+      263 -  `completed` + fingerprint **matches** → replay stored `respo
+          -nse_body` (money moved                                        
+      264 -  once); `in_progress` → concurrent retry, return "in progress
+          -", do not re-process;                                         
+      262 +- Unique `uq_idem (owner_id, key)` (keys namespaced per caller
+          +). On a hit within the                                        
+      263 +  window: `completed` + fingerprint **matches** → **regenerate
+          +** the response from                                          
+      264 +  the linked `transaction` so the reply reflects its current s
+          +tate (money moved once);                                      
+      265 +  `in_progress` → concurrent retry, return "in progress", do n
+          +ot re-process;                                                
+      266    fingerprint **differs** → `409` (key reused with different p
+           arameters).
+      267 +- **No stored response snapshot.** The reply is regenerated fr
+          +om `transaction` (the                                         
+      268 +  source of truth) — not replayed from a frozen body/status — 
+          +so it can never drift                                         
+      269 +  from the row it mirrors. Every `completed` key has a `transa
+          +ction_id` (even a                                             
+      270 +  business failure produces a `FAILED` transaction); a pre-tra
+          +nsaction validation                                           
+      271 +  failure releases the `in_progress` key instead of completing
+          + it.                                                          
+      272 +- **Retention:** `expires_at = created_at + 24h`. A retry **af
+          +ter** `expires_at` is a                                       
+      273 +  **fresh** request; expired rows are dropped by a periodic sw
+          +eep (Postgres has no                                          
+      274 +  native row TTL). Index `idx_idem_expires (expires_at)` for t
+          +he sweep.                                                     
+      275  
+      276  ### Open modeling choices (want your call before we lock migra
+           tions)
+      277  
+
+● Done. The idempotency_key entity now reads:
+
+  Columns: key · owner_id · request_fingerprint · transaction_id · status ·
+  created_at · expires_at — response_body and response_status gone.
+
+  What the edits captured:
+  - expires_at = created_at + 24h, with the replay semantics tightened: a hit
+    within the window regenerates from the transaction; a retry after it is a
+    fresh request. Added idx_idem_expires (expires_at) for the cleanup sweep
+    (Postgres has no native row TTL).
+  - Response snapshot removed — replay regenerates the reply from the linked
+    transaction, so it can't drift from the row it mirrors.
+  - Added the one coherence guard this creates: every completed key has a 
+    transaction_id (even a business failure produces a FAILED transaction), and
+    a pre-transaction validation failure releases the in_progress key rather
+    than completing it — otherwise "regenerate from the transaction" would have
+    a null to trip on.
+
+  That closes the idempotency entity. Both Part 1 (Postgres) and Part 2 (Mongo,
+  query-time) are now internally consistent and, as far as I can see, fully
+  settled. Ready to move from design into the first implementation step whenever
+  you are — or is there another entity you want to pressure-test first?
+
+✻ Cogitated for 1m 49s · done 9:09 PM
+
+❯ ok now that we have this, i think we shoudl generate a yaml file with the     
+  list of entities following this format: nameOfentity: description: "string    
+  about what the entity does and what is the purpose of its existence"          
+  attributes: nameOfAttribute: type: type of attirbute, description: semantic   
+  of what the attirbute is relations: name of entities and what the relation    
+  represents. clear? this si the schema manifest we are going tro give the      
+  implementor for it to build the persistence layer, clear?                     
+
+● Clear. I'll generate a YAML schema manifest for the balance-service Postgres
+  persistence layer — the 11 entities from Part 1 — in exactly that shape
+  (entity → description / attributes{name → type, description} / relations).
+  Since the requested format has only type + description per attribute, I'm
+  folding the load-bearing constraints (PK, FK, nullable, unique, defaults,
+  checks) into each description so the implementor has what it needs without me
+  inventing extra keys.
+
+  Two correctness points I'm baking in as I transcribe (I'll flag them after):
+  - IdempotencyKey PK becomes composite (owner_id, key) — a client-supplied key
+    is only unique per caller, so key alone can't be the PK (a tightening over
+    the ER diagram).
+  - Limit maps to table transfer_limit — LIMIT is a reserved word in Postgres.
+
+● Write(specs\balance-schema.yaml)
+  ⎿  Wrote 379 lines to specs\balance-schema.yaml
+       1 # Balance Service — Schema Manifest (Postgres persistence layer)
+       3 # Handoff artifact for the implementor building spec 04's persis
+         tence layer.
+         remain the
+       5 # contract of record. This file lists WHAT to persist; the imple
+       6 # the TypeORM mapping.
+       7 #
+       9 #   - Money is `bigint` MINOR UNITS + a `currency` code. Never f
+         loat.
+         trategy) — matches
+     … +535 lines (ctrl+o to expand)
+
+❯ limit should be userLimits                                                    
+
+● On it — renaming the entity. I'll use UserLimits (PascalCase, to match the
+  other entity keys in the manifest) with table user_limits; tell me if you want
+  the literal lowercase userLimits. I'll keep the two docs in sync, so I'm
+  updating both the manifest and DATA-MODEL.md.
+
+● Update(specs\balance-schema.yaml)
+  ⎿  Added 2 lines, removed 2 lines
+      226    relations:
+      227      transactions: "Transaction — external outbound transaction
+           s targeting this payee."
+      228  
+      229 -Limit:                                                        
+      230 -  description: "A configurable set of caps and velocity checks
+          - applied to transfers. Exists at global scope (a baseline) and
+          - per-customer scope (an override that wins over global). Table
+          -: transfer_limit (avoids the SQL reserved word LIMIT)."       
+      229 +UserLimits:                                                   
+      230 +  description: "A configurable set of caps and velocity checks
+          + applied to transfers. Exists at global scope (a baseline) and
+          + per-customer scope (an override that wins over global). Table
+          +: user_limits (also sidesteps the SQL reserved word LIMIT)."  
+      231    attributes:
+      232      id:
+      233        type: uuid
+
+● Now let me find every limit-entity reference in DATA-MODEL.md to update them
+  consistently (leaving the limit_change action name and illustrative strings
+  alone):
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 1 line, removed 1 line
+      123          timestamptz activated_at
+      124      }
+      125  
+      126 -    LIMIT {                                                   
+      126 +    USER_LIMITS {                                             
+      127          uuid id PK
+      128          enum scope "global | customer"
+      129          varchar owner_id "customer sub · NULL for global"
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 2 lines, removed 2 lines
+      234  - A destination is valid only if `status = 'active' AND now() 
+           >= cooling_off_until`.
+      235  - Unique `uq_payee (owner_id, rail, destination_ref)`.
+      236  
+      237 -**`limit`** — global + per-customer config.                   
+      238 -- Unique `uq_limit_scope (scope, owner_id)` (one global row pe
+          -r currency; one per                                           
+      237 +**`user_limits`** — global + per-customer config.             
+      238 +- Unique `uq_user_limits_scope (scope, owner_id)` (one global 
+          +row per currency; one per                                     
+      239    customer). Resolution: customer row wins over global; missin
+           g → global.
+      240  
+      241  **`outbox_event`** — transactional outbox ([ADR-5](../docs/DEC
+           ISIONS.md#adr-5--transactional-outbox-postgres--redis-streams-
+           transport)).
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 1 line, removed 1 line
+      284  2. **`ledger_entry.id` as `bigint` identity vs `uuid`** — chos
+           e `bigint` identity
+      285     for a natural total order (statements, deterministic rebuil
+           d). Everything else is
+      286     `uuid`. *Recommendation: keep the split.*
+      287 -3. **`velocity` on `limit` as `(max_count, window_seconds)`** 
+          -— a general sliding                                           
+      287 +3. **`velocity` on `user_limits` as `(max_count, window_second
+          +s)`** — a general sliding                                     
+      288     window. Alternative: fold velocity into the daily counter o
+           nly. *Recommendation:
+      289     keep the explicit window* — spec 04 lists velocity as its o
+           wn check.
+      290  4. **`transaction` header debit/credit FKs** — denormalized co
+           nvenience over
+
+● Both files are updated and consistent. Here's where things stand.
+
+  specs/balance-schema.yaml (new) — the implementor handoff
+
+  All 11 Postgres entities in your exact format (entity → description / 
+  attributes{type, description} / relations), with
+  PK/FK/nullable/unique/default/check constraints folded into each description
+  since the format carries only type + description.
+
+  Limit → UserLimits applied — entity key UserLimits, table user_limits (I used
+  PascalCase to match Account, LedgerEntry, etc.; say the word if you want
+  literal userLimits). Synced the same rename into DATA-MODEL.md (ER block →
+  USER_LIMITS, invariant → user_limits, unique constraint →
+  uq_user_limits_scope, and the open-choice note).
+
+  Two correctness tightenings I baked in during transcription
+
+  1. IdempotencyKey PK is now composite (owner_id, key) — a client-supplied key
+     is unique per caller, not globally, so key alone couldn't be the PK.
+     (Slightly tighter than the ER diagram, which showed key PK.)
+  2. UserLimits → table user_limits also sidesteps the SQL reserved word LIMIT
+     (which the old Limit/transfer_limit note flagged). Note transaction is fine
+     unquoted in Postgres (non-reserved).
+
+  Two things I deliberately left alone — flagging in case you want them changed 
+  too
+
+  - The enum type limit_scope and the maker-checker action limit_change still
+    carry "limit" — I kept them because they name the concept, not the renamed
+    entity/table. Easy to rename to user_limits_scope / user_limits_change if
+    you'd prefer full consistency.
+  - AuditLog.relations is intentionally empty ({}) — its target is polymorphic
+    (target_type, target_id), not an FK.
+
+  The manifest is ready to hand to the implementor for the persistence layer.
+  Want me to give the analytics side the same treatment (a companion manifest
+  for the single Mongo transactions collection + the event contract), or is the
+  next move to scope the first implementation step off this manifest?
+
+✻ Crunched for 4m 54s · done 9:21 PM
+
+❯ yes, do the analytics manifest the same way but also i got a question, if the 
+  user supplies the idempotency key and we generate a new one each time the     
+  user clicks the same button to start a transaction we would not actually be   
+  restricting the user from sending multiple equal transactions but with        
+  different idemptency key, no? how do we solve this? i mean any way we got he  
+  otp to solve it right? but i am wondering if we can improve this a little     
+  more or is acceptable as is?                                                  
+
+● Great question — and you've put your finger on a real distinction that's worth
+  being precise about. Let me answer it, then build the analytics manifest.
+
+  Idempotency vs. duplicate suppression — two different problems
+
+  - Idempotency (what the key gives us): the same request, retried, executes
+    once. Its whole job is retry safety (network timeout, client resend).
+  - Duplicate suppression (what you're describing): two distinct requests that 
+    happen to be semantically identical — the double-click where the client
+    mints a fresh key each click. The idempotency key, by design, does not catch
+    this, because the two requests genuinely are different operations as far as
+    the key is concerned.
+
+  You're exactly right that a new key per click defeats it. Here's how I'd layer
+  the defense:
+
+  1. The primary fix is where the key is generated (client-side)
+
+  The key should represent the user's intent, not the button press — so it's
+  generated once when the transfer intent is created (form opened / "review"
+  step reached) and reused across every click/retry of that same intent. Then a
+  double-click sends the same key → deduped for free. "We generate a new one
+  each click" is the client bug; generating once per intent is the standard
+  (Stripe-style) pattern and solves the common case cleanly.
+
+  But client-side controls are unreliable (two tabs, a buggy SPA, a scripted
+  client), so we want a server backstop.
+
+  2. The server backstop (the improvement you're asking about) — and it needs no
+  new schema
+
+  We already store request_fingerprint + owner_id + created_at on
+  idempotency_key. So the balance service can run a soft duplicate-detection 
+  window: on a new transfer, if an identical fingerprint (type, source, 
+  destination, amount, currency) was seen for this owner within the last N
+  seconds under a different key → treat it as a suspected duplicate. Crucially
+  this is a soft control — warn and require an explicit confirmDuplicate (or a
+  deliberate override), not a hard block, because legitimately paying the same
+  person the same amount twice is a real thing. That's precisely the "you
+  recently sent an identical payment — send again?" prompt banks use.
+
+  3. What OTP + holds already buy you (and their limit)
+
+  For external outbound, OTP + the hold do add genuine protection: each pending
+  transfer needs its own out-of-band confirmation, and the hold reserves funds
+  so you can't over-commit past available. So a double-submit is throttled by
+  friction + fund reservation. But it's friction, not prevention (a user with
+  balance could confirm both), and internal transfers have no OTP — so they're
+  the real exposure and exactly where the soft window earns its keep.
+
+  My recommendation
+
+  Acceptable-as-is for the prototype baseline (key + OTP + holds + velocity
+  limits is defensible). But the soft duplicate window is a cheap, high-value 
+  hardening — no schema change, reuses request_fingerprint, and it's the only
+  thing that covers internal transfers. I'd add it, documented as service
+  behavior in spec 04 (not the schema). Want me to write that behavior into spec
+  04 / a note in DATA-MODEL.md?
+
+  ---
+
+  Now the analytics manifest, same format:
+
+● Write(specs\analytics-schema.yaml)
+  ⎿  Wrote 123 lines to specs\analytics-schema.yaml
+       1 # Analytics Server — Schema Manifest (Mongo read model)
+       3 # Handoff artifact for the implementor building spec 05's persis
+         tence layer.
+         remain the
+       5 # contract of record. This file lists WHAT to persist; the imple
+       6 # the Mongo driver / ODM mapping.
+       7 #
+       9 #   - ONE stored collection: `transactions` (below). It is the a
+         uthoritative,
+          stream.
+     … +180 lines (ctrl+o to expand)
+
+● Done. specs/analytics-schema.yaml is written in the same format.
+
+  What's in the analytics manifest
+
+  - One stored entity — Transactions — the single flattened collection, in the
+    entity/attributes/relations format. Nested payee (object) and legs
+    (array-of-object) shapes are spelled out inside their descriptions, and
+    relations: {} is deliberate (denormalized, self-contained, no cross-store
+    joins). The full index set (unique _id dedup gate + the five secondary
+    indexes) is listed for the implementor.
+  - Consumed event contract — documented as a clearly-marked input section (not
+    persisted as-is; projected into a transactions doc), cross-referencing
+    DATA-MODEL Part 2 as the contract of record.
+  - Query-time views — accountSummaries / dailyAggregates documented as output
+    pipelines, explicitly not stored collections.
+
+  I kept the top-level YAML key limited to the one persisted entity (matching
+  the balance manifest, where every top-level key is a real table); the input
+  contract and views are reference sections so a parser won't mistake them for
+  stored collections.
+
+  Where we are
+
+  Three artifacts, mutually consistent:
+  - specs/DATA-MODEL.md — the design + rationale (both stores).
+  - specs/balance-schema.yaml — 11 Postgres entities (persistence handoff).
+  - specs/analytics-schema.yaml — 1 Mongo collection + event contract + views
+    (persistence handoff).
+
+  Two open threads to close before implementation
+
+  1. The soft duplicate-suppression window — my recommendation from above. No
+     schema change (reuses request_fingerprint); it's the only control covering
+     internal transfers. Want it written into spec 04 as documented service
+     behavior?
+  2. The limit_scope / limit_change naming — still carry "limit" after the
+     UserLimits rename; say if you want them renamed for full consistency.
+
+  Once those are settled, the natural next move is to scope the first 
+  implementation step off balance-schema.yaml — I'd size it as schema + 
+  migrations + core entities (Account, LedgerEntry, Transaction, Hold) as one
+  reviewable PR, before layering transfers/limits/OTP/outbox. Want me to draft
+  that step breakdown?
+
+✻ Cooked for 2m 38s · done 9:29 PM
+
+❯ also rememeber the otp os for authorizing both internal and external          
+  transactions, not only external                                               
+
+● Important correction — thank you. That changes the transfer lifecycle: OTP 
+  gates the confirm step for internal transfers too, not just external. Let me
+  trace the implication and fix every spot that currently says otherwise.
+
+  The key consequence to get right: internal becomes PENDING → OTP-confirm → 
+  POSTED, but still hold-less — for internal, confirm is the settlement (atomic
+  posting), so funds are checked at confirm-time under the account lock rather
+  than reserved by a hold. Holds stay external-only (async rail settlement is
+  what needs a reservation window). No entity/column changes — it's a lifecycle
+  wording fix. Let me find every place that says "internal posts directly":
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Let me also check the OTP references in spec 04 and DATA-MODEL to update them
+  consistently:
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+● I have all the spots. This is a change to the source-of-truth spec (04), not
+  just my derived docs — and the working agreement says fix the spec before
+  code. Let me read the exact transaction-invariant region in DATA-MODEL.md,
+  then apply the change across spec 04, the balance manifest, and the data model
+  together.
+
+  Read 1 file (ctrl+o to expand)
+
+● Now applying the change across all three docs:
+
+● Update(specs\04-balance-service.md)
+  ⎿  Added 3 lines, removed 1 line
+      44      compensating entries, never mutations. External outbound is
+           two-phase:
+      45      initiation **places a hold** (reserves funds; `balance` unc
+          hanged) and
+      46      settlement/OTP-confirm **settles** it into a posted movemen
+          t (fail/expiry
+      47 -    **releases** it). Internal transfers post directly (no hold
+         -).                                                             
+      47 +    **releases** it). Internal transfers place **no hold** but 
+         +are still                                                      
+      48 +    **OTP-gated**: they stay `PENDING` at initiation and **post
+         + on OTP-confirm**,                                             
+      49 +    with the funds check performed at confirm-time under the ac
+         +count lock.                                                    
+      50  - **Holds (reservation ledger)** — an append-only `Hold` log fo
+          r funds reserved
+      51    but not yet posted (external outbound awaiting OTP/settlement
+          ). Lifecycle
+      52    `PLACED → SETTLED | RELEASED | EXPIRED`; each hold carries an
+           `externalRef` for
+
+● Update(specs\04-balance-service.md)
+  ⎿  Added 2 lines, removed 1 line
+      61  - **External payees** — enrollment with a **cooling-off period*
+          * before a new payee
+      62    can receive money.
+      63  - **OTP module** (bounded; [ADR-11](../docs/DECISIONS.md#adr-11
+          --service-boundaries--data-ownership))
+      64 -  — generate a code at transfer initiation, **bound to the tran
+         -saction**; store in                                            
+      64 +  — generate a code at **every transfer initiation (internal an
+         +d external)**,                                                 
+      65 +  **bound to the transaction**; store in                       
+      66    Redis with TTL, single-use via atomic `GETDEL`; verify at con
+          firm; expose
+      67    `GET /api/pending-authorizations` for the OTP app.
+      68  - **Outbox + relay worker** — write the `OutboxEvent` in the **
+          same DB
+
+● Update(specs\04-balance-service.md)
+  ⎿  Added 3 lines, removed 1 line
+      107  - [ ] Internal transfer works end-to-end; **concurrency test**
+            (N simultaneous
+      108        transfers) proves no double-spend / no overdraft / no mo
+           ney created or lost.
+      109  - [ ] **Idempotency test**: a replayed `Idempotency-Key` moves
+            money once.
+      110 -- [ ] External outbound requires OTP confirm (code bound to th
+          -e tx, single-use).                                            
+      110 +- [ ] **Every transfer — internal and external outbound — requ
+          +ires OTP confirm**                                            
+      111 +      (code bound to the tx, single-use): internal posts on co
+          +nfirm, external                                               
+      112 +      settles its hold on confirm.                            
+      113  - [ ] External outbound **places a hold** at initiation (avail
+           able drops, balance
+      114        unchanged), **settles** it at confirm (hold→SETTLED, bal
+           ance/held updated,
+      115        double-entry posted), and **releases** it on fail/expiry
+            (no ledger entry).
+
+● Now the balance manifest and the data model:
+
+● Update(specs\balance-schema.yaml)
+  ⎿  Added 1 line, removed 1 line
+      109        description: "Determines which accounts are the debit/cr
+           edit legs. NOT NULL."
+      110      status:
+      111        type: enum(PENDING|POSTED|FAILED|REVERSED)
+      112 -      description: "Lifecycle. External outbound starts PENDIN
+          -G (awaiting OTP/settlement); internal posts directly to POSTED
+          -. NOT NULL."                                                  
+      112 +      description: "Lifecycle. EVERY transfer (internal and ex
+          +ternal outbound) starts PENDING at initiation and is OTP-gated
+          +. Internal posts to POSTED on OTP-confirm (no hold; funds chec
+          +ked at confirm under the account lock). External outbound plac
+          +es a hold at initiation and settles it to POSTED on OTP-confir
+          +m. NOT NULL."                                                 
+      113      amount:
+      114        type: bigint
+      115        description: "Positive magnitude of the movement, minor 
+           units. NOT NULL."
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 5 lines
+      222    the *account being debited* is the caller's ([ADR-3](../docs
+           /DECISIONS.md#adr-3--object-level-authorization-lives-in-the-s
+           ervice)).
+      223  - `external_outbound`: debit = customer, credit = `clearing:ra
+           il-outbound`.
+      224    `external_inbound`: debit = `clearing:rail-inbound`, credit 
+           = customer.
+      225 +- **OTP gates every transfer.** Both `internal` and `external_
+          +outbound` start                                               
+      226 +  `PENDING` at initiation and post only on OTP-confirm. Intern
+          +al is **hold-less**                                           
+      227 +  (funds checked at confirm under the account lock); external 
+          +places a `Hold` at                                            
+      228 +  initiation and settles it on confirm. `external_inbound` is 
+          +admin/rail-triggered,                                         
+      229 +  not OTP-gated.                                              
+      230  - Index `idx_tx_account (debit_account_id, created_at)` for `G
+           ET /accounts/:id/transactions`.
+      231  
+      232  **`hold`** — reservation ledger ([ADR-14](../docs/DECISIONS.md
+           #adr-14--holds--settlement)).
+
+● All four docs are now consistent on this. Summary of the change and one
+  interpretation I need you to confirm.
+
+  What I changed (OTP gates internal too)
+
+  - specs/04-balance-service.md (the source of truth):
+    - Transfers → Lifecycle: internal is now "no hold but still OTP-gated —
+      stays PENDING at initiation and posts on OTP-confirm, funds checked at
+      confirm-time under the account lock."
+    - OTP module: code generated at "every transfer initiation (internal and 
+      external)."
+    - DoD: the OTP line now reads "every transfer — internal and external 
+      outbound — requires OTP confirm."
+  - balance-schema.yaml — Transaction.status description rewritten: every
+    transfer starts PENDING + OTP-gated; internal posts on confirm (hold-less),
+    external settles a hold on confirm.
+  - DATA-MODEL.md — added an "OTP gates every transfer" bullet to the
+    transaction invariants.
+
+  No entity/column changes — OTP codes live in Redis, and the Transaction
+  PENDING→POSTED lifecycle already supported this. Holds stay external-only.
+
+  One interpretation to confirm
+
+  I read "internal and external" as covering the two customer-initiated outbound
+  flows. I treated external_inbound as NOT OTP-gated, because inbound is money
+  arriving, initiated by the rail/admin (via /admin simulated inbound or
+  /internal webhook) — the customer isn't authorizing the receipt. If you
+  actually want inbound gated too, tell me — but that's unusual and I'd want
+  your explicit call.
+
+  Correction to my earlier idempotency answer
+
+  My duplicate-suppression analysis leaned on "internal transfers have no OTP,
+  so they're the uniquely exposed case." That's now outdated — internal gets the
+  same OTP friction (each pending needs an out-of-band confirm). The soft
+  duplicate-window is still worth it (OTP is friction, not dedup — a determined
+  user could confirm two identical pendings), but it's no longer "the only thing
+  covering internal." Both flows now have the OTP throttle plus (optionally)
+  the fingerprint window.
+
+  Still want me to:
+  1. Write the soft duplicate-window into spec 04 as service behavior, and
+  2. Rename limit_scope/limit_change for full consistency?
+
+  Or move on to scoping the first implementation step?
+
+✻ Cooked for 2m 31s · done 9:33 PM
+
+❯ i think we can add the soft dupolicate detection journey but i think it is    
+  overkill, anyway the otp must be generated via de user otp interface, no? and 
+  has a ttl and is only one use only, meaning a user cannot authorize two       
+  duplicates of the same transaction with the same otp  but we can add it as an 
+  additional layer of protection and using as the window 1 full minute, clear?  
+
+● Before I lock the window in, one clarification that actually matters for why
+  we're adding it — because there's a subtle gap in the "OTP already prevents
+  it" reasoning:
+
+  How OTP is generated: the code is generated server-side by the balance service
+  at initiation, bound to that specific transaction; the OTP app is the
+  out-of-band channel that reveals it (it doesn't mint it). Single-use + TTL are
+  correct.
+
+  The subtlety: because the code is bound to a specific transaction, a
+  double-submit that creates two distinct pending transactions (T1, T2) produces
+  two distinct codes (C1, C2). Single-use stops replaying one code, but it does
+  not stop the user fetching both codes from the OTP app and confirming both →
+  two duplicate transfers succeed. So OTP single-use prevents code replay, not
+  duplicate distinct transactions — which is exactly the gap the soft window
+  fills. It's genuinely additive, not redundant.
+
+  That said, you're right that it's not load-bearing: OTP friction (seeing two
+  identical pendings, entering two codes) makes accidental duplication
+  low-probability, so "additional layer" is the correct framing. 60s window,
+  soft block, no new schema. Writing it into spec 04 and the data model now:
+
+● Update(specs\04-balance-service.md)
+  ⎿  Added 11 lines
+      31    **inbound-rail clearing account**, credit customer):
+      32    - **Idempotency:** `Idempotency-Key` per request; a retry ret
+          urns the original
+      33      result (persisted `IdempotencyKey`).
+      34 +  - **Duplicate suppression (soft, defense-in-depth):** distinc
+         +t from idempotency —                                           
+      35 +    catches *different* requests that are semantically identica
+         +l (a double-submit                                             
+      36 +    that mints a **new** key each time, which the idempotency k
+         +ey cannot dedup). If                                           
+      37 +    the same `(owner_id, request_fingerprint)` — `fingerprint =
+         + hash(type, source,                                            
+      38 +    destination, amount, currency)` — was seen within a **60-se
+         +cond window**, the                                             
+      39 +    transfer is held as a *suspected duplicate* and requires an
+         + explicit                                                      
+      40 +    `confirmDuplicate` override. It is a **soft** block (repeat
+         +ing an identical                                               
+      41 +    payment is legitimately valid) and reuses the fingerprint a
+         +lready stored on                                               
+      42 +    `IdempotencyKey` — no new state. It layers **atop** OTP, no
+         +t instead of it:                                               
+      43 +    because each pending transfer carries its **own** single-us
+         +e code, OTP prevents                                           
+      44 +    code *replay* but not two *distinct* identical transfers.  
+      45    - **Concurrency:** READ COMMITTED + `SELECT ... FOR UPDATE` o
+          n the affected
+      46      account row(s), locked in a **canonical order (by account i
+          d)** to avoid
+      47      deadlocks. Because the account row holds the materialized `
+          balance`, `held`
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 7 lines
+      277  - **Retention:** `expires_at = created_at + 24h`. A retry **af
+           ter** `expires_at` is a
+      278    **fresh** request; expired rows are dropped by a periodic sw
+           eep (Postgres has no
+      279    native row TTL). Index `idx_idem_expires (expires_at)` for t
+           he sweep.
+      280 +- **Soft duplicate window (defense-in-depth).** The same `(own
+          +er_id,                                                        
+      281 +  request_fingerprint)` seen within **60s** — even under a **d
+          +ifferent** `key` —                                            
+      282 +  flags a *suspected duplicate*, requiring an explicit `confir
+          +mDuplicate` override                                          
+      283 +  (a **soft** block; identical repeat payments are valid). Reu
+          +ses                                                           
+      284 +  `request_fingerprint` + `created_at`; **no new column**. Dis
+          +tinct from idempotency:                                       
+      285 +  the key dedups *same key*; this catches *distinct keys, same
+          + request*. Needs an                                           
+      286 +  index on `(owner_id, request_fingerprint, created_at)` for t
+          +he lookup.                                                    
+      287  
+      288  ### Open modeling choices (want your call before we lock migra
+           tions)
+      289  
+
+● Update(specs\balance-schema.yaml)
+  ⎿  Added 1 line, removed 1 line
+      362        description: "Caller's Keycloak `sub`; namespaces the ke
+           y so callers can't collide or probe each other. NOT NULL. Part
+            of the composite primary key (owner_id, key)."
+      363      request_fingerprint:
+      364        type: varchar
+      365 -      description: "Server-computed hash of the canonical busi
+          -ness tuple (type, source_account_id, destination[payee_id|cred
+          -it_account_id], amount, currency). On a key hit, a mismatch ->
+          - 409 (key reused with different parameters). NOT NULL."       
+      365 +      description: "Server-computed hash of the canonical busi
+          +ness tuple (type, source_account_id, destination[payee_id|cred
+          +it_account_id], amount, currency). On a key hit, a mismatch ->
+          + 409 (key reused with different parameters). NOT NULL. Also po
+          +wers a soft duplicate-suppression window: the same (owner_id, 
+          +request_fingerprint) within 60s under a DIFFERENT key flags a 
+          +suspected duplicate requiring an explicit confirmDuplicate ove
+          +rride. Index (owner_id, request_fingerprint, created_at) for t
+          +hat lookup."                                                  
+      366      transaction_id:
+      367        type: uuid
+      368        description: "FK -> transaction.id. The transaction the 
+           request produced; replay regenerates the response from it. Nul
+           lable while status='in_progress'; present on every 'completed'
+            key."
+
+● Done — the soft duplicate window is now specced consistently across all three
+  docs, with a 60s window, soft block (confirmDuplicate override), and no new 
+  column — it reuses request_fingerprint + created_at (adds one index (owner_id,
+  request_fingerprint, created_at) for the lookup).
+
+  - 04-balance-service.md — new "Duplicate suppression (soft, defense-in-depth)"
+    bullet under Transfers, including the OTP-doesn't-cover-this rationale.
+  - DATA-MODEL.md — new bullet on the idempotency_key invariants.
+  - balance-schema.yaml — folded into the request_fingerprint description + the
+    index note.
+
+  Where everything stands
+
+  Four artifacts, mutually consistent:
+  - specs/04-balance-service.md — source of truth (OTP-gates-both +
+    soft-duplicate now baked in).
+  - specs/DATA-MODEL.md — design + rationale, both stores.
+  - specs/balance-schema.yaml — 11 Postgres entities.
+  - specs/analytics-schema.yaml — Mongo transactions collection + event contract
+    + views.
+
+  Open threads remaining
+
+  1. limit_scope / limit_change naming — still carry "limit" after the
+     UserLimits rename. Rename for full consistency, or leave (they name the
+     concept, not the entity)? Your call — small either way.
+  2. external_inbound OTP — I'm treating it as not OTP-gated
+     (rail/admin-initiated, not customer-authorized). Flag if you disagree.
+
+  If those are settled, the design phase is genuinely complete and the next move
+  is to scope the first implementation step off balance-schema.yaml — I'd size
+  it as schema + migrations + the four core entities (Account, LedgerEntry, 
+  Transaction, Hold) as one reviewable PR, before layering
+  transfers/limits/OTP/outbox. Want that step breakdown?
+
+✻ Churned for 1m 25s · done 9:52 PM
+
+❯ but that is where you are wrong, because the user should only have one active 
+  otp anytime one is generated, meaning the user can only authorize via otp     
+  one transaction at a time, clear? the otp should not in any way be related or 
+  scoped to a transaction, that is huge gap, the otp shoul dbe scoped to the    
+  user, clear?                                                                  
+
+● You're right, and this is a better design — I was following ADR-6 as written
+  ("bound to the specific transaction"), but that binding is the gap. Let me
+  make sure I've got your model exactly, because it changes the macro (ADR-6,
+  the storage spec, the threat model), not just my derived docs.
+
+  Your model: the OTP is scoped to the user (otp:<sub> — one slot per user), and
+  a user can have only one active OTP at a time, so they can authorize only one
+  transfer at a time. That closes the concurrent-duplicate gap by construction:
+  you cannot have two independently-confirmable pending transfers, because
+  there's only ever one live code per user.
+
+  The anti-replay property ADR-6 wanted isn't lost — it's just enforced
+  differently: since there's exactly one pending authorization per user and each
+  initiation mints a fresh code (invalidating any prior), a code always
+  corresponds to the user's single current pending transfer. It can't be "moved"
+  to a different one.
+
+  Let me find every place the old transaction-bound model is written down before
+  I edit:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Let me pull the exact OTP text from the macro docs that assert the
+  transaction-bound model:
+
+  Searched for 4 patterns (ctrl+o to expand)
+
+● I have all the spots. This cascades into the macro (ADR-6, ARCHITECTURE §4,
+  THREAT-MODEL) — per the working agreement I fix the spec and the macro before
+  code, so I'll update them all for consistency. Let me read the exact current
+  text in spec 04, ADR-6, ARCHITECTURE §4, and the balance-service docs README
+  before editing.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● The balance-service docs README only mentions OTP as "not yet built" — no
+  binding text there, so no change needed. Let me grab the exact redis README
+  table row, then apply all edits.
+
+  I'll set the second-initiation behavior to block (reject a new initiation
+  while one is pending; the slot frees on confirm/cancel/TTL-expiry) — the
+  safest default for a money app since it never silently cancels a pending
+  movement. I'll flag it so you can flip it to "replace."
+
+  Read 1 file (ctrl+o to expand)
+
+● Now applying the edits. First batch (independent files — spec 04 OTP module,
+  storage spec, redis README, threat model):
+
+● Update(specs\04-balance-service.md)
+  ⎿  Added 5 lines, removed 2 lines
+      72  - **External payees** — enrollment with a **cooling-off period*
+          * before a new payee
+      73    can receive money.
+      74  - **OTP module** (bounded; [ADR-11](../docs/DECISIONS.md#adr-11
+          --service-boundaries--data-ownership))
+      75 -  — generate a code at **every transfer initiation (internal an
+         -d external)**,                                                 
+      76 -  **bound to the transaction**; store in                       
+      75 +  — at **every transfer initiation (internal and external)** ge
+         +nerate a code that is                                          
+      76 +  **user-scoped** (`otp:<sub>`), **not** transaction-scoped: **
+         +one active OTP per                                             
+      77 +  user**, so a user can have only **one transfer pending author
+         +ization at a time**. A                                         
+      78 +  second initiation while one is pending is **rejected** until 
+         +the pending one is                                             
+      79 +  confirmed, cancelled, or expires (TTL). Store in             
+      80    Redis with TTL, single-use via atomic `GETDEL`; verify at con
+          firm; expose
+      81    `GET /api/pending-authorizations` for the OTP app.
+      82  - **Outbox + relay worker** — write the `OutboxEvent` in the **
+          same DB
+
+● Update(specs\01-storage.md)
+  ⎿  Added 3 lines, removed 2 lines
+      19    (Keycloak's store, per default #3). Create a least-privilege 
+          app role for the
+      20    balance service (owns `balance` only) and a separate role for
+           Keycloak. Password
+      21    via Docker secret / git-ignored env. Healthcheck: `pg_isready
+          `.
+      22 -- **Redis** — key-spaces are namespaced: `otp:<txId>` for trans
+         -action codes                                                   
+      23 -  (TTL-managed), stream key `events:transactions` for the outbo
+         -x transport.                                                   
+      22 +- **Redis** — key-spaces are namespaced: `otp:<sub>` for the **
+         +user-scoped**                                                  
+      23 +  transaction step-up code (**one active per user**, TTL-manage
+         +d), stream key                                                 
+      24 +  `events:transactions` for the outbox transport.              
+      25    Persistence optional (`appendonly` off is fine — OTP is dispo
+          sable). Healthcheck:
+      26    `redis-cli ping`. AUTH enabled.
+      27  - **MongoDB** — database `analytics`. Auth enabled (root + app 
+          user). Healthcheck:
+
+● Update(infra\redis\README.md)
+  ⎿  Added 1 line, removed 1 line
+      32  
+      33  | Key                    | Purpose                             
+                         |
+      34  |------------------------|-------------------------------------
+          ---------------|
+      35 -| `otp:<txId>`           | Transaction OTP code, TTL-managed, s
+         -ingle-use      |                                               
+      35 +| `otp:<sub>`            | Transaction step-up code — **one act
+         +ive per user** (user-scoped), TTL-managed, single-use |        
+      36  | `events:transactions`  | Redis Stream carrying outbox events 
+          to analytics   |
+      37  
+      38  ## Connection contract
+
+● Update(docs\THREAT-MODEL.md)
+  ⎿  Added 1 line, removed 1 line
+      45  | Money created/lost via float rounding | Integer minor units (
+          or fixed `DECIMAL`) + explicit currency. (ADR-4) |
+      46  | Event stream disagrees with the ledger | Transactional outbox
+           (same-tx write) + at-least-once relay + idempotent consumer. (
+          ADR-5) |
+      47  | Relay double-publishes an event (multiple balance-service ins
+          tances) | Claim outbox rows with `SELECT ... FOR UPDATE SKIP LO
+          CKED`; idempotent consumer dedups by `event_id`. (ADR-11) |
+      48 -| OTP code replayed for a different transfer | Code bound to th
+         -e specific transaction (amount + destination). (ADR-6) |       
+      48 +| OTP code replayed for a different transfer | **User-scoped, s
+         +ingle-active OTP**: one pending authorization per user and a fr
+         +esh code per initiation, so a live code always maps to the user
+         +'s single current transfer and cannot be moved to another. (ADR
+         +-6) |                                                          
+      49  | OTP code redeemed twice (race) | Atomic single-use consume (`
+          GETDEL`/Lua) + TTL. (ADR-7) |
+      50  | New payee used to exfiltrate funds immediately | Cooling-off 
+          period before a newly-enrolled external account can receive mon
+          ey. |
+      51  | Silent drift between ledger and materialized balance | Single
+           posting operation writes both in one tx; reconciliation assert
+          s `sum(ledger delta) == account.balance`; internal accounts net
+           to zero. (ADR-13) |
+
+● Second batch (spec 04 duplicate bullet + the two DATA-MODEL bullets — fixing
+  the now-outdated "each transfer has its own code" rationale to the
+  concurrent/sequential split):
+
+● Update(specs\04-balance-service.md)
+  ⎿  Added 4 lines, removed 3 lines
+      39      transfer is held as a *suspected duplicate* and requires an
+           explicit
+      40      `confirmDuplicate` override. It is a **soft** block (repeat
+          ing an identical
+      41      payment is legitimately valid) and reuses the fingerprint a
+          lready stored on
+      42 -    `IdempotencyKey` — no new state. It layers **atop** OTP, no
+         -t instead of it:                                               
+      43 -    because each pending transfer carries its **own** single-us
+         -e code, OTP prevents                                           
+      44 -    code *replay* but not two *distinct* identical transfers.  
+      42 +    `IdempotencyKey` — no new state. It layers **atop** OTP: th
+         +e user-scoped                                                  
+      43 +    single-active OTP prevents **concurrent** duplicate authori
+         +zations (only one                                              
+      44 +    transfer pending at a time), while this window catches **se
+         +quential** rapid                                               
+      45 +    duplicates (confirm one, then immediately submit an identic
+         +al one within 60s).                                            
+      46    - **Concurrency:** READ COMMITTED + `SELECT ... FOR UPDATE` o
+          n the affected
+      47      account row(s), locked in a **canonical order (by account i
+          d)** to avoid
+      48      deadlocks. Because the account row holds the materialized `
+          balance`, `held`
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 3 lines, removed 1 line
+      226    `PENDING` at initiation and post only on OTP-confirm. Intern
+           al is **hold-less**
+      227    (funds checked at confirm under the account lock); external 
+           places a `Hold` at
+      228    initiation and settles it on confirm. `external_inbound` is 
+           admin/rail-triggered,
+      229 -  not OTP-gated.                                              
+      229 +  not OTP-gated. The OTP is **user-scoped** (`otp:<sub>`) — on
+          +e active per user, so                                         
+      230 +  only one transfer is pending authorization at a time (a seco
+          +nd initiation is                                              
+      231 +  rejected until it clears).                                  
+      232  - Index `idx_tx_account (debit_account_id, created_at)` for `G
+           ET /accounts/:id/transactions`.
+      233  
+      234  **`hold`** — reservation ledger ([ADR-14](../docs/DECISIONS.md
+           #adr-14--holds--settlement)).
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 4 lines, removed 2 lines
+      284    flags a *suspected duplicate*, requiring an explicit `confir
+           mDuplicate` override
+      285    (a **soft** block; identical repeat payments are valid). Reu
+           ses
+      286    `request_fingerprint` + `created_at`; **no new column**. Dis
+           tinct from idempotency:
+      287 -  the key dedups *same key*; this catches *distinct keys, same
+          - request*. Needs an                                           
+      288 -  index on `(owner_id, request_fingerprint, created_at)` for t
+          -he lookup.                                                    
+      287 +  the key dedups *same key*; this catches *distinct keys, same
+          + request* — and                                               
+      288 +  complements the user-scoped OTP, which blocks *concurrent* d
+          +uplicates while this                                          
+      289 +  catches *sequential* ones. Needs an index on `(owner_id, req
+          +uest_fingerprint,                                             
+      290 +  created_at)` for the lookup.                                
+      291  
+      292  ### Open modeling choices (want your call before we lock migra
+           tions)
+      293  
+
+● Now the two macro-rationale docs — ADR-6 (the decision itself) and
+  ARCHITECTURE §4 (prose + sequence diagram):
+
+● Update(docs\DECISIONS.md)
+  ⎿  Added 27 lines, removed 14 lines
+      128  
+      129  ## ADR-6 — App-level transaction OTP with a separate out-of-ba
+           nd app
+      130  
+      131 -**Decision.** Sensitive transfers require a one-time code gene
+          -rated server-side                                             
+      132 -at transaction initiation, **bound to the specific transaction
+          -** (amount +                                                  
+      133 -destination). A separate OTP web app with its own login acts a
+          -s the simulated                                               
+      134 -out-of-band channel and reveals the pending code. Default UX i
+          -s code-entry. OTP is implemented as a                         
+      135 -bounded module inside the balance service (see ADR-11), not a 
+          -standalone service.                                           
+      131 +**Decision.** Sensitive transfers require a one-time code gene
+          +rated server-side at                                          
+      132 +transaction initiation. The code is **user-scoped** (`otp:<sub
+          +>`) with **one active                                         
+      133 +OTP per user at a time**, so a user can authorize only **one t
+          +ransfer at a time**; a                                        
+      134 +new initiation while one is pending is **rejected** until the 
+          +pending one is                                                
+      135 +confirmed, cancelled, or expires. A separate OTP web app with 
+          +its own login acts as                                         
+      136 +the simulated out-of-band channel and reveals the user's singl
+          +e pending code.                                               
+      137 +Default UX is code-entry. OTP is implemented as a bounded modu
+          +le inside the balance                                         
+      138 +service (see ADR-11), not a standalone service.               
+      139  
+      137 -**Why.** Transaction signing (step-up), not just login. Bindin
+          -g prevents replay                                             
+      138 -against a different transfer. A separate authenticated app rea
+          -ds as a true second                                           
+      139 -factor; mocking delivery avoids forcing the evaluator into an 
+          -authenticator app.                                            
+      140 +**Why.** Transaction signing (step-up), not just login. **User
+          +-scoping with a single                                        
+      141 +active code** makes the step-up a real second factor *and* clo
+          +ses a                                                         
+      142 +duplicate-authorization gap: because only one authorization ca
+          +n be in flight per                                            
+      143 +user, a live code always corresponds to that user's single cur
+          +rent pending transfer                                         
+      144 +and cannot be replayed against a different one — the same anti
+          +-replay guarantee the                                         
+      145 +earlier "bound to the specific transaction" model sought, whil
+          +e *additionally*                                              
+      146 +preventing two concurrent duplicate transfers (each of which, 
+          +under per-transaction                                         
+      147 +scoping, would carry its own confirmable code). A separate aut
+          +henticated app reads                                          
+      148 +as a true second factor; mocking delivery avoids forcing the e
+          +valuator into an                                              
+      149 +authenticator app.                                            
+      150  
+      141 -**Rejected.** Showing the code in the same session/page that c
+          -onsumes it                                                    
+      142 -(security theater — not a second factor). Forcing a real TOTP 
+          -app like Authy                                                
+      143 -(evaluator friction). Keycloak per-transaction step-up (ACR/Lo
+          -A) — powerful but                                             
+      144 -fiddly to wire for the test; login stays on Keycloak, transact
+          -ion OTP is                                                    
+      145 -app-level. TOTP for transaction signing (time-based, cannot bi
+          -nd to a specific                                              
+      146 -transaction).                                                 
+      151 +**Rejected.** **Per-transaction OTP scope** (a code bound to e
+          +ach transaction id):                                          
+      152 +permits multiple concurrent pending authorizations, each with 
+          +its own live code, so                                         
+      153 +a double-submit can authorize two duplicate transfers — the ga
+          +p user-scoping closes.                                        
+      154 +Showing the code in the same session/page that consumes it (se
+          +curity theater — not a                                        
+      155 +second factor). Forcing a real TOTP app like Authy (evaluator 
+          +friction). Keycloak                                           
+      156 +per-transaction step-up (ACR/LoA) — powerful but fiddly to wir
+          +e for the test; login                                         
+      157 +stays on Keycloak, transaction OTP is app-level. TOTP for tran
+          +saction signing                                               
+      158 +(time-based; not server-issued per authorization, so it can't 
+          +enforce the                                                   
+      159 +single-active-per-user constraint).                           
+      160  
+      161  ---
+      162  
+
+● Update(docs\ARCHITECTURE.md)
+  ⎿  Added 2 lines, removed 1 line
+      201  
+      202  Login proves *who you are*; a sensitive money movement additio
+           nally requires
+      203  proof *for that specific action*. That is transaction signing,
+            and its value
+      204 -comes from being **out-of-band** and **bound to the transactio
+          -n**.                                                          
+      204 +comes from being **out-of-band** and **user-scoped to one acti
+          +ve authorization at a                                         
+      205 +time**.                                                       
+      206  
+      207  **Design choices:**
+      208  
+
+● Update(docs\ARCHITECTURE.md)
+  ⎿  Added 5 lines, removed 4 lines
+      218    then consumes it. (For the technical test this avoids forcin
+           g the evaluator to
+      219    set up an authenticator app — a deliberate, documented mock.
+           )
+      220  - The code is **generated server-side when the transfer is ini
+           tiated** and is
+      221 -  **bound to that transaction** (amount + destination). The OT
+          -P app *reveals /                                              
+      222 -  delivers* the code for a pending transaction; it never mints
+          - an unbound token.                                            
+      223 -  Binding is what stops a code being replayed to authorize a *
+          -different*                                                    
+      224 -  transfer.                                                   
+      221 +  **user-scoped** — **one active code per user**, so a user ca
+          +n have only one                                               
+      222 +  transfer pending authorization at a time (a second initiatio
+          +n is rejected until it                                        
+      223 +  clears). The OTP app *reveals / delivers* the user's single 
+          +pending code. This                                            
+      224 +  single-active scoping is what stops a code being replayed to
+          + authorize a                                                  
+      225 +  *different* transfer, and additionally prevents two concurre
+          +nt duplicate transfers.                                       
+      226  - **Storage: Redis** — ephemeral, TTL-based, single-use. OTPs 
+           are disposable, so
+      227    Redis's non-durability is a feature here, not a risk.
+      228    - `TTL` 2–5 min for auto-expiry (no cleanup job).
+
+● Update(docs\ARCHITECTURE.md)
+  ⎿  Added 1 line, removed 1 line
+      243      U->>C: Initiate transfer ($500 → ACME)
+      244      C->>B: POST /transfers (Idempotency-Key)
+      245      B->>B: Create PENDING tx
+      246 -    B->>R: SET code — TTL 3m, single-use, bound to tx         
+      246 +    B->>R: SET code — TTL 3m, single-use, user-scoped (otp:sub
+          +)                                                             
+      247      B-->>C: 202 Pending — OTP required
+      248      U->>O: Log in (separate channel)
+      249      O->>B: GET /pending-authorizations
+● Update(docs\ARCHITECTURE.md)
+  ⎿  Added 1 line, removed 1 line
+      251      U->>C: Enter code
+      252      C->>B: POST /transfers/{id}/confirm (code)
+      253      B->>R: GETDEL code (atomic, single-use)
+      254 -    B->>B: Verify code is bound to THIS tx; post ledger entrie
+          -s                                                             
+      254 +    B->>B: Verify code = user's active OTP; post ledger entrie
+          +s                                                             
+      255      B-->>C: Transfer POSTED
+      256  ```
+      257  
+
+● Let me verify no stale transaction-bound OTP references remain anywhere:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● The only remaining hit is the deliberate historical reference inside ADR-6
+  (explaining what the earlier model sought) — not a stale spec. The change is
+  fully propagated.
+
+  OTP is now user-scoped across the whole design
+
+  Corrected the transaction-bound model to user-scoped, single-active in 7 files
+  — spec + macro together, per the working agreement:
+
+  ┌─────────────────────────────┬────────────────────────────────────────────┐
+  │            File             │                What changed                │
+  ├─────────────────────────────┼────────────────────────────────────────────┤
+  │ specs/01-storage.md         │ Redis key-space otp:<txId> → otp:<sub>     │
+  │                             │ (one active per user)                      │
+  ├─────────────────────────────┼────────────────────────────────────────────┤
+  │ infra/redis/README.md       │ Key-space contract table row               │
+  ├─────────────────────────────┼────────────────────────────────────────────┤
+  │                             │ OTP module (user-scoped, one-at-a-time,    │
+  │ specs/04-balance-service.md │ second initiation rejected) + fixed the    │
+  │                             │ duplicate-suppression rationale            │
+  ├─────────────────────────────┼────────────────────────────────────────────┤
+  │ specs/DATA-MODEL.md         │ Transaction-lifecycle + soft-duplicate     │
+  │                             │ bullets                                    │
+  ├─────────────────────────────┼────────────────────────────────────────────┤
+  │ docs/DECISIONS.md           │ ADR-6 decision/why/rejected rewritten      │
+  ├─────────────────────────────┼────────────────────────────────────────────┤
+  │                             │ §4 prose + the sequence diagram (SET code  │
+  │ docs/ARCHITECTURE.md        │ … user-scoped, Verify code = user's active │
+  │                             │  OTP)                                      │
+  ├─────────────────────────────┼────────────────────────────────────────────┤
+  │ docs/THREAT-MODEL.md        │ Replay mitigation → single-active-OTP      │
+  │                             │ argument                                   │
+  └─────────────────────────────┴────────────────────────────────────────────┘
+
+  No schema change — OTP lives in Redis, so nothing in the entity manifests
+  moved. The anti-replay property ADR-6 wanted is preserved (a live code maps to
+  the user's single pending transfer), and the concurrent-duplicate gap is now
+  closed by construction.
+
+  The defense layers now read cleanly:
+  - User-scoped single-active OTP → blocks concurrent duplicates (one
+    authorization in flight per user).
+  - Soft 60s window → catches sequential rapid duplicates (confirm one,
+    immediately submit another).
+  - Idempotency key → retry safety (same key replayed).
+
+  One sub-decision I defaulted — confirm or flip
+
+  For "a second initiation while one is pending," I wrote block (reject until
+  the pending one is confirmed/cancelled/expires) rather than replace (new
+  initiation cancels the prior pending + releases its hold). Block is the safer
+  default — it never silently cancels a pending money movement — but it means a
+  user must clear a pending authorization (or wait out the TTL) before starting
+  another. Say the word if you'd rather have replace.
+
+  Open threads
+
+  1. Block vs. replace (above).
+  2. limit_scope / limit_change naming — still carry "limit" after the
+     UserLimits rename.
+
+  external_inbound OTP is settled (not gated — rail/admin-initiated). Once
+  block-vs-replace and the naming are decided, the design is complete and we can
+  scope the first implementation step. Which way on those two?
+
+✻ Cooked for 6m 33s · done 10:00 PM
+
+❯ yes rename for consistency please. additional precisions on the otp handling: 
+  1) there is no external inbound otp, because the external transaction just    
+  arrives, that is it, the transaction must to have been already approved by    
+  the external banck entity, that is not our problem. on the other hand an      
+  external outbound transaction must be approved via our otp, because this      
+  means that we are in charge of authorizing the user generated transactions    
+  with the otp. clear? 3) a user can generate an otp even if the user doesnt    
+  have any pending for approval for transaction, anyway is harmless, clear?     
+  also again the otp must be bounded to the user, not the transaction, clear?   
+
+● Two things: the consistency rename, and a real simplification to the OTP model
+  based on your precisions. Let me make sure I've got precision #2 right,
+  because it changes what I wrote:
+
+  Saying "a user can generate an OTP even with no pending transaction, and it's 
+  harmless" means OTP generation is decoupled from transaction initiation — the
+  OTP is purely a user-bound code, not something minted per-transfer. That means
+  my earlier "a second initiation is rejected while one is pending" (the
+  block-vs-replace thing) was over-engineering that contradicts your model — I
+  should remove it. The OTP is just: one active user-scoped code, single-use,
+  TTL, generatable on demand. Duplicate transfers are then handled by the soft
+  60s window + idempotency, not by the OTP. Let me find all the spots I need to
+  revise and rename:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Let me also catch the enum names in the balance manifest:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● I have all anchors. Also caught a bug I missed earlier: spec 04's DoD still
+  says "code bound to the tx" — that's now wrong (OTP is user-bound), so I'll
+  fix it too.
+
+  Batch 1 — the consistency renames (limit_scope → user_limits_scope,
+  limit_change → user_limits_change):
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 1 line, removed 1 line
+      158  
+      159      APPROVAL_REQUEST {
+      160          uuid id PK
+      161 -        enum action_type "reversal | limit_change | adjustment
+          -"                                                             
+      161 +        enum action_type "reversal | user_limits_change | adju
+          +stment"                                                       
+      162          jsonb payload "proposed action"
+      163          enum status "PENDING | APPROVED | REJECTED | EXECUTED"
+      164          varchar maker_id
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 1 line, removed 1 line
+      190  | `transaction_status` | `PENDING`, `POSTED`, `FAILED`, `REVER
+           SED` | Lifecycle (spec 04). Reversal is a new compensating tx,
+            not a mutation. |
+      191  | `hold_status` | `PLACED`, `SETTLED`, `RELEASED`, `EXPIRED` |
+            Only `PLACED` counts toward `account.held`. |
+      192  | `payee_status` | `pending`, `active`, `disabled` | Not usabl
+           e as a destination unless `active` **and** past cooling-off. |
+      193 -| `limit_scope` | `global`, `customer` | Customer scope overri
+          -des global. |                                                 
+      193 +| `user_limits_scope` | `global`, `customer` | Customer scope 
+          +overrides global. |                                           
+      194  | `approval_action` | `reversal`, `limit_change`, `adjustment`
+            | Maker-checker gated admin ops ([ADR-8](../docs/DECISIONS.md
+           #adr-8--maker-checker-for-admin-money-operations)). |
+      195  | `approval_status` | `PENDING`, `APPROVED`, `REJECTED`, `EXEC
+           UTED` | Only `APPROVED` → `EXECUTED`. |
+      196  | `idempotency_status` | `in_progress`, `completed` | `in_prog
+           ress` guards a concurrent retry mid-flight. |
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 1 line, removed 1 line
+      191  | `hold_status` | `PLACED`, `SETTLED`, `RELEASED`, `EXPIRED` |
+            Only `PLACED` counts toward `account.held`. |
+      192  | `payee_status` | `pending`, `active`, `disabled` | Not usabl
+           e as a destination unless `active` **and** past cooling-off. |
+      193  | `user_limits_scope` | `global`, `customer` | Customer scope 
+           overrides global. |
+      194 -| `approval_action` | `reversal`, `limit_change`, `adjustment`
+          - | Maker-checker gated admin ops ([ADR-8](../docs/DECISIONS.md
+          -#adr-8--maker-checker-for-admin-money-operations)). |         
+      194 +| `approval_action` | `reversal`, `user_limits_change`, `adjus
+          +tment` | Maker-checker gated admin ops ([ADR-8](../docs/DECISI
+          +ONS.md#adr-8--maker-checker-for-admin-money-operations)). |   
+      195  | `approval_status` | `PENDING`, `APPROVED`, `REJECTED`, `EXEC
+           UTED` | Only `APPROVED` → `EXECUTED`. |
+      196  | `idempotency_status` | `in_progress`, `completed` | `in_prog
+           ress` guards a concurrent retry mid-flight. |
+      197  
+
+● Update(specs\balance-schema.yaml)
+  ⎿  Added 1 line, removed 1 line
+      322        type: uuid
+      323        description: "Primary key."
+      324      action_type:
+      325 -      type: enum(reversal|limit_change|adjustment)            
+      325 +      type: enum(reversal|user_limits_change|adjustment)      
+      326        description: "The kind of admin operation proposed. NOT 
+           NULL."
+      327      payload:
+      328        type: jsonb
+
+● Batch 2 — spec 04 OTP model (remove the block-model, make it
+  decoupled/user-bound/harmless, fix the "bound to the tx" DoD, and correct the
+  duplicate rationale):
+
+● Update(specs\04-balance-service.md)
+  ⎿  Added 9 lines, removed 6 lines
+      73  - **External payees** — enrollment with a **cooling-off period*
+          * before a new payee
+      74    can receive money.
+      75  - **OTP module** (bounded; [ADR-11](../docs/DECISIONS.md#adr-11
+          --service-boundaries--data-ownership))
+      76 -  — at **every transfer initiation (internal and external)** ge
+         -nerate a code that is                                          
+      77 -  **user-scoped** (`otp:<sub>`), **not** transaction-scoped: **
+         -one active OTP per                                             
+      78 -  user**, so a user can have only **one transfer pending author
+         -ization at a time**. A                                         
+      79 -  second initiation while one is pending is **rejected** until 
+         -the pending one is                                             
+      80 -  confirmed, cancelled, or expires (TTL). Store in             
+      81 -  Redis with TTL, single-use via atomic `GETDEL`; verify at con
+         -firm; expose                                                   
+      76 +  — a **user-scoped** one-time code (`otp:<sub>`), **not** tran
+         +saction-scoped: **one                                          
+      77 +  active code per user**, single-use via atomic `GETDEL`, TTL-b
+         +ound. It is the user's                                         
+      78 +  out-of-band second factor for authorizing their **own** trans
+         +fers and is **not**                                            
+      79 +  bound to a transaction: a user may (re)generate their code on
+         + demand, and generating                                        
+      80 +  one with **no pending transfer is harmless** (it sits until u
+         +sed or expires; a new                                          
+      81 +  code supersedes any prior). **Only user-initiated transfers a
+         +re OTP-gated** —                                               
+      82 +  internal and external outbound; **external inbound is not** (
+         +it arrives already                                             
+      83 +  approved by the originating external institution, which is no
+         +t ours to authorize).                                          
+      84 +  Confirm verifies the user's active code and posts their pendi
+         +ng transfer; expose                                            
+      85    `GET /api/pending-authorizations` for the OTP app.
+      86  - **Outbox + relay worker** — write the `OutboxEvent` in the **
+          same DB
+      87    transaction** as the ledger change; a background worker polls
+           with
+
+● Update(specs\04-balance-service.md)
+  ⎿  Added 4 lines, removed 4 lines
+      39      transfer is held as a *suspected duplicate* and requires an
+           explicit
+      40      `confirmDuplicate` override. It is a **soft** block (repeat
+          ing an identical
+      41      payment is legitimately valid) and reuses the fingerprint a
+          lready stored on
+      42 -    `IdempotencyKey` — no new state. It layers **atop** OTP: th
+         -e user-scoped                                                  
+      43 -    single-active OTP prevents **concurrent** duplicate authori
+         -zations (only one                                              
+      44 -    transfer pending at a time), while this window catches **se
+         -quential** rapid                                               
+      45 -    duplicates (confirm one, then immediately submit an identic
+         -al one within 60s).                                            
+      42 +    `IdempotencyKey` — no new state. This is the **duplicate-tr
+         +ansfer control** (the                                          
+      43 +    user-scoped OTP is the second factor, not a duplicate check
+         +): it catches an                                               
+      44 +    identical transfer resubmitted within 60s, whether from a d
+         +ouble-click or a rapid                                         
+      45 +    manual repeat.                                             
+      46    - **Concurrency:** READ COMMITTED + `SELECT ... FOR UPDATE` o
+          n the affected
+      47      account row(s), locked in a **canonical order (by account i
+          d)** to avoid
+      48      deadlocks. Because the account row holds the materialized `
+          balance`, `held`
+
+● Update(specs\04-balance-service.md)
+  ⎿  Added 3 lines, removed 3 lines
+      125  - [ ] Internal transfer works end-to-end; **concurrency test**
+            (N simultaneous
+      126        transfers) proves no double-spend / no overdraft / no mo
+           ney created or lost.
+      127  - [ ] **Idempotency test**: a replayed `Idempotency-Key` moves
+            money once.
+      128 -- [ ] **Every transfer — internal and external outbound — requ
+          -ires OTP confirm**                                            
+      129 -      (code bound to the tx, single-use): internal posts on co
+          -nfirm, external                                               
+      130 -      settles its hold on confirm.                            
+      128 +- [ ] **Every user-initiated transfer — internal and external 
+          +outbound — requires                                           
+      129 +      OTP confirm** (user-scoped, single-use code): internal p
+          +osts on confirm,                                              
+      130 +      external settles its hold on confirm.                   
+      131  - [ ] External outbound **places a hold** at initiation (avail
+           able drops, balance
+      132        unchanged), **settles** it at confirm (hold→SETTLED, bal
+           ance/held updated,
+      133        double-entry posted), and **releases** it on fail/expiry
+            (no ledger entry).
+
+● Batch 3 — DATA-MODEL, ADR-6, and ARCHITECTURE §4 (same decoupled/user-bound
+  model, and strengthen the external-inbound reasoning with your "already
+  approved by the external institution" point):
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 7 lines, removed 6 lines
+      222    the *account being debited* is the caller's ([ADR-3](../docs
+           /DECISIONS.md#adr-3--object-level-authorization-lives-in-the-s
+           ervice)).
+      223  - `external_outbound`: debit = customer, credit = `clearing:ra
+           il-outbound`.
+      224    `external_inbound`: debit = `clearing:rail-inbound`, credit 
+           = customer.
+      225 -- **OTP gates every transfer.** Both `internal` and `external_
+          -outbound` start                                               
+      225 +- **OTP gates user-initiated transfers.** `internal` and `exte
+          +rnal_outbound` start                                          
+      226    `PENDING` at initiation and post only on OTP-confirm. Intern
+           al is **hold-less**
+      227 -  (funds checked at confirm under the account lock); external 
+          -places a `Hold` at                                            
+      228 -  initiation and settles it on confirm. `external_inbound` is 
+          -admin/rail-triggered,                                         
+      229 -  not OTP-gated. The OTP is **user-scoped** (`otp:<sub>`) — on
+          -e active per user, so                                         
+      230 -  only one transfer is pending authorization at a time (a seco
+          -nd initiation is                                              
+      231 -  rejected until it clears).                                  
+      227 +  (funds checked at confirm under the account lock); external 
+          +outbound places a `Hold`                                      
+      228 +  at initiation and settles it on confirm. `external_inbound` 
+          +is **not** OTP-gated — it                                     
+      229 +  arrives already approved by the originating external institu
+          +tion (not ours to                                             
+      230 +  authorize). The OTP is **user-scoped** (`otp:<sub>`) — one a
+          +ctive, single-use,                                            
+      231 +  TTL-bound code per user, generatable on demand (harmless wit
+          +h no pending transfer);                                       
+      232 +  it is the second factor, **not** bound to a transaction.    
+      233  - Index `idx_tx_account (debit_account_id, created_at)` for `G
+           ET /accounts/:id/transactions`.
+      234  
+      235  **`hold`** — reservation ledger ([ADR-14](../docs/DECISIONS.md
+           #adr-14--holds--settlement)).
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 4 lines, removed 4 lines
+      285    flags a *suspected duplicate*, requiring an explicit `confir
+           mDuplicate` override
+      286    (a **soft** block; identical repeat payments are valid). Reu
+           ses
+      287    `request_fingerprint` + `created_at`; **no new column**. Dis
+           tinct from idempotency:
+      288 -  the key dedups *same key*; this catches *distinct keys, same
+          - request* — and                                               
+      289 -  complements the user-scoped OTP, which blocks *concurrent* d
+          -uplicates while this                                          
+      290 -  catches *sequential* ones. Needs an index on `(owner_id, req
+          -uest_fingerprint,                                             
+      291 -  created_at)` for the lookup.                                
+      288 +  the key dedups *same key*; this catches *distinct keys, same
+          + request* (double-click                                       
+      289 +  or rapid repeat) within 60s — it is the duplicate-transfer c
+          +ontrol, while the                                             
+      290 +  user-scoped OTP is the second factor, not a duplicate check.
+          + Needs an index on                                            
+      291 +  `(owner_id, request_fingerprint, created_at)` for the lookup
+          +.                                                             
+      292  
+      293  ### Open modeling choices (want your call before we lock migra
+           tions)
+      294  
+
+● Update(docs\DECISIONS.md)
+  ⎿  Added 27 lines, removed 26 lines
+      128  
+      129  ## ADR-6 — App-level transaction OTP with a separate out-of-ba
+           nd app
+      130  
+      131 -**Decision.** Sensitive transfers require a one-time code gene
+          -rated server-side at                                          
+      132 -transaction initiation. The code is **user-scoped** (`otp:<sub
+          ->`) with **one active                                         
+      133 -OTP per user at a time**, so a user can authorize only **one t
+          -ransfer at a time**; a                                        
+      134 -new initiation while one is pending is **rejected** until the 
+          -pending one is                                                
+      135 -confirmed, cancelled, or expires. A separate OTP web app with 
+          -its own login acts as                                         
+      136 -the simulated out-of-band channel and reveals the user's singl
+          -e pending code.                                               
+      137 -Default UX is code-entry. OTP is implemented as a bounded modu
+          -le inside the balance                                         
+      138 -service (see ADR-11), not a standalone service.               
+      131 +**Decision.** Sensitive transfers require a one-time code that
+          + is **user-scoped**                                           
+      132 +(`otp:<sub>`): **one active code per user**, single-use, TTL-b
+          +ound, and **not** bound                                       
+      133 +to a transaction. It is the user's out-of-band second factor f
+          +or authorizing their                                          
+      134 +own transfers; a user may (re)generate their code on demand, a
+          +nd generating one with                                        
+      135 +no pending transfer is harmless (it sits until used or expires
+          +; a new code supersedes                                       
+      136 +any prior). A separate OTP web app with its own login acts as 
+          +the simulated                                                 
+      137 +out-of-band channel and reveals the user's current code. Defau
+          +lt UX is code-entry.                                          
+      138 +OTP is implemented as a bounded module inside the balance serv
+          +ice (see ADR-11), not a                                       
+      139 +standalone service.                                           
+      140  
+      140 -**Why.** Transaction signing (step-up), not just login. **User
+          --scoping with a single                                        
+      141 -active code** makes the step-up a real second factor *and* clo
+          -ses a                                                         
+      142 -duplicate-authorization gap: because only one authorization ca
+          -n be in flight per                                            
+      143 -user, a live code always corresponds to that user's single cur
+          -rent pending transfer                                         
+      144 -and cannot be replayed against a different one — the same anti
+          --replay guarantee the                                         
+      145 -earlier "bound to the specific transaction" model sought, whil
+          -e *additionally*                                              
+      146 -preventing two concurrent duplicate transfers (each of which, 
+          -under per-transaction                                         
+      147 -scoping, would carry its own confirmable code). A separate aut
+          -henticated app reads                                          
+      148 -as a true second factor; mocking delivery avoids forcing the e
+          -valuator into an                                              
+      149 -authenticator app.                                            
+      141 +**Why.** Transaction signing (step-up), not just login. **User
+          +-scoping** keeps the                                          
+      142 +OTP a genuine second factor while being simpler and more robus
+          +t than per-transaction                                        
+      143 +binding: no code↔transaction coupling to get wrong, no prolife
+          +ration of per-tx keys,                                        
+      144 +and a user holds at most one live code (single-use + TTL, so i
+          +t can't be hoarded or                                         
+      145 +replayed). The code's job is to prove *the user* authorizes a 
+          +confirm; **preventing                                         
+      146 +duplicate transfers is a separate concern** handled by the sof
+          +t fingerprint window +                                        
+      147 +idempotency (spec 04), so OTP stays focused on out-of-band pro
+          +of of the user. A                                             
+      148 +separate authenticated app reads as a true second factor; mock
+          +ing delivery avoids                                           
+      149 +forcing the evaluator into an authenticator app.              
+      150  
+      151  **Rejected.** **Per-transaction OTP scope** (a code bound to e
+           ach transaction id):
+      152 -permits multiple concurrent pending authorizations, each with 
+          -its own live code, so                                         
+      153 -a double-submit can authorize two duplicate transfers — the ga
+          -p user-scoping closes.                                        
+      154 -Showing the code in the same session/page that consumes it (se
+          -curity theater — not a                                        
+      155 -second factor). Forcing a real TOTP app like Authy (evaluator 
+          -friction). Keycloak                                           
+      156 -per-transaction step-up (ACR/LoA) — powerful but fiddly to wir
+          -e for the test; login                                         
+      157 -stays on Keycloak, transaction OTP is app-level. TOTP for tran
+          -saction signing                                               
+      158 -(time-based; not server-issued per authorization, so it can't 
+          -enforce the                                                   
+      159 -single-active-per-user constraint).                           
+      152 +couples the code to a specific transaction and lets a user hol
+          +d multiple concurrent                                         
+      153 +live codes — more moving parts, and it still doesn't stop dupl
+          +icate transfers (that's                                       
+      154 +the fingerprint window + idempotency). User-scoping is simpler
+          + and keeps the OTP's                                          
+      155 +role clean. Showing the code in the same session/page that con
+          +sumes it (security                                            
+      156 +theater — not a second factor). Forcing a real TOTP app like A
+          +uthy (evaluator                                               
+      157 +friction). Keycloak per-transaction step-up (ACR/LoA) — powerf
+          +ul but fiddly to wire                                         
+      158 +for the test; login stays on Keycloak, transaction OTP is app-
+          +level. TOTP for                                               
+      159 +transaction signing (time-based; not server-issued, so it can'
+          +t be user-scoped /                                            
+      160 +single-active the way we want).                               
+      161  
+      162  ---
+      163  
+
+● Update(docs\ARCHITECTURE.md)
+  ⎿  Added 2 lines, removed 2 lines
+      201  
+      202  Login proves *who you are*; a sensitive money movement additio
+           nally requires
+      203  proof *for that specific action*. That is transaction signing,
+            and its value
+      204 -comes from being **out-of-band** and **user-scoped to one acti
+          -ve authorization at a                                         
+      205 -time**.                                                       
+      204 +comes from being **out-of-band** and **user-scoped** (a single
+          + active, single-use                                           
+      205 +code).                                                        
+      206  
+      207  **Design choices:**
+      208  
+
+● Update(docs\ARCHITECTURE.md)
+  ⎿  Added 7 lines, removed 6 lines
+      217    as a real second factor rather than showing a code in the sa
+           me session that
+      218    then consumes it. (For the technical test this avoids forcin
+           g the evaluator to
+      219    set up an authenticator app — a deliberate, documented mock.
+           )
+      220 -- The code is **generated server-side when the transfer is ini
+          -tiated** and is                                               
+      221 -  **user-scoped** — **one active code per user**, so a user ca
+          -n have only one                                               
+      222 -  transfer pending authorization at a time (a second initiatio
+          -n is rejected until it                                        
+      223 -  clears). The OTP app *reveals / delivers* the user's single 
+          -pending code. This                                            
+      224 -  single-active scoping is what stops a code being replayed to
+          - authorize a                                                  
+      225 -  *different* transfer, and additionally prevents two concurre
+          -nt duplicate transfers.                                       
+      220 +- The code is **user-scoped** — **one active code per user**, 
+          +single-use, TTL-bound —                                       
+      221 +  and is the user's out-of-band second factor, **not** bound t
+          +o a transaction. A user                                       
+      222 +  may (re)generate it on demand; generating one with no pendin
+          +g transfer is harmless                                        
+      223 +  (it sits until used or expires). The OTP app *reveals / deli
+          +vers* the user's current                                      
+      224 +  code. Because the code proves *the user* (single-use, TTL, o
+          +ut-of-band), it can't be                                      
+      225 +  hoarded or replayed; preventing duplicate *transfers* is a s
+          +eparate control                                               
+      226 +  (fingerprint window + idempotency), not the OTP's job.      
+      227  - **Storage: Redis** — ephemeral, TTL-based, single-use. OTPs 
+           are disposable, so
+      228    Redis's non-durability is a feature here, not a risk.
+      229    - `TTL` 2–5 min for auto-expiry (no cleanup job).
+
+● Now a final consistency sweep to confirm no stale block-model,
+  transaction-bound, or old-enum references survive:
+
+  Searched for 2 patterns (ctrl+o to expand)
+● Clean — no stale references anywhere. Both changes are fully propagated.
+
+  OTP model — now settled and consistent
+
+  The OTP is a user-bound second factor, decoupled from transactions:
+  - User-scoped (otp:<sub>), one active code per user, single-use, TTL-bound.
+  - Not bound to any transaction — generatable on demand; generating one with no
+    pending transfer is harmless; a new code supersedes the prior.
+  - Gates user-initiated transfers only — internal + external outbound. External
+    inbound is not gated (it arrives already approved by the originating
+    external institution — not ours to authorize).
+  - The block-model I'd invented ("reject a second initiation") is gone — it
+    contradicted your decoupled model. Duplicate transfers are handled purely by
+    the soft 60s fingerprint window + idempotency; OTP just proves it's the
+    user.
+
+  Propagated across 8 files: 01-storage.md, 04-balance-service.md,
+  DATA-MODEL.md, balance-schema.yaml (indirect), infra/redis/README.md,
+  DECISIONS.md (ADR-6), ARCHITECTURE.md (§4 + sequence), THREAT-MODEL.md. No 
+  schema change — OTP lives in Redis.
+
+  Renames done
+
+  limit_scope → user_limits_scope, limit_change → user_limits_change — in
+  DATA-MODEL.md and balance-schema.yaml.
+
+  Design phase is complete
+
+  All open threads are closed:
+  - ✅ OTP scoping (user-bound, decoupled)
+  - ✅ External inbound not OTP-gated
+  - ✅ UserLimits + enum naming consistent
+  - ✅ Query-time analytics, idempotency + soft-duplicate, holds, maker-checker
+    — all locked
+
+  The four artifacts (04-balance-service.md, DATA-MODEL.md, balance-schema.yaml,
+  analytics-schema.yaml) plus the macro docs are mutually consistent.
+
+  Proposed first implementation step
+
+  Per the workflow (one PR per step, sized to review in one pass), I'd make Step
+  1 = the balance-service persistence foundation:
+
+  - Branch balance-persistence-core.
+  - The core money entities from balance-schema.yaml: Account, LedgerEntry,
+    Transaction, Hold — TypeORM entities + one migration, wired into
+    data-source.options.ts (following the existing app_metadata pattern).
+  - Repository interfaces (IAccountRepository, ILedgerRepository, …) per the DI
+    convention (spec 03).
+  - Deliberately excludes transfers/limits/OTP/outbox logic — those are later
+    steps. This step is schema + entities + repos only, so it's small and
+    reviewable.
+  - Then run implementor → test-writer → verification gate → self-reviewer.
+
+  Want me to kick off Step 1 with the implementor, or adjust the slice first
+  (e.g. include UserLimits/ExternalPayee, or split the four entities
+  differently)?
+
+✻ Baked for 5m 41s · done 10:13 PM
+
+❯ the important thing is that an otp can only authorize one transaciton at a    
+  time, because is single use, so no two transactions even milisencods apart    
+  can be authorized by the same otp, clear? also the user should not be able to 
+  generate an otp while one otp is active and unused, the only way to generate  
+  another otp is if there is no active otp, meaning it has expired or has been  
+  used for authorizing a transaction, clear?                                    
+
+● Good — this actually tightens the model, and it corrects something I wrote
+  last turn ("a new code supersedes any prior") to the opposite: generation is
+  blocked while an active code exists, not overwritten. Let me capture both
+  rules precisely:
+
+  1. Single-use is atomic — GETDEL means a code authorizes exactly one
+     transaction; two confirms with the same code, even microseconds apart,
+     cannot both win.
+  2. Generation is singleton-gated — you can generate without a pending transfer
+     (harmless), but not while one is active/unused; the slot frees only on use
+     or TTL expiry. A second generation attempt is rejected.
+
+  Fixing all five spots:
+
+● Update(specs\04-balance-service.md)
+  ⎿  Added 13 lines, removed 10 lines
+      73  - **External payees** — enrollment with a **cooling-off period*
+          * before a new payee
+      74    can receive money.
+      75  - **OTP module** (bounded; [ADR-11](../docs/DECISIONS.md#adr-11
+          --service-boundaries--data-ownership))
+      76 -  — a **user-scoped** one-time code (`otp:<sub>`), **not** tran
+         -saction-scoped: **one                                          
+      77 -  active code per user**, single-use via atomic `GETDEL`, TTL-b
+         -ound. It is the user's                                         
+      78 -  out-of-band second factor for authorizing their **own** trans
+         -fers and is **not**                                            
+      79 -  bound to a transaction: a user may (re)generate their code on
+         - demand, and generating                                        
+      80 -  one with **no pending transfer is harmless** (it sits until u
+         -sed or expires; a new                                          
+      81 -  code supersedes any prior). **Only user-initiated transfers a
+         -re OTP-gated** —                                               
+      82 -  internal and external outbound; **external inbound is not** (
+         -it arrives already                                             
+      83 -  approved by the originating external institution, which is no
+         -t ours to authorize).                                          
+      84 -  Confirm verifies the user's active code and posts their pendi
+         -ng transfer; expose                                            
+      85 -  `GET /api/pending-authorizations` for the OTP app.           
+      76 +  — a **user-scoped** one-time code (`otp:<sub>`), **not** tran
+         +saction-scoped: **at                                           
+      77 +  most one active code per user**, **single-use via atomic `GET
+         +DEL`**, TTL-bound. It is                                       
+      78 +  the user's out-of-band second factor for authorizing their **
+         +own** transfers.                                               
+      79 +  **Single-use is atomic:** a code authorizes **exactly one** t
+         +ransaction — two                                               
+      80 +  confirmations with the same code, even microseconds apart, ca
+         +nnot both succeed                                              
+      81 +  (`GETDEL`: one wins, the other finds no code). **Generation i
+         +s singleton-gated:** a                                         
+      82 +  user may generate a code without a pending transfer (harmless
+         +), but **not while one                                         
+      83 +  is already active** — a second generation is **rejected**; th
+         +e slot frees only when                                         
+      84 +  the active code is **consumed** or its **TTL expires**. **Onl
+         +y user-initiated                                               
+      85 +  transfers are OTP-gated** — internal and external outbound; *
+         +*external inbound is                                           
+      86 +  not** (it arrives already approved by the originating externa
+         +l institution, not ours                                        
+      87 +  to authorize). Confirm verifies the user's active code and po
+         +sts their pending                                              
+      88 +  transfer; expose `GET /api/pending-authorizations` for the OT
+         +P app.                                                         
+      89  - **Outbox + relay worker** — write the `OutboxEvent` in the **
+          same DB
+      90    transaction** as the ledger change; a background worker polls
+           with
+      91    `SELECT ... FOR UPDATE SKIP LOCKED`, `XADD`s to `events:trans
+          actions`, then marks
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 5 lines, removed 3 lines
+      227    (funds checked at confirm under the account lock); external 
+           outbound places a `Hold`
+      228    at initiation and settles it on confirm. `external_inbound` 
+           is **not** OTP-gated — it
+      229    arrives already approved by the originating external institu
+           tion (not ours to
+      230 -  authorize). The OTP is **user-scoped** (`otp:<sub>`) — one a
+          -ctive, single-use,                                            
+      231 -  TTL-bound code per user, generatable on demand (harmless wit
+          -h no pending transfer);                                       
+      232 -  it is the second factor, **not** bound to a transaction.    
+      230 +  authorize). The OTP is **user-scoped** (`otp:<sub>`) — **at 
+          +most one active code per                                      
+      231 +  user**, **single-use (atomic `GETDEL`)**, TTL-bound. Generat
+          +ion is singleton-gated                                        
+      232 +  (a new code is **rejected while one is active**; the slot fr
+          +ees only on use or TTL                                        
+      233 +  expiry), and a code authorizes **exactly one** transfer. It 
+          +is the second factor,                                         
+      234 +  **not** bound to a transaction.                             
+      235  - Index `idx_tx_account (debit_account_id, created_at)` for `G
+           ET /accounts/:id/transactions`.
+      236  
+      237  **`hold`** — reservation ledger ([ADR-14](../docs/DECISIONS.md
+           #adr-14--holds--settlement)).
+
+● Update(docs\DECISIONS.md)
+  ⎿  Added 10 lines, removed 8 lines
+      129  ## ADR-6 — App-level transaction OTP with a separate out-of-ba
+           nd app
+      130  
+      131  **Decision.** Sensitive transfers require a one-time code that
+            is **user-scoped**
+      132 -(`otp:<sub>`): **one active code per user**, single-use, TTL-b
+          -ound, and **not** bound                                       
+      133 -to a transaction. It is the user's out-of-band second factor f
+          -or authorizing their                                          
+      134 -own transfers; a user may (re)generate their code on demand, a
+          -nd generating one with                                        
+      135 -no pending transfer is harmless (it sits until used or expires
+          -; a new code supersedes                                       
+      136 -any prior). A separate OTP web app with its own login acts as 
+          -the simulated                                                 
+      137 -out-of-band channel and reveals the user's current code. Defau
+          -lt UX is code-entry.                                          
+      138 -OTP is implemented as a bounded module inside the balance serv
+          -ice (see ADR-11), not a                                       
+      139 -standalone service.                                           
+      132 +(`otp:<sub>`): **at most one active code per user**, single-us
+          +e (atomic `GETDEL`),                                          
+      133 +TTL-bound, and **not** bound to a transaction. It is the user'
+          +s out-of-band second                                          
+      134 +factor for authorizing their own transfers. **Single-use is at
+          +omic**, so a code                                             
+      135 +authorizes **exactly one** transaction (two confirms with the 
+          +same code cannot both                                         
+      136 +succeed). **Generation is singleton-gated**: a user may genera
+          +te a code without a                                           
+      137 +pending transfer (harmless), but **not while one is already ac
+          +tive** — a second                                             
+      138 +generation is rejected; the slot frees only when the code is c
+          +onsumed or expires. A                                         
+      139 +separate OTP web app with its own login acts as the simulated 
+          +out-of-band channel and                                       
+      140 +reveals the user's current code. Default UX is code-entry. OTP
+          + is implemented as a                                          
+      141 +bounded module inside the balance service (see ADR-11), not a 
+          +standalone service.                                           
+      142  
+      143  **Why.** Transaction signing (step-up), not just login. **User
+           -scoping** keeps the
+      144  OTP a genuine second factor while being simpler and more robus
+           t than per-transaction
+
+● Update(docs\ARCHITECTURE.md)
+  ⎿  Added 10 lines, removed 7 lines
+      217    as a real second factor rather than showing a code in the sa
+           me session that
+      218    then consumes it. (For the technical test this avoids forcin
+           g the evaluator to
+      219    set up an authenticator app — a deliberate, documented mock.
+           )
+      220 -- The code is **user-scoped** — **one active code per user**, 
+          -single-use, TTL-bound —                                       
+      221 -  and is the user's out-of-band second factor, **not** bound t
+          -o a transaction. A user                                       
+      222 -  may (re)generate it on demand; generating one with no pendin
+          -g transfer is harmless                                        
+      223 -  (it sits until used or expires). The OTP app *reveals / deli
+          -vers* the user's current                                      
+      224 -  code. Because the code proves *the user* (single-use, TTL, o
+          -ut-of-band), it can't be                                      
+      225 -  hoarded or replayed; preventing duplicate *transfers* is a s
+          -eparate control                                               
+      226 -  (fingerprint window + idempotency), not the OTP's job.      
+      220 +- The code is **user-scoped** — **at most one active code per 
+          +user**, single-use                                            
+      221 +  (atomic `GETDEL`), TTL-bound — and is the user's out-of-band
+          + second factor, **not**                                       
+      222 +  bound to a transaction. It authorizes **exactly one** transf
+          +er (two confirms with                                         
+      223 +  the same code can't both succeed). Generation is **singleton
+          +-gated**: a user may                                          
+      224 +  generate a code without a pending transfer (harmless), but *
+          +*not while one is                                             
+      225 +  active** — a second generation is rejected; the slot frees o
+          +nly on use or TTL expiry.                                     
+      226 +  The OTP app *reveals / delivers* the user's current code. Be
+          +cause the code proves                                         
+      227 +  *the user* (single-use, TTL, out-of-band), it can't be hoard
+          +ed or replayed;                                               
+      228 +  preventing duplicate *transfers* is a separate control (fing
+          +erprint window +                                              
+      229 +  idempotency), not the OTP's job.                            
+      230  - **Storage: Redis** — ephemeral, TTL-based, single-use. OTPs 
+           are disposable, so
+      231    Redis's non-durability is a feature here, not a risk.
+      232    - `TTL` 2–5 min for auto-expiry (no cleanup job).
+
+● Update(docs\THREAT-MODEL.md)
+  ⎿  Added 1 line, removed 1 line
+      45  | Money created/lost via float rounding | Integer minor units (
+          or fixed `DECIMAL`) + explicit currency. (ADR-4) |
+      46  | Event stream disagrees with the ledger | Transactional outbox
+           (same-tx write) + at-least-once relay + idempotent consumer. (
+          ADR-5) |
+      47  | Relay double-publishes an event (multiple balance-service ins
+          tances) | Claim outbox rows with `SELECT ... FOR UPDATE SKIP LO
+          CKED`; idempotent consumer dedups by `event_id`. (ADR-11) |
+      48 -| OTP code replayed for a different transfer | **User-scoped, s
+         -ingle-active OTP**: one pending authorization per user and a fr
+         -esh code per initiation, so a live code always maps to the user
+         -'s single current transfer and cannot be moved to another. (ADR
+         --6) |                                                          
+      48 +| OTP code replayed for a different transfer | **User-scoped, s
+         +ingle-active, single-use OTP**: at most one live code per user,
+         + atomically consumed on confirm (`GETDEL`), so a code authorize
+         +s exactly one transfer and cannot be reused for another; genera
+         +ting a new code is blocked while one is active. (ADR-6) |      
+      49  | OTP code redeemed twice (race) | Atomic single-use consume (`
+          GETDEL`/Lua) + TTL. (ADR-7) |
+      50  | New payee used to exfiltrate funds immediately | Cooling-off 
+          period before a newly-enrolled external account can receive mon
+          ey. |
+      51  | Silent drift between ledger and materialized balance | Single
+           posting operation writes both in one tx; reconciliation assert
+          s `sum(ledger delta) == account.balance`; internal accounts net
+           to zero. (ADR-13) |
+
+● Let me verify no stale "supersedes" language remains:
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+● Clean — no stale language remains. The OTP model is now fully consistent
+  across spec 04, DATA-MODEL.md, ADR-6, ARCHITECTURE §4, and THREAT-MODEL.
+
+  OTP model — final, locked
+
+  - User-scoped (otp:<sub>), at most one active code per user, not bound to any
+    transaction.
+  - Single-use, atomic (GETDEL) → a code authorizes exactly one transaction; two
+    confirms with the same code, even microseconds apart, cannot both succeed
+    (one wins, the other finds no code).
+  - Generation singleton-gated → you may generate a code with no pending
+    transfer (harmless), but not while one is active; a second generation is
+    rejected. The slot frees only on use or TTL expiry.
+  - Gates user-initiated transfers (internal + external outbound); external 
+    inbound is not gated (arrives pre-approved by the originating institution).
+  - Duplicate transfers are handled separately by the soft 60s fingerprint
+    window + idempotency; OTP is purely the user's second factor.
+
+  No schema change — OTP is Redis-only.
+
+  Design phase complete
+
+  Every OTP nuance is now pinned, all naming is consistent, and the four spec
+  artifacts plus the macro docs (ARCHITECTURE, DECISIONS, THREAT-MODEL) agree.
+  Nothing is left open.
+
+  Ready for Step 1
+
+  As proposed: balance-persistence-core — the four core money entities (Account,
+  LedgerEntry, Transaction, Hold) as TypeORM entities + one migration +
+  repository interfaces, following the existing app_metadata pattern; no
+  transfer/limit/OTP/outbox logic yet, so it stays reviewable in one pass. Then
+  implementor → test-writer → verification gate → self-reviewer → PR.
+
+  Want me to kick off Step 1 now, or adjust the slice first (e.g. fold in
+  UserLimits/ExternalPayee, or narrow it further)?
+
+✻ Worked for 1m 58s · done 10:16 PM
+
+❯ perfect, now the otp makes sense, also another thing is that for simplicity   
+  everything serverside must be stored in utc, but in the client applicaitons   
+  we must show and make the adaptations for showin and oepratind in cst         
+  timezone, clear? the date visualkization must be only an artifact of the      
+  client apps, not on the serverside, makes sense? this should also be added in 
+  the specs                                                                     
+
+● Makes sense — and it's the right call: store UTC everywhere server-side, and
+  treat timezone localization (CST) as purely a presentation concern in the
+  client apps. timestamptz already stores UTC instants, so the backend is
+  aligned; the policy just needs to be explicit. Since it's genuinely
+  cross-cutting (backend + all three SPAs), I'll put the authoritative rule in
+  specs/README.md, then make it concrete in spec 03 (backend), spec 07
+  (frontends), and note it in the manifests + ARCHITECTURE.
+
+  Let me read the exact anchor regions first.
+
+  Searched for 1 pattern, read 4 files (ctrl+o to expand)
+
+● I have all anchors. One precision worth surfacing: "CST" strictly is UTC−6 
+  fixed, but "Central Time" (America/Chicago) observes DST (CDT in summer). I'll
+  write the specs using America/Chicago (DST-aware — the robust choice for
+  display), noting CST — tell me if you literally mean fixed UTC−6 year-round
+  instead.
+
+  Adding the policy — authoritative rule in the spec index, then concrete in
+  backend + frontend specs and the macro:
+
+● Update(specs\README.md)
+  ⎿  Added 5 lines
+      29     seed data loaded. No manual clicking.
+      30  4. **Every spec ends with a Definition of Done** — an observabl
+          e acceptance check,
+      31     so "does the micro fit?" is testable, not a matter of opinio
+          n.
+      32 +5. **Time is UTC server-side; clients localize.** Every service
+         + **stores and serves                                           
+      33 +   time in UTC** (`timestamptz` = UTC instants; APIs emit ISO-8
+         +601 with a `Z`                                                 
+      34 +   offset). All timezone handling — showing and accepting dates
+         + in **CST (Central                                             
+      35 +   Time, IANA `America/Chicago`)** — is a **client-app concern 
+         +only**; no server                                              
+      36 +   component localizes, formats, or assumes a non-UTC zone.    
+      37  
+      38  ## Spec template
+      39  
+
+● Update(specs\03-backend-foundation.md)
+  ⎿  Added 4 lines
+      28    transfers and relay.
+      29  - **Config:** `ConfigModule` with schema validation (zod/joi) —
+           **fail fast** on a
+      30    missing/invalid var at boot.
+      31 +- **Time (UTC):** services **store and serve UTC** — `timestamp
+         +tz` columns hold UTC                                           
+      32 +  instants and API responses emit ISO-8601 with an explicit `Z`
+         + offset. **No**                                                
+      33 +  server-side localization or timezone formatting; timezone dis
+         +play is the client's                                           
+      34 +  job (cross-cutting rule 5 in [`README.md`](./README.md)).    
+      35  - **Identity guards (centralized):**
+      36    - `/api` + `/admin`: read the gateway-injected `X-User-Id` / 
+          `X-Roles`; trust
+      37      **only** those headers (never a body/query id). Reject if a
+          bsent (means the
+
+● Update(specs\07-frontends.md)
+  ⎿  Added 5 lines
+      23    `CLAUDE.md` ([ADR-16](../docs/DECISIONS.md#adr-16--self-conta
+          ined-components-no-shared-code)).
+      24  - **Same-origin APIs:** each app calls its own nginx origin (`/
+          api` or `/admin`),
+      25    so no CORS gymnastics in the browser.
+      26 +- **Timezone / dates:** the server is **UTC-only**; each app co
+         +nverts UTC↔**CST                                               
+      27 +  (Central Time, IANA `America/Chicago`)** at the edges — parse
+         + the ISO-8601 `Z`                                              
+      28 +  timestamps for display and convert any user-entered date back
+         + to UTC before                                                 
+      29 +  sending. Date localization and formatting is an **app artifac
+         +t**; it never leaks                                            
+      30 +  server-side (cross-cutting rule 5).                          
+      31  
+      32  ## The three apps
+      33  
+
+● Update(docs\ARCHITECTURE.md)
+  ⎿  Added 4 lines
+      360  ## 8. Cross-cutting concerns
+      361  
+      362  - **Rate limiting** at both gateways, tighter on auth and mone
+           y endpoints.
+      363 +- **Time & timezone:** the backend is **UTC-only** — every ser
+          +vice stores and serves                                        
+      364 +  UTC (`timestamptz` instants, ISO-8601 `Z`). Localizing to **
+          +CST (Central Time,                                            
+      365 +  `America/Chicago`)** is exclusively a client-app presentatio
+          +n concern; no service                                         
+      366 +  formats or assumes a local zone.                            
+      367  - **Bot/abuse protection:** a **library-based captcha** on the
+            client (a demo
+      368    stub — rate limiting is the real control; a hosted captcha i
+           s the production
+      369    path).
+
+● Now the manifests and DATA-MODEL conventions so the implementor sees it too:
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 2 lines, removed 1 line
+      35    from `ledger_entry` / `hold`.
+      36  - **Conventions from the scaffold:** `snake_case` columns set e
+          xplicitly (no global
+      37    naming strategy), `timestamptz` for time, `synchronize:false`
+           — schema only via
+      38 -  migrations run on boot.                                      
+      38 +  migrations run on boot. **All `timestamptz` values are UTC in
+         +stants** — the server                                          
+      39 +  never localizes; client apps convert to CST for display (cros
+         +s-cutting rule 5).                                             
+      40  
+      41  ### Entity–relationship diagram
+      42  
+
+● Update(specs\balance-schema.yaml)
+  ⎿  Added 2 lines, removed 1 line
+       9  #   - Money is `bigint` MINOR UNITS + a `currency` code. Never 
+          float.
+      10  #   - Columns are snake_case, set explicitly (no global naming 
+          strategy) — matches
+      11  #     the scaffold's app-metadata entity.
+      12 -#   - Time is `timestamptz`. UUID PKs use gen_random_uuid(); `l
+         -edger_entry` and                                               
+      12 +#   - Time is `timestamptz` (UTC instants — server stores/serve
+         +s UTC only; clients                                            
+      13 +#     localize to CST for display). UUID PKs use gen_random_uui
+         +d(); `ledger_entry` and                                        
+      14  #     `audit_log` use `bigint GENERATED ALWAYS AS IDENTITY` for
+           a total order.
+      15  #   - Schema changes ONLY via migrations (synchronize:false), r
+          un on boot.
+      16  #   - There is NO Customer table: `owner_id` is a Keycloak `sub
+          ` (opaque string),
+
+● Update(specs\analytics-schema.yaml)
+  ⎿  Added 1 line
+      16  #   - Analytics OWNS Mongo and never touches Postgres. The stor
+          ed document is
+      17  #     therefore fully self-contained (denormalized) — no cross-
+          store joins.
+      18  #   - Money is `long` (int64) MINOR UNITS, carried verbatim fro
+          m the ledger. Never float.
+      19 +#   - Time is UTC (Mongo Date = UTC; ISO-8601 `Z` from the even
+         +t); clients localize to CST.                                   
+      20  #   - The consumed event contract is the INPUT (documented at t
+          he bottom); it is
+      21  #     duplicated producer/consumer and kept in sync via the spe
+          c (ADR-16), not shared.
+      22  
+
+● Done — the UTC/CST policy is now in 7 places, authoritative rule first, then
+  made concrete everywhere it's consumed:
+
+  ┌────────────────────────────────┬─────────────────────────────────────────┐
+  │              File              │              What it says               │
+  ├────────────────────────────────┼─────────────────────────────────────────┤
+  │                                │ Cross-cutting rule #5 (the              │
+  │ specs/README.md                │ authoritative statement — applies to    │
+  │                                │ every spec)                             │
+  ├────────────────────────────────┼─────────────────────────────────────────┤
+  │                                │ Backend stores & serves UTC             │
+  │ specs/03-backend-foundation.md │ (timestamptz instants, ISO-8601 Z), no  │
+  │                                │ server-side localization                │
+  ├────────────────────────────────┼─────────────────────────────────────────┤
+  │ specs/07-frontends.md          │ Client apps convert UTC↔CST at the      │
+  │                                │ edges; localization is an app artifact  │
+  ├────────────────────────────────┼─────────────────────────────────────────┤
+  │ docs/ARCHITECTURE.md §8        │ Cross-cutting concern (design           │
+  │                                │ rationale)                              │
+  ├────────────────────────────────┼─────────────────────────────────────────┤
+  │ specs/DATA-MODEL.md            │ Conventions: all timestamptz = UTC      │
+  │                                │ instants                                │
+  ├────────────────────────────────┼─────────────────────────────────────────┤
+  │ specs/balance-schema.yaml      │ Header note for the implementor         │
+  ├────────────────────────────────┼─────────────────────────────────────────┤
+  │ specs/analytics-schema.yaml    │ Header note (Mongo Date = UTC)          │
+  └────────────────────────────────┴─────────────────────────────────────────┘
+
+  The rule in one line: server is UTC-only; timezone display/input (CST) lives 
+  exclusively in the client apps. The backend was already aligned (timestamptz
+  stores UTC instants), so this makes the policy explicit rather than changing
+  any storage.
+
+  One thing to confirm: I wrote it as America/Chicago (DST-aware Central Time —
+  CST in winter, CDT in summer), which is the robust choice for correct display.
+  If you literally mean fixed UTC−6 year-round (true "CST", no DST shift), say
+  so and I'll switch the wording.
+
+  ---
+
+  That's the timezone policy locked. The design set is complete and consistent.
+  Whenever you're ready, Step 1 (balance-persistence-core) is teed up — the four
+  core money entities + migration + repo interfaces as one reviewable PR. Want
+  me to start it, or confirm the CST-vs-fixed-UTC−6 point first?
+
+✻ Churned for 2m 17s · done 10:24 PM
+
+❯ mexico city then, that is the timezone                                        
+● Mexico City — got it. That's IANA America/Mexico_City, and conveniently it
+  resolves the DST question I raised: Mexico abolished DST in 2022, so 
+  America/Mexico_City is UTC−6 year-round now (no shifts). Let me find every
+  CST/Central/Chicago reference and switch them.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Updating all references to Mexico City:
+
+● Update(specs\README.md)
+  ⎿  Added 4 lines, removed 3 lines
+      31     so "does the micro fit?" is testable, not a matter of opinio
+          n.
+      32  5. **Time is UTC server-side; clients localize.** Every service
+           **stores and serves
+      33     time in UTC** (`timestamptz` = UTC instants; APIs emit ISO-8
+          601 with a `Z`
+      34 -   offset). All timezone handling — showing and accepting dates
+         - in **CST (Central                                             
+      35 -   Time, IANA `America/Chicago`)** — is a **client-app concern 
+         -only**; no server                                              
+      36 -   component localizes, formats, or assumes a non-UTC zone.    
+      34 +   offset). All timezone handling — showing and accepting dates
+         + in **Mexico City                                              
+      35 +   time (IANA `America/Mexico_City`, UTC−6 with no DST since 20
+         +22)** — is a                                                   
+      36 +   **client-app concern only**; no server component localizes, 
+         +formats, or assumes a                                          
+      37 +   non-UTC zone.                                               
+      38  
+      39  ## Spec template
+      40  
+
+● Update(specs\07-frontends.md)
+  ⎿  Added 2 lines, removed 2 lines
+      23    `CLAUDE.md` ([ADR-16](../docs/DECISIONS.md#adr-16--self-conta
+          ined-components-no-shared-code)).
+      24  - **Same-origin APIs:** each app calls its own nginx origin (`/
+          api` or `/admin`),
+      25    so no CORS gymnastics in the browser.
+      26 -- **Timezone / dates:** the server is **UTC-only**; each app co
+         -nverts UTC↔**CST                                               
+      27 -  (Central Time, IANA `America/Chicago`)** at the edges — parse
+         - the ISO-8601 `Z`                                              
+      26 +- **Timezone / dates:** the server is **UTC-only**; each app co
+         +nverts UTC↔**Mexico                                            
+      27 +  City time (IANA `America/Mexico_City`)** at the edges — parse
+         + the ISO-8601 `Z`                                              
+      28    timestamps for display and convert any user-entered date back
+           to UTC before
+      29    sending. Date localization and formatting is an **app artifac
+          t**; it never leaks
+      30    server-side (cross-cutting rule 5).
+
+● Update(docs\ARCHITECTURE.md)
+  ⎿  Added 3 lines, removed 3 lines
+      361  
+      362  - **Rate limiting** at both gateways, tighter on auth and mone
+           y endpoints.
+      363  - **Time & timezone:** the backend is **UTC-only** — every ser
+           vice stores and serves
+      364 -  UTC (`timestamptz` instants, ISO-8601 `Z`). Localizing to **
+          -CST (Central Time,                                            
+      365 -  `America/Chicago`)** is exclusively a client-app presentatio
+          -n concern; no service                                         
+      366 -  formats or assumes a local zone.                            
+      364 +  UTC (`timestamptz` instants, ISO-8601 `Z`). Localizing to **
+          +Mexico City time                                              
+      365 +  (`America/Mexico_City`)** is exclusively a client-app presen
+          +tation concern; no                                            
+      366 +  service formats or assumes a local zone.                    
+      367  - **Bot/abuse protection:** a **library-based captcha** on the
+            client (a demo
+      368    stub — rate limiting is the real control; a hosted captcha i
+           s the production
+      369    path).
+
+● Update(specs\DATA-MODEL.md)
+  ⎿  Added 2 lines, removed 1 line
+      36  - **Conventions from the scaffold:** `snake_case` columns set e
+          xplicitly (no global
+      37    naming strategy), `timestamptz` for time, `synchronize:false`
+           — schema only via
+      38    migrations run on boot. **All `timestamptz` values are UTC in
+          stants** — the server
+      39 -  never localizes; client apps convert to CST for display (cros
+         -s-cutting rule 5).                                             
+      39 +  never localizes; client apps convert to Mexico City time for 
+         +display (cross-cutting                                         
+      40 +  rule 5).                                                     
+      41  
+      42  ### Entity–relationship diagram
+      43  
+
+● Update(specs\balance-schema.yaml)
+  ⎿  Added 1 line, removed 1 line
+      10  #   - Columns are snake_case, set explicitly (no global naming 
+          strategy) — matches
+      11  #     the scaffold's app-metadata entity.
+      12  #   - Time is `timestamptz` (UTC instants — server stores/serve
+          s UTC only; clients
+      13 -#     localize to CST for display). UUID PKs use gen_random_uui
+         -d(); `ledger_entry` and                                        
+      13 +#     localize to Mexico City time for display). UUID PKs use g
+         +en_random_uuid(); `ledger_entry` and                           
+      14  #     `audit_log` use `bigint GENERATED ALWAYS AS IDENTITY` for
+           a total order.
+      15  #   - Schema changes ONLY via migrations (synchronize:false), r
+          un on boot.
+      16  #   - There is NO Customer table: `owner_id` is a Keycloak `sub
+          ` (opaque string),
+
+● Update(specs\analytics-schema.yaml)
+  ⎿  Added 1 line, removed 1 line
+      16  #   - Analytics OWNS Mongo and never touches Postgres. The stor
+          ed document is
+      17  #     therefore fully self-contained (denormalized) — no cross-
+          store joins.
+      18  #   - Money is `long` (int64) MINOR UNITS, carried verbatim fro
+          m the ledger. Never float.
+      19 -#   - Time is UTC (Mongo Date = UTC; ISO-8601 `Z` from the even
+         -t); clients localize to CST.                                   
+      19 +#   - Time is UTC (Mongo Date = UTC; ISO-8601 `Z` from the even
+         +t); clients localize to Mexico City time.                      
+      20  #   - The consumed event contract is the INPUT (documented at t
+          he bottom); it is
+      21  #     duplicated producer/consumer and kept in sync via the spe
+          c (ADR-16), not shared.
+      22  
+
+● Let me confirm no stale CST/Chicago references remain:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● All set — every reference now reads Mexico City time (America/Mexico_City),
+  across all 7 spots. And this resolves the DST question cleanly: Mexico City is
+  UTC−6 year-round with no DST since 2022, so it's an effectively fixed offset
+  (the IANA zone handles it correctly either way).
+
+  The policy, final:
+  - Server: UTC only (timestamptz instants, ISO-8601 Z) — no localization.
+  - Client apps: convert UTC↔America/Mexico_City at the edges for display/input.
+
+  ---
+
+  The design set is now complete and internally consistent — entities, analytics
+  collections, OTP model, idempotency + soft-duplicate, holds, maker-checker,
+  timezone policy, naming. Nothing open.
+
+  Step 1 (balance-persistence-core) is ready to start: the four core money
+  entities (Account, LedgerEntry, Transaction, Hold) + one migration +
+  repository interfaces, following the existing app_metadata pattern — sized to
+  review in one pass, no transfer/OTP/outbox logic yet. Want me to kick it off
+  (implementor → test-writer → gate → self-reviewer), or refine the slice first?
+
+✻ Worked for 47s · done 10:25 PM
