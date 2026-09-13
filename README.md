@@ -11,12 +11,19 @@ derived analytics read model, all orchestrated with Docker Compose.
 
 ---
 
-## Run the demo (public plane)
+## Run the demo
 
-This is the **public-plane** demo: the customer SPA + the out-of-band OTP SPA, the
-identity provider, the gateway, and the balance service — proving a full
-**transfer-with-OTP** from the browser. (The admin plane — the admin SPA and internal
-front door `:8081` — is deferred; see the scope note below.)
+A clean `docker compose up` brings up the **whole system** — both planes:
+
+- **Customer plane** — `http://localhost:8080`: the customer SPA + the out-of-band OTP
+  SPA, proving a full **transfer-with-OTP** from the browser.
+- **Admin plane** — `http://localhost:8081`: the admin SPA (the internal front door), for
+  the **maker-checker reversal**, account freeze/unfreeze, limits, the audit trail, and the
+  analytics dashboard.
+
+Both sit over the identity provider, the two gateways, the balance service, and the
+analytics read model. The logins and seeded accounts for each are listed in
+[step 4](#seeded-logins--accounts).
 
 ### Prerequisites
 
@@ -54,8 +61,9 @@ services + two Vite SPAs), so it takes several minutes. It is up when every serv
 **healthy**: datastores → Keycloak (realm imported) → balance-service (migrations run on
 boot) → public-Kong → the SPAs → public-nginx.
 
-Host-published surfaces this pass: **`:8080`** (public-nginx, the front door) and
-**`:8082`** (Keycloak, for the login redirect). Nothing else is published.
+Host-published surfaces: **`:8080`** (public-nginx — the customer front door),
+**`:8081`** (internal-nginx — the admin front door), and **`:8082`** (Keycloak, for the
+login redirect). Nothing else is published.
 
 ### 3. Load the demo data (idempotent seed)
 
@@ -91,6 +99,46 @@ by this step). It is **idempotent**: re-running it changes nothing.
 5. **Confirm.** Back in the first tab, enter the code and *Confirm transfer*. The transfer
    settles and the source balance drops by exactly the amount.
 
+#### Seeded logins & accounts
+
+A clean `docker compose up` + the seed load **11 customers / 17 MXN accounts** plus
+**2 admins**. Every login below comes from the committed
+`tools/keycloak/realm-export.json` (local demo only — `temporary: false`); full
+per-customer detail (ids, sub alignment) lives in
+[`tools/seed/docs/README.md`](tools/seed/docs/README.md).
+
+**Customers** — realm role `customer`, log in at **http://localhost:8080**:
+
+| Username | Password | Primary account | Balance (MXN) | Extra accounts (MXN) |
+|---|---|---|---|---|
+| `demo-customer` | `demo-customer-pw` | `1000000001` | 1,000,000.00 | — |
+| `demo-customer-2` | `demo-customer-2-pw` | `1000000003` | 200,000.00 | `1000000012` (50,000.00), `1000000013` (25,000.00) |
+| `demo-customer-3` | `demo-customer-3-pw` | `1000000004` | 300,000.00 | `1000000014` (50,000.00) |
+| `demo-customer-4` | `demo-customer-4-pw` | `1000000005` | 400,000.00 | `1000000015` (50,000.00), `1000000016` (25,000.00) |
+| `demo-customer-5` | `demo-customer-5-pw` | `1000000006` | 500,000.00 | `1000000017` (50,000.00) |
+| `demo-customer-6` | `demo-customer-6-pw` | `1000000007` | 600,000.00 | — |
+| `demo-customer-7` | `demo-customer-7-pw` | `1000000008` | 700,000.00 | — |
+| `demo-customer-8` | `demo-customer-8-pw` | `1000000009` | 800,000.00 | — |
+| `demo-customer-9` | `demo-customer-9-pw` | `1000000010` | 900,000.00 | — |
+| `demo-customer-10` | `demo-customer-10-pw` | `1000000011` | 1,000,000.00 | — |
+
+**No-login payee** — no Keycloak user; exists only as a confirmation-of-payee target:
+**Maria Gonzalez**, account `1000000002`, **500,000.00 MXN** (this is "Customer B" above).
+
+**Admins** — realm role `admin`, log in at the **admin console http://localhost:8081**.
+They own **no** customer accounts; they act on the admin surface (reversals, account
+freeze/unfreeze, limits, audit, analytics):
+
+| Username | Password | Demo role |
+|---|---|---|
+| `demo-admin` | `demo-admin-pw` | maker — proposes a reversal, freezes/unfreezes accounts, edits limits |
+| `demo-admin-2` | `demo-admin-2-pw` | checker — the four-eyes approver (must differ from the maker) |
+
+> The two admins exist so the **maker-checker reversal** can be demonstrated: four-eyes
+> requires the approver to differ from the proposer, so one admin proposes and the other
+> approves. Total seeded accounts = 11 primaries (`1000000001`–`1000000011`) + 6 extras
+> (`1000000012`–`1000000017`) = **17**.
+
 ### 5. Tear down
 
 ```bash
@@ -106,7 +154,8 @@ A clean, repeatable re-run is `down -v` → step 2 → step 3 (migrations no-op,
 
 A one-command harness brings the stack up all-healthy, seeds, installs a browser, and runs
 the client **transfer-with-OTP** Playwright e2e against the real chain (driving the real
-otp-app in a second browser context), then tears down:
+otp-app in a second browser context) **plus the admin plane on `:8081`** — the whoami
+landing, the read screens, and the **maker-checker reversal + audit** — then tears down:
 
 ```bash
 bash tests/e2e-fullrun/run.sh          # full run; tears down at the end
@@ -121,12 +170,16 @@ alongside it under [`tests/`](tests/) (`macro`, `storage`, `keycloak`, `transpor
 
 ---
 
-## Scope note — this pass is the public plane only
+## Scope note
 
-The admin plane is deferred: the **admin SPA is not built** and the **internal transport
-edge** (`internal-nginx` / `:8081`, `internal-kong`) is not in this compose graph, so the
-**admin maker-checker reversal from the admin app** and the **`:8081`** front door are out
-of this pass. They remain the eventual target. This pass delivers the public plane end to
-end: the client + otp SPAs behind `public-nginx`, the seed, and a clean-machine
-`docker compose up --build` proving the **transfer-with-OTP** flow. See
-[`specs/08-build-and-serve.md`](specs/08-build-and-serve.md) §"Full run".
+A clean `docker compose up` brings up **both planes** — the public edge (`public-nginx` /
+`:8080`, the client + otp SPAs) **and** the internal edge (`internal-nginx` / `:8081`,
+`internal-kong`, the admin SPA) — so the customer **transfer-with-OTP** and the admin
+**maker-checker reversal** both run end to end on one machine.
+
+What the **seed** does _not_ create: external (off-platform) payees. The demo dataset is
+the customers + their internal MXN accounts only, so the **external-rail outbound** flow
+needs a payee enrolled by hand; the automated e2e therefore exercises the internal
+transfer-with-OTP (the identical out-of-band OTP chain). See
+[`specs/08-build-and-serve.md`](specs/08-build-and-serve.md) §"Full run" and
+[`tests/e2e-fullrun/README.md`](tests/e2e-fullrun/README.md).
