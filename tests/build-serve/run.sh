@@ -11,7 +11,7 @@
 # Usage:
 #   ./run.sh            # static then runtime (default)
 #   ./run.sh static     # stack-free checks only (Checks 1-5)
-#   ./run.sh runtime    # live-edge checks only (R1-R7)
+#   ./run.sh runtime    # live-edge checks only (R1-R9)
 #
 # Runtime bring-up:
 #   - If the edge is ALREADY reachable at http://localhost:${PUBLIC_HTTP_PORT}

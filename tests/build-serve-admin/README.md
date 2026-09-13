@@ -40,7 +40,7 @@ invented.
 ```bash
 bash tests/build-serve-admin/run.sh            # static then runtime (default = "all")
 bash tests/build-serve-admin/run.sh static     # stack-free checks only (Checks 1-4)
-bash tests/build-serve-admin/run.sh runtime    # live-edge checks only (R1-R5)
+bash tests/build-serve-admin/run.sh runtime    # live-edge checks only (R1-R6)
 ```
 
 - Written for **POSIX bash** (Git Bash on Windows). Not PowerShell.
@@ -90,6 +90,7 @@ tears down a stack it did not create.
 | R2 | `GET /accounts` (deep link) → **200**, the admin index (**shell only**) | "Each SPA image owns its own `try_files … /index.html` history fallback" — a deep link survives a reload. Asserts the shell, **not** that the accounts screen's data loads (that endpoint does not exist yet). |
 | R3 | no-token `GET /balance/admin/whoami` is **not** a **200 SPA index** — a **401** with the full internal edge (Kong), a **502** with the light self-up | The sharpest routing check: the `/` catch-all must **not** shadow `/balance/admin/*`. Catches a catch-all that swallows gateway traffic. |
 | R4 | a **real demo-admin bearer** → `GET /balance/admin/whoami` → **200** with `userId == token sub` and `roles` containing `admin` | The Pass-2 **proof**: the demo-admin login reaches balance-service through `internal-nginx → internal-kong` (JWT verified, admin gate, `/balance` stripped, identity injected). **FAILs** on a **401/403** for a valid admin (the edge rejects an admin) or a wrong echoed identity. **SKIPs** on a light bring-up (502) or when a token can't be minted (offline / no `*.localtest.me` DNS). |
+| R6 | the **admin** index's linked stylesheet loads **200**, carries **no literal `@tailwind`**, and embeds the theme accent `#1db954` | the admin-app Docker build actually **ran Tailwind/PostCSS**. Fails if the build stage omits `postcss.config.js`/`tailwind.config.js` and ships `index.css` unprocessed → the admin app renders **unstyled**. (The `css:false` vitest suites cannot catch this.) Runs against the light self-up too. |
 
 ### How "is this a SPA page?" is decided
 
