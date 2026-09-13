@@ -1,0 +1,1211 @@
+ ▐▛███▛█   Claude Code v2.1.267
+▝▜██████▀  Opus 4.8 · Claude Max
+  ▝▝ ▝▝    ~\Documents\personal-projects\supercool-finances\.claude\worktre…
+
+
+❯ in the current state of the @services/balance-service\ and                    
+  @services/analytics-server\   we can start working on the spec                
+  @specs/06-transport.md setting up the transport for both servers, clear?      
+  makes sense?                                                                  
+  ⎿  Listed directory services\balance-service\
+  ⎿  Listed directory services\analytics-server\
+  ⎿  Read specs\06-transport.md (61 lines)
+
+● Good question — but before I say "yes, let's go," let me verify the actual
+  state against what spec 06 depends on. Spec 06 explicitly depends on 02 
+  (keycloak), 04 (balance-service), and 05 (analytics-server), and the memory
+  index tells me spec 04's last step (admin, step 8) is still in progress. So
+  "makes sense" hinges on whether the dependencies are actually in place. Let me
+  check.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Compose already has the network split (edge-public, edge-internal, app-public,
+  app-internal, data) but no nginx/kong services yet — consistent with edges
+  being spec 06. Now the two things that actually gate spec 06: the identity 
+  guard (spec 03 — the thing that consumes Kong's X-User-Id/X-Roles) and whether
+  analytics-server (spec 05) is actually built out. Let me check both.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Analytics-server looks thin — admin/internal controllers exist but I see no
+  stream-consumer module, no Mongo read-model entities, no reporting service.
+  Let me confirm what those controllers actually are (real reporting vs. stubs)
+  and read spec 05's Definition of Done to know what "done" means for it.
+
+  Read 3 files (ctrl+o to expand)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ yes exactly spec 5 hasnt been built but it will soon enough, anyway is not    
+  blocker because we already know the shape of the transport                    
+
+● Agreed — and to be precise about why it's not a blocker: spec 06 is transport 
+  config (nginx + Kong in infra/, wired into compose). The /admin route just
+  needs to resolve to analytics-server and prove identity injection — and
+  analytics already has the GET /admin/whoami scaffolding probe from spec 03,
+  which is exactly enough to prove the route + role gate + header injection
+  end-to-end. The real reporting API landing later in spec 05 doesn't change any
+  Kong/nginx config. Same story for balance's /admin (it has its own whoami
+  probe, and the in-flight balance-admin-single-actor branch won't conflict
+  since spec 06 touches no service src/).
+
+  Let me confirm the one true hard dependency — Keycloak/JWKS (spec 02) — is
+  actually in place, since public-kong's jwt plugin is JWKS-only.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Confirmed — the real dependencies for transport + the vertical slice are all
+  in place:
+
+  - Keycloak (spec 02) ✓ — supercool realm export exists with public clients +
+    standard flow, so JWKS is available for Kong's jwt plugin.
+  - Identity guard (spec 03) ✓ — both services have gateway-identity.guard.ts +
+    X-Service-Token service guard, and both expose GET /admin/whoami probes that
+    echo the injected identity. That's exactly the target the Kong routes need
+    to prove header injection, role gating, and the strip.
+
+  So spec 05 being a stub is genuinely not a blocker. Good to go.
+
+  How I'd decompose spec 06 (as orchestrator — one PR per step)
+
+  Step 1 — Public edge + vertical slice. infra/nginx-public/ +
+  infra/kong-public/kong.yml wired into compose (edge-public + app-public).
+  Public-kong: /api/* → balance-service only, default-deny; jwt (JWKS-only,
+  checks exp/iss/aud), acl (require customer), rate-limiting, identity injection
+  (sub→X-User-Id, roles→X-Roles) + strip client-supplied headers, CORS.
+  - Closes DoD: valid customer token → /api reaches balance with X-User-Id;
+    missing/invalid → 401; client-supplied X-User-Id stripped; rate limiting;
+    vertical slice green.
+
+  Step 2 — Internal edge. infra/nginx-internal/ + infra/kong-internal/kong.yml
+  (edge-internal + app-internal). Routes /admin/* → balance-service and
+  analytics-server, require admin, same inject+strip, default-deny, never
+  /internal/*.
+  - Closes DoD: customer→/admin 403; admin→/admin works (both upstreams via
+    their whoami probes); /internal/* not routable; identity strip on this edge
+    too.
+
+  Two reviewable PRs. Each runs implementor → gate → self-reviewer per the
+  working agreement. Neither touches service src/, so no conflict with the
+  in-flight balance-admin-single-actor branch.
+
+  One micro-risk I'll flag now, resolve at implementation: OSS Kong in DB-less
+  mode has no consumers, so the classic acl-plugin-by-consumer-group pattern
+  doesn't directly apply to JWKS-only validation. The role gate will likely need
+  role assertion off the token claim (e.g. a pre-function/serverless plugin
+  reading realm roles) rather than the stock acl plugin. If that resists
+  cleanly, per methodology I'll come back with ≤3 macro-derived options rather
+  than hacking around it.
+
+  Before I hand Step 1 to the implementor, one open question from the spec is
+  yours to settle:
+
+● User answered Claude's questions:
+  ⎿  · Spec 06's open question: TLS at the public edge for the demo. Which 
+     approach for public-nginx? → Plain HTTP on localhost
+
+● Locked: plain HTTP on localhost — public-nginx serves + proxies /api/* →
+  public-kong over HTTP on :8080, no cert machinery. Clean path to add
+  self-signed later if the frontends ever need it, but nothing in spec 06's DoD
+  depends on TLS.
+
+  That resolves the spec's only open question. I'll record it (and the
+  DB-less/acl note) in 06-transport.md as part of Step 1's PR rather than
+  committing to main directly, per the git conventions.
+
+  Plan of record:
+
+  Step: 1
+  Branch: transport-public-edge
+  Delivers: public-nginx (HTTP :8080) + public-kong /api→balance, JWT/JWKS +
+  role
+  + rate-limit + inject/strip + CORS
+  DoD closed: customer→/api w/ X-User-Id; 401; header strip; rate-limit;
+  vertical
+   slice
+  ────────────────────────────────────────
+  Step: 2
+  Branch: transport-internal-edge
+  Delivers: internal-nginx (:8081) + internal-kong /admin→balance & analytics,
+  require admin, inject/strip, default-deny
+  DoD closed: customer→/admin 403; admin→/admin OK; /internal unroutable
+
+  I'm ready to kick off Step 1 — create transport-public-edge and hand it to the
+  implementor (implementor + test-writer in parallel → verification gate →
+  self-review → PR), following the pipeline in the working agreement.
+
+  Say go and I'll start, or tell me if you'd rather split it differently (e.g.
+  nginx and kong as separate PRs).
+
+✻ Sautéed for 2m 20s · done 1:42 PM
+
+❯ start                                                                         
+
+● On it. Setting up Step 1: creating the branch and gathering the exact
+  integration facts both agents will need (compose topology, balance's route
+  prefix/port, the precise header contract, and the realm's iss/aud/roles claim
+  shape) so their briefs are accurate.
+
+  Read 3 files, ran 1 shell command (ctrl+o to expand)
+
+● Strong grounding now. The compose header even pre-declares the step-4 wiring
+  (public-kong → edge-public+app-public, public-nginx → edge-public host :8080).
+  Two more facts the JWT plugin config hinges on — the realm's roles-claim
+  shape and aud/issuer — plus the reserved edge env vars:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Before I hand this to the implementor, my earlier micro-risk just turned into
+  a real fork I need your call on — per the working agreement I escalate this
+  rather than let the implementor pick silently.
+
+  The misfit: Spec 06 says public-kong uses the jwt plugin, JWKS-only. But the
+  stock OSS Kong jwt plugin does not do JWKS/JWKS-URI discovery — it verifies
+  against pre-registered consumer credentials. Live JWKS discovery lives in the
+  openid-connect plugin, which is Kong Enterprise/Konnect only. Likewise the
+  stock acl plugin keys off consumer groups, which don't exist under pure JWT
+  validation in DB-less mode. So "JWKS-only + require customer" as literally
+  written isn't buildable on the free image. Three macro-derived ways to resolve
+  it:
+
+● User answered Claude's questions:
+  ⎿  · public-kong JWT validation on OSS Kong (DB-less) — how do we realize the 
+     spec's 'JWKS-only + require customer role'? → Custom image + jwt-keycloak 
+     plugin
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ forgot to mention, please do this using a worktree please from the latest     
+  version of main                                                               
+
+● Good call — let me redo this properly in a dedicated worktree off the latest
+  main. First I'll undo the branch I just made on the main working tree, refresh
+  main, and load the worktree tool.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● main is exactly level with origin/main — latest. The default worktree base
+  (fresh) branches from origin/main, which is exactly what you want. Creating
+  the worktree now:
+
+● Creating worktree(transport-public-edge)
+  ⎿  Switched to worktree on branch worktree-transport-public-edge
+     C:\Users\rd-crow-shadow\Documents\personal-projects\supercool-finances
+     \.claude\worktrees\transport-public-edge
+
+● In the worktree now (branch worktree-transport-public-edge, off latest
+  origin/main). Two last contract facts the agents will need — the balance /api
+  probe path, and whether the realm lets a test mint a customer token
+  automatically (direct-access grant + a seeded user), plus the exact aud value:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Two constraints just surfaced that shape both briefs:
+
+  - directAccessGrantsEnabled: false on all three clients — deliberate (password
+    grant is a credential-exposure surface). So tokens come only via the
+    auth-code flow; an automated test can't just password-grant a token. Seeded
+    users exist: demo-customer (customer role) and demo-admin (admin).
+  - aud = supercool-api, iss = 
+    http://keycloak.localtest.me:8082/realms/supercool, roles under
+    realm_access.roles, vertical-slice target is GET /api/whoami (echoes
+    {userId, roles}).
+
+  I have everything I need. Kicking off the Step 1 pipeline — implementor and
+  test-writer in parallel per the working agreement, both sharing this worktree
+  with disjoint file ownership.
+
+● 2 background agents launched (↓ to manage)
+   ├ implementor (Implement public edge (nginx + kong))
+   └ test-writer (Write tests for public edge slice)
+● Both agents are now running in the background against the shared worktree:
+
+  - Implementor — building the public edge: infra/kong-public/ (custom Kong
+    image + pinned jwt-keycloak plugin, DB-less kong.yml, JWKS validation of
+    iss/aud=supercool-api/exp + customer role, X-User-Id/X-Roles injection with
+    client-header strip, rate-limiting, CORS), infra/nginx-public/ (HTTP :8080 →
+    /api reverse-proxy), and the docker-compose.yml + .env.example +
+    specs/06-transport.md updates. Scoped to the public plane only.
+  - Test-writer — writing the DoD + vertical-slice suite from the spec: valid
+    demo-customer token → /api/whoami 200 with injected identity, 401 on
+    missing/invalid token, the anti-spoof header-strip proof, rate-limit 429,
+    default-deny, and config-lint checks — working around the disabled
+    direct-grant with an auth-code-flow token helper.
+
+  They have disjoint file ownership (implementor owns infra/compose/spec;
+  test-writer owns tests/), so they won't collide.
+
+  Next in the pipeline: once both report done, I run the mechanical verification
+  gate (docker compose config, Kong config parse, suite runs), and only if
+  that's green do I launch the self-reviewer over code + tests together. I'll
+  surface anything that needs your call — especially if Docker isn't available
+  in this environment to run the live-stack tests, or if either agent hits a
+  macro misfit and escalates with options.
+
+  I won't poll — I'll report back when the notifications land. Nothing needed
+  from you right now.
+
+✻ Crunched for 4m 37s · done 2:47 PM
+
+● Agent "Write tests for public edge slice" finished · 21m 25s
+
+● Test-writer is done; implementor is still running — I need both before the
+  gate, so I'll hold. Quick read on what came back:
+
+  Test suite landed at tests/transport/ as a bash e2e suite — it correctly
+  picked up an existing tests/{macro,keycloak,storage}/ convention in the repo
+  (good; that's the right home). Token minting uses a headless auth-code + PKCE
+  flow reusing the proven tests/keycloak choreography, respecting the disabled
+  direct-grant. It reports verifying the money-safety assertions actually fail
+  on a wrong id / spoofed-id leak / X-Roles escalation / header-only bypass —
+  i.e. real catching power, not just green.
+
+  Two flags it raised, and where they stand:
+
+  1. acl (require customer) vs jwt-keycloak realm_roles — this is already 
+     resolved: you chose Option A (custom image + jwt-keycloak), which
+     explicitly replaces stock jwt+acl. So the mechanism divergence is
+     authorized, and I instructed the implementor to update the spec 06 wording
+     to match. The suite proves the customer gate behaviorally (a valid
+     non-customer token is rejected at /api) rather than hard-coding either
+     mechanism — which is the right call. No new decision needed from you.
+  2. Static checks 1–2 currently FAIL only because public-nginx/public-kong
+     aren't in compose yet — that's the implementor's in-flight work; they'll
+     flip green once it lands under the agreed service names.
+
+  One honest limitation it flagged: a genuinely-expired token can't be minted
+  headlessly without waiting out the ~5-min lifespan, so that exact path is an
+  opt-in slow check (TRANSPORT_TEST_EXPIRY=1); the always-on
+  malformed/tampered-signature cases already exercise the signature/exp
+  rejection path. That's a sound tradeoff, not a hole.
+
+  Waiting on the implementor now — I'll run the verification gate the moment it
+  reports done.
+
+✻ Sautéed for 23s · done 3:09 PM
+
+● Agent "Implement public edge (nginx + kong)" finished · 29m 26s
+
+● Both agents are done, and the build/parse/lint checks the implementor ran are
+  green (docker build, kong config parse, nginx -t, docker compose config, plus
+  functional 401/404/strip probes). But the implementor hit a genuine
+  macro-touching snag and explicitly escalated it for your ruling — so per the
+  working agreement I'm stopping here rather than running the self-review,
+  because the answer could change the implementation.
+
+  The snag: the only published kong-plugin-jwt-keycloak rock (v1.1.0) still
+  calls BasePlugin:extend(), which Kong 3.0 removed — so it only loads on Kong 
+  2.8.x, which is old/effectively unsupported. The implementor pinned Kong to
+  2.8.5 to keep the mandated plugin unmodified and fully reproducible (verified
+  working: all 5 plugins load, allowed_iss resolves, strip-before-inject
+  ordering confirmed), but flagged the EOL base for your awareness. Everything
+  else it noted is already settled: the acl→jwt-keycloak realm_roles mechanism
+  is your Option-A choice (spec updated), and issuer/aud are hardcoded literals
+  because DB-less Kong doesn't interpolate env (documented, no new vars).
+
+  This is exactly a "developer has the final word" call — a money-safety gateway
+  pinned to an EOL version. Your ruling:
+
+● User answered Claude's questions:
+  ⎿  · The mandated jwt-keycloak plugin only loads on Kong 2.8.x (its published 
+     rock predates Kong 3.0's BasePlugin removal). How do we handle the gateway 
+     version? → Modern Kong 3.x + JWKS in a pre-function
+
+● Decision registered: modern Kong 3.x + JWKS verification in a pre-function,
+  dropping jwt-keycloak. That's a material rework of the Kong layer (the nginx
+  config, compose wiring, and spec doc mostly carry over). The test-writer's
+  behavioral checks are mechanism-agnostic so they still hold; only its static
+  "config-intent" check will need reconciling to the new shape afterward.
+
+  I'll resume the same implementor (its context — the LuaRocks mechanics, header
+  contract, plugin ordering — is intact) rather than start fresh. Loading the
+  tool to message it:
+
+● Now sending the rework brief to the implementor:
+  ⎿  Resuming agent a66d169
+
+● Implementor resumed and reworking the Kong layer to modern 3.x + JWKS
+  pre-function, with a hard emphasis on the security-critical parts: fail-closed
+  on every path, strip-inbound-first, RS256-only (alg-confusion defense), exact
+  iss/aud/exp checks, customer role gate (401 vs 403), and no hand-rolled
+  crypto for the JWK→key conversion (escalate instead).
+
+  Where the pipeline stands:
+  - ✅ Test suite written (behavioral checks are mechanism-agnostic, so they
+    survive this change unchanged)
+  - 🔄 Implementor reworking Kong per your ruling
+  - ⏳ Then: reconcile the test-writer's one static config-intent check to the
+    new pre-function shape → verification gate → self-review → PR
+
+  I'll report back when the implementor finishes. Nothing needed from you.
+
+✻ Worked for 2m 55s · done 3:49 PM
+
+● Agent "Implement public edge (nginx + kong)" finished · 24m 9s
+
+● Implementor's rework is in and heavily validated — stock Kong 3.9.0 (no custom
+  image now), JWKS verification in a pre-function built on vetted crypto
+  (lua-resty-openssl + Kong's core jwt_parser), fail-closed on every path, alg
+  fixed to RSA-SHA256 (structurally immune to alg-confusion), and it even
+  caught/fixed a real kong.cache 500 bug during self-testing. Its live probes
+  cover the money-safety cases: anti-spoof strip, forged-signature → 401,
+  wrong-role → 403, expired/wrong-aud → 401, unknown-kid → 401 (no 5xx).
+
+  Because the validation mechanism changed completely (pre-function, not
+  request-transformer+jwt-keycloak), the test-writer's one static config-intent 
+  check needs to reconcile to the new shape — its behavioral/runtime checks are
+  black-box and unaffected. Resuming the test-writer to align that before I run
+  the gate:
+  ⎿  Resuming agent af54252
+
+● Test-writer resumed to align its static config-intent check with the new
+  pre-function shape (behavioral/runtime checks unchanged) and confirm the
+  compose-wiring checks now pass.
+
+  Pipeline status:
+  - ✅ Implementor — Kong reworked to 3.9.0 + JWKS pre-function, validated
+  - 🔄 Test-writer — reconciling the one static check to the new mechanism
+  - ⏳ Then: verification gate (static suite + attempt the live vertical slice,
+    since Docker's available here) → self-review over code+tests → PR
+
+  I'll report back when it's done.
+
+✻ Cooked for 1m 9s · done 4:14 PM
+
+● Agent "Write tests for public edge slice" finished · 5m 20s
+
+● Both done and reconciled — static suite is green (3/3 PASS), and the
+  test-writer kept all money-safety assertions intact (re-verified they still
+  fail on wrong-id / spoofed-leak / role-escalation / header-bypass). Now I run
+  the verification gate myself as orchestrator. Starting with the quick
+  mechanical checks on the combined worktree state:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Mechanical gate is green: compose validates, docker's available (28.0.4),
+  static suite 3/3 with all 11 pre-function intents verified, and git state is
+  clean (only the expected files). Per the working agreement, the gate being
+  green unblocks the self-review — the PR gate.
+
+  I'll do two things in parallel: launch the self-reviewer over code+tests, and
+  bring up the full stack in the background to attempt the live vertical-slice
+  checkpoint (Docker's here, so it's worth proving for real).
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● self-reviewer(Self-review public edge code + tests)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Both are running in the background now:
+
+  - Self-reviewer — auditing the pre-function JWKS logic, anti-spoof header
+    hygiene, fail-closed paths, network posture, and test sharpness together;
+    it'll return findings split for the implementor and test-writer. This is the
+    PR gate.
+  - Full stack — building + booting (postgres, keycloak w/ realm import,
+    balance-service, kong, nginx) so I can run the live vertical-slice
+    checkpoint once it's healthy.
+
+  Pipeline:
+  - ✅ Implementor + test-writer done, reconciled
+  - ✅ Verification gate green (compose valid, static suite 3/3, config lints
+    clean)
+  - 🔄 Self-review (gates the PR) + live vertical-slice bringup, in parallel
+  - ⏳ Then: resolve any High findings → run the live slice → open the PR
+
+  I'll report back when they land.
+
+✻ Baked for 2m 9s · done 4:21 PM
+
+● Background command "Copy env and bring up full compose stack for vertical
+slice" completed (exit code 0)
+
+● Stack bringup returned (exit 0). Let me see what came up, then wait for health
+  before running the live slice:
+
+  Read 1 file (ctrl+o to expand)
+
+● Stack came up, but balance-service went unhealthy, so kong/nginx (which depend
+  on it) never started — the live slice can't run until that's resolved.
+  balance-service is unchanged by this step, so I need to see whether this is a
+  real boot failure or an environment quirk. Checking its logs:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The live bringup surfaced a real, pre-existing defect (not a transport bug):
+  balance-service won't boot because two env vars its schema requires are not 
+  wired into the compose spine or .env.example:
+
+  [config] Invalid environment configuration:
+    - OTP_HASH_SECRET: Required
+    - RAILS_WEBHOOK_SIGNING_SECRET: Required
+
+  These secrets were introduced by later balance-service specs (OTP → spec 4a,
+  rails webhooks → spec 5c), but the docker-compose.yml
+  balance-service.environment: block and .env.example were never updated to
+  inject them (they still only carry DB_*, REDIS_*, INTERNAL_SERVICE_TOKEN). So
+  docker compose up on main is currently broken for balance-service — and it
+  blocks spec 06's vertical-slice checkpoint, since the slice can't reach a
+  service that won't start.
+
+  How I'm handling it: this is a small, clearly-correct, pattern-following fix
+  (map the two secrets exactly like INTERNAL_SERVICE_TOKEN already is, with
+  placeholders in .env.example). Since the transport step already owns the
+  compose-spine changes and its DoD is a green vertical slice, I'll fold it into
+  this step and call it out explicitly in the PR — rather than spin a separate
+  micro-PR. I'll batch it with the self-reviewer's findings into one hand-back
+  to the implementor (avoids resuming it twice), then re-run the gate and
+  re-attempt the live slice.
+
+  Flagging it to you since it's a reproducibility bug that predates this step:
+  docker compose up from a clean main doesn't currently boot balance-service.
+  The fix rides along here unless you'd prefer it as its own PR.
+
+  Waiting on the self-reviewer now; I'll consolidate as soon as it lands.
+
+✻ Cooked for 1m 29s · done 4:23 PM
+
+● Agent "Self-review public edge code + tests" finished · 13m 29s
+
+● Self-review is back — no High findings; the auth boundary is sound and not 
+  bypassable, so the PR is not gate-blocked. It confirmed the security-critical
+  parts hold: alg pinned before verify (alg-confusion closed),
+  strip-before-inject on every path, exact iss/aud/exp/role checks, no bypass to
+  upstream, correct network posture, no secrets committed, and genuinely sharp
+  money-safety tests.
+
+  It flagged 2 Medium (both test bugs) + 4 Low, and I'm adding my compose 
+  boot-blocker. Batching them into one parallel hand-back so I don't resume
+  either agent twice:
+
+  Implementor — boot-blocker (missing secrets) + 4 Lows. Test-writer — 2 Mediums
+  (one would intermittently red the runtime gate ~25% of the time).  ⎿  Resuming agent a66d169
+  ⎿  Resuming agent af54252
+
+● Both agents resumed in parallel to apply the fixes:
+  - Implementor — boot-blocker (wire OTP_HASH_SECRET +
+    RAILS_WEBHOOK_SIGNING_SECRET into compose + .env.example), JWKS-rotation
+    persistence (safe_set), bearer-casing, comma-role hardening, and the stale
+    spec-06 "Moving parts" text.
+  - Test-writer — the ~25% flaky signature-tamper (mutate mid-signature) and the
+    tautological exp static assertion.
+
+  Pipeline:
+  - ✅ Gate green, ✅ self-review done (no High)
+  - 🔄 Fix loop: implementor + test-writer applying the 2 Medium + 4 Low +
+    boot-blocker
+  - ⏳ Then: re-run gate, re-attempt the live vertical slice (balance-service
+    will boot now), targeted self-review re-check → PR
+
+  I'll report back when both land.
+
+✻ Worked for 1m 37s · done 4:36 PM
+
+● Agent "Write tests for public edge slice" finished · 4m 33s
+
+● Test-writer done — both Mediums fixed and verified (mid-signature mutation is
+  now deterministic; the exp static check asserts real claims.exp/nbf access,
+  and it hardened all Lua checks by stripping comments first so a
+  mention-in-a-comment can't satisfy an assertion). Static suite still 3/3,
+  discrimination confirmed.
+
+  Waiting on the implementor (boot-blocker + 4 Lows) before I re-run the gate,
+  re-attempt the live slice, and do the self-review re-check. Back shortly.
+
+✻ Baked for 8s · done 4:41 PM
+
+● Agent "Implement public edge (nginx + kong)" finished · 14m 37s
+
+● All fixes landed and self-verified. Notably, the implementor didn't blindly
+  apply the reviewer's safe_set suggestion — it found safe_set is also
+  incompatible with kong.cache:get (separate key namespaces) and instead rewrote
+  the JWKS cache to use the kong shared dict directly, proving persistence live
+  (502-not-401 on a stopped mock = auth passed from persisted cache). And
+  critically, it verified the full stack comes up healthy (balance-service +
+  public-kong + public-nginx all Healthy) with live edge probes passing.
+
+  That JWKS cache rewrite is new security-critical code the reviewer hasn't
+  seen, so this warrants the loop's second (final) review pass. Doing three
+  things in parallel: re-confirm the static gate on the combined state, bring
+  the stack back up for the live slice, and send the self-reviewer a focused
+  delta re-check.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  Resuming agent a88556b
+
+● Combined static gate is green again (3/3, compose valid, git state clean). Two
+  things now in flight:
+  - Stack bringup (background) — for the live vertical slice
+  - Self-reviewer — final delta re-check (loop iteration 2), focused on the JWKS
+    cache rewrite and the other fixes
+
+  Once the stack is healthy I'll run the runtime suite (real demo-customer token
+  → /api/whoami via :8080, anti-spoof, 429, default-deny), and once the
+  reviewer returns a clean verdict I'll open the PR. Waiting on both.
+
+✻ Cooked for 1m 20s · done 4:52 PM
+
+● Background command "Bring up full stack for live vertical slice" completed
+(exit code 0)
+
+● Stack bringup finished. Let me check the container states:
+
+  Read 1 file (ctrl+o to expand)
+
+● Full stack is up and healthy — balance-service, public-kong all Healthy;
+  public-nginx just finishing its healthcheck. Now the real test: running the
+  live vertical-slice suite (mints a genuine demo-customer token via headless
+  PKCE → hits /api/whoami through :8080, plus anti-spoof / 429 / default-deny).
+  Waiting briefly for nginx health, then running:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The sandbox balked at the {{...}} template inside a loop. Splitting into plain
+  commands:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All eight services healthy, including public-nginx. Now running the live
+  runtime suite:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The live vertical slice is fully green — all 7 runtime checks pass against the
+  real stack with a genuine Keycloak token. This is the spec-06 checkpoint
+  proven end-to-end for real:
+
+  ┌─────────────────────────────────────────────────────────────────┬────────┐
+  │                              Check                              │ Result │
+  ├─────────────────────────────────────────────────────────────────┼────────┤
+  │ Vertical slice — real demo-customer token → /api/whoami → 200,  │ ✅     │
+  │ userId==sub, roles has customer                                 │        │
+  ├─────────────────────────────────────────────────────────────────┼────────┤
+  │ No token → 401 at edge (never reaches balance)                  │ ✅     │
+  ├─────────────────────────────────────────────────────────────────┼────────┤
+  │ Malformed + tampered-signature → 401 (JWKS signature genuinely  │ ✅     │
+  │ verified)                                                       │        │
+  ├─────────────────────────────────────────────────────────────────┼────────┤
+  │ Anti-spoof (money-safety) — spoofed X-User-Id/X-Roles stripped, │ ✅     │
+  │  token identity wins; header alone → 401                        │        │
+  ├─────────────────────────────────────────────────────────────────┼────────┤
+  │ Customer-role gate — valid admin-only token → 403               │ ✅     │
+  ├─────────────────────────────────────────────────────────────────┼────────┤
+  │ Default-deny — non-/api, /admin, /internal → 404, never reach   │ ✅     │
+  │ balance                                                         │        │
+  ├─────────────────────────────────────────────────────────────────┼────────┤
+  │ Rate limiting — authenticated burst → 429 (at request #59)      │ ✅     │
+  └─────────────────────────────────────────────────────────────────┴────────┘
+
+  That exercises the entire macro — auth, trust boundary, prefixes, network
+  split — at its cheapest-to-change moment, exactly as the spec intends. Tearing
+  down the stack now (it's served its purpose):
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Live slice proven and stack tearing down. The only thing left before the PR is
+  the self-reviewer's final delta verdict on the JWKS cache rewrite + the other
+  fixes (loop iteration 2).
+
+  Where we are:
+  - ✅ Implementor + test-writer done, all findings resolved
+  - ✅ Verification gate green (static 3/3) + live vertical slice 7/7 GREEN
+  - 🔄 Self-review final re-check (the PR gate)
+  - ⏳ Then: commit + open the PR for the step
+
+  I'll report the reviewer's verdict and tee up the PR the moment it lands.
+
+✻ Brewed for 1m 26s · done 4:54 PM
+
+● Background command "Tear down stack and remove local .env" completed (exit
+code 0)
+
+● Stack torn down cleanly. Just awaiting the self-reviewer's final verdict now —
+  nothing else outstanding. I'll move straight to composing the PR once it
+  returns.
+
+✻ Sautéed for 5s · done 4:54 PM
+
+● Agent "Self-review public edge code + tests" finished · 2m 47s
+
+● Self-reviewer's final verdict: clear to open the PR. No High or Medium
+  blockers — all prior findings resolved, the JWKS cache rewrite verified sound
+  (fails closed on every path, no cache-poisoning, TTL+throttle intact), and no
+  money-safety assertion weakened.
+
+  One flag to reconcile: the reviewer listed the spec-06 "Moving parts" doc
+  wording as a residual Low — but the implementor reported it fixed that. The
+  reviewer's delta pass didn't re-read spec-06, so let me confirm which is true
+  before I call the step done (docs are part of the DoD):
+
+  Read 1 file (ctrl+o to expand)
+
+● The spec doc is reconciled — the reviewer's "residual" was a false alarm (its
+  delta pass didn't re-read spec-06; the implementor had already fixed the
+  Moving-parts wording: plain-HTTP note, pre-function/JWKS instead of jwt+acl,
+  and a pointer to Resolved). So the DoD docs are complete.
+
+  Step 1 is fully done and verified — gate green, self-review clear, live
+  vertical slice 7/7. Preparing the commit locally (reversible) and naming the
+  branch per convention:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Staged and branch named transport-public-edge. Committing locally:
+
+  Committed ba5d536 (ctrl+o to expand)
+
+● Committed locally as ba5d536 on branch transport-public-edge. Everything up to
+  here is reversible — the only remaining step is the outward-facing one (push
+  to your GitHub + open the PR), so I'll confirm before doing that.
+
+  Step 1 complete — summary
+
+  Public-plane DoD (spec 06):
+
+  ┌──────────────────────────────────────────────────────┬──────────────────┐
+  │                       DoD item                       │      Status      │
+  ├──────────────────────────────────────────────────────┼──────────────────┤
+  │ Valid customer token → /api reaches balance w/       │ ✅               │
+  │ injected X-User-Id; missing/invalid → 401 at Kong    │                  │
+  ├──────────────────────────────────────────────────────┼──────────────────┤
+  │ Client-supplied X-User-Id/X-Roles stripped before    │ ✅               │
+  │ upstream (anti-spoof)                                │                  │
+  ├──────────────────────────────────────────────────────┼──────────────────┤
+  │ Rate limiting triggers on /api                       │ ✅               │
+  ├──────────────────────────────────────────────────────┼──────────────────┤
+  │ /internal/* not routable from the public edge        │ ✅               │
+  ├──────────────────────────────────────────────────────┼──────────────────┤
+  │ Vertical slice green (real token → /api/whoami       │ ✅               │
+  │ end-to-end)                                          │                  │
+  ├──────────────────────────────────────────────────────┼──────────────────┤
+  │ Customer→/admin 403 / admin→/admin works             │ ⏭️ Step 2        │
+  │                                                      │ (internal edge)  │
+  └──────────────────────────────────────────────────────┴──────────────────┘
+
+  Pipeline run: implementor + test-writer (parallel) → 2 developer escalations
+  you ruled on (plain HTTP; Kong 3.x + JWKS pre-function) → gate green →
+  self-review (no High; 2 Medium + 4 Low + 1 boot-blocker) → fixes → live slice 
+  7/7 green → final self-review clear to open PR.
+
+  What's in the commit (10 files, +1975): infra/kong-public/ (Kong 3.9.0 + JWKS
+  pre-function), infra/nginx-public/, docker-compose.yml (both edge services +
+  the boot-blocker secrets fix), tests/transport/ (e2e suite),
+  specs/06-transport.md (decisions recorded).
+
+  PR title would be "Transport public edge: nginx + Kong JWKS gateway (spec 06, 
+  step 1)", with the full DoD/decisions/test-evidence in the body.
+● User answered Claude's questions:
+  ⎿  · Step 1 is committed locally on `transport-public-edge` and fully 
+     verified. Push to your GitHub remote and open the PR now? → Push & open the
+     PR
+
+● Pushing and opening the PR. First writing the PR body:
+
+  Made 1 scratchpad edit +62, pushed to transport-public-edge (ctrl+o to expand)
+
+● Pushed. Now opening the PR:
+
+  Created PR #30 (ctrl+o to expand)
+
+● PR opened: https://github.com/RandyDpoe45/supercool-finances/pull/30 🎉
+
+  Step 1 of spec 06 is shipped. Let me record the transport roadmap for
+  continuity (mirroring how the balance domain is tracked), then I'll summarize
+  where we are.
+
+  Recalled 1 memory, wrote 2 memories (ctrl+o to expand)
+
+● Done — Step 1 of spec 06 is shipped as PR #30, and I've recorded the transport
+  roadmap in memory for continuity.
+
+  Summary
+
+  PR #30 — Transport public edge:
+  https://github.com/RandyDpoe45/supercool-finances/pull/30
+
+  The full pipeline ran per the working agreement:
+  - Implementor + test-writer in parallel → I escalated 2 genuine macro forks
+    you ruled on (plain HTTP; Kong 3.x + JWKS pre-function after the mandated
+    jwt-keycloak plugin turned out to force EOL Kong 2.8)
+  - Verification gate green → self-review (no High; 2 Medium test bugs + 4 Low +
+    1 boot-blocker I found running the stack) → fixes applied → final 
+    self-review clear
+  - Live vertical slice 7/7 green against the real stack with a genuine Keycloak
+    token — the whole macro (auth, trust boundary, prefixes, network split)
+    proven end-to-end
+
+  A reproducibility fix rode along: docker compose up on main didn't boot
+  balance-service (missing OTP_HASH_SECRET/RAILS_WEBHOOK_SIGNING_SECRET from
+  specs 4a/5c never wired into the spine) — now fixed, so the stack comes up
+  from zero.
+
+  The transport-public-edge worktree is intact (branch pushed, commit ba5d536)
+  in case PR review turns up comments.
+
+  What's next
+
+  Step 2 — internal edge (the remaining half of spec 06): internal-nginx (:8081)
+  + internal-kong routing /admin/* → balance and analytics with an admin gate,
+  default-deny, never /internal. It reuses the pre-function/JWKS pattern from
+  step 1, and both services already have /admin/whoami probes to prove it. It's
+  its own PR.
+
+  Want me to start step 2 now (off the same worktree base, or a fresh one off
+  latest main), or hold while you review/merge PR #30 first? I'd lean toward
+  letting #30 land first so step 2 branches from a main that already has the
+  public edge — but I can start immediately if you'd rather keep momentum.
+
+✻ Baked for 2h 21m 9s · done 5:04 PM
+
+※ recap: We're building spec 06 transport. Step 1, the public edge (nginx + Kong JWKS gateway), is done and shipped as PR #30 with the live vertical slice passing. Next: start step 2, the internal edge, or wait for you to merge #30 first. (disable recaps in /config)
+
+❯ yes start it please                                                           
+
+● Starting step 2. One design point I need to nail down first: the internal edge
+  routes /admin/* to two upstreams (balance and analytics), but in the current
+  base both only expose the scaffolding GET /admin/whoami — so I need the
+  sub-path convention that splits /admin between them. Let me set up the branch
+  and check whether the specs/docs define that split before I brief the
+  implementor.
+
+  Decision on base: I'll stack step 2 on step 1 (branch transport-internal-edge
+  off transport-public-edge) rather than fresh off main — both steps edit
+  docker-compose.yml, so stacking avoids a guaranteed merge conflict, and the PR
+  will diff cleanly against step 1. Staying in this worktree keeps it isolated
+  as you wanted.
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+● The specs confirm the design tension: both services serve under /admin —
+  balance's admin ops (/admin/accounts/:id/freeze, /admin/limits,
+  /admin/transfers/:id/reverse, /admin/approvals, /admin/transactions,
+  /admin/external/inbound) and analytics' reporting API (/admin, paths "driven
+  by the admin screens in spec 07"). But spec 06 never says how internal-kong
+  splits /admin between the two upstreams, and analytics' concrete paths don't
+  exist yet (it's scaffolding). Let me check the ADRs for a routing convention
+  before I escalate:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● ADR-12 fixes the prefix convention (/api//admin//internal) but there's no ADR 
+  or spec rule for how internal-kong splits /admin between the two upstreams —
+  and analytics is unbuilt with undefined reporting paths, while both services
+  currently only expose the scaffolding /admin/whoami (a collision). This is a
+  genuine fork with cross-spec implications, so per the working agreement I
+  escalate rather than guess:
+
+● User answered Claude's questions:
+  ⎿  · internal-kong routes /admin/* to BOTH balance-service and 
+     analytics-server, but the split rule is undefined and analytics (spec 05) 
+     isn't built yet. How should the internal edge split /admin? → actually the 
+     routing should bve based on the first prefix for the services, meaning, if 
+     traffic comes tot he balance server it shoul dbe balance/api balance/admin 
+     balance/external, sma ehistory with analytics, clear? else the routes wont 
+     match with the surface we already built 
+
+● You're right, and my option 1 was wrong — reserving /admin/analytics/* would
+  forward /admin/analytics/whoami to analytics, but analytics' controller is
+  built at /admin/whoami, so it wouldn't match. Your service-first scheme is the
+  correct fix: namespace by service at the edge, and Kong strips the service 
+  segment so each upstream still sees its built surface (/admin, /api). That's
+  what "match the surface we already built" requires.
+
+  Concretely, the internal edge becomes:
+  - /balance/admin/* → strip /balance → balance-service sees /admin/* ✅ (its
+    real controller)
+  - /analytics/admin/* → strip /analytics → analytics-server sees /admin/* ✅
+
+  One critical mechanic this pins down: the strip is mandatory, not cosmetic —
+  the balance guard reads the first path segment and only enforces the
+  admin-role check when it's admin. If Kong forwarded /balance/admin/...
+  unstripped, the guard would see balance (neither api nor admin) and skip the 
+  admin gate — a security hole. So Kong must strip /<service> before the
+  upstream. (Note: /external and /internal aren't edge-routed at all — they stay
+  service-to-service per ADR-12 — so this only concerns the edge surfaces: /api
+  on public, /admin on internal.)
+
+  That leaves one decision with real blast radius — scope — because it decides
+  whether step 1 (PR #30) and the in-flight frontends have to change:
+
+● User answered Claude's questions:
+  ⎿  · Service-first routing (/<service>/<surface>, Kong strips the service 
+     segment) — apply it to just the internal edge, or both planes? → Both 
+     planes (consistent)
+
+● The user accepted the full ripple. This is a bigger change than a simple step
+  2 — it's a routing-convention change (service-namespaced /<service>/<surface>,
+  Kong strips /<service>) that reworks the already-verified public edge too.
+  Let me be explicit about the revised plan before executing, since it touches
+  an open PR and the macro:
+
+  Revised plan
+  1. Rework step 1 / PR #30 (branch transport-public-edge): public edge /api/* →
+     /balance/api/*. Kong service path /api + route /balance/api + strip_path →
+     balance still receives its built /api/whoami. Add an ADR for the
+     convention; update spec 06 + nginx + tests; re-verify (incl. live slice on
+     the new path).
+  2. Build step 2 / new PR (stacked transport-internal-edge): internal edge —
+     internal-nginx (:8081) + internal-kong with /balance/admin/* and
+     /analytics/admin/* (strip → /admin), admin-role gate, inject/strip,
+     default-deny, never /internal.
+  3. Flag (not doing here): the completed customer/otp SPAs call /api — under
+     this convention they move to /balance/api. That's a one-line base-path
+     change in the frontends workstream (paused PRs in …-web), best applied when
+     they integrate with the real gateway (spec 08). I'll record the convention
+     in specs 07/08 so it's picked up; I won't cross into that worktree from
+     here.
+
+  The security-load-bearing detail stays central: Kong must strip /<service> so
+  the balance guard's first-segment role check still works.
+
+  Starting with the step-1 rework. Setting the branch and resuming the two
+  agents:
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  Resuming agent a66d169
+  ⎿  Resuming agent af54252
+
+● Both agents resumed for the step-1 rework:
+  - Implementor — public edge → /balance/api (Kong service-path /api + route
+    /balance/api + strip), the ADR for the convention, and the spec 06/07/08
+    updates.
+  - Test-writer — repoint the suite to /balance/api/whoami and strengthen
+    default-deny (bare /api and /balance/admin must now 404 on the public
+    plane).
+
+  Pipeline:
+  - 🔄 Step 1 rework (service-namespaced public edge) → re-gate + re-run live
+    slice → re-review → update PR #30
+  - ⏳ Then step 2: internal edge (/balance/admin + /analytics/admin) as its own
+    stacked PR
+
+  I'll report when the rework lands.
+
+✻ Sautéed for 9m 25s · done 5:48 PM
+
+● Agent "Write tests for public edge slice" finished · 8m 25s
+
+● Test-writer's rework is done and green — suite repointed to
+  /balance/api/whoami, default-deny strengthened to reject bare /api and
+  /balance/admin on the public plane, and it confirmed the static check passes
+  against the implementor's concurrent config (route /balance/api, strip_path: 
+  true, service path /api) with discrimination verified (bare-/api or no-strip
+  configs FAIL).
+
+  Waiting on the implementor to finish its rework + live re-verification, then I
+  re-run the gate + live slice, re-review, and update PR #30.
+
+✻ Churned for 7s · done 5:57 PM
+
+● Agent "Implement public edge (nginx + kong)" finished · 11m 16s
+
+● Rework complete on both sides — the implementor even ran a real-token slice on
+  the new path (/balance/api/whoami → 200 with correct identity, anti-spoof
+  holds, and bare /api / /balance/admin / /admin all → 404), added ADR-17 for
+  the convention, and updated specs 06/07/08. The strip mechanic works exactly
+  as intended (upstream sees /api/whoami).
+
+  Since the routing/strip change is security-load-bearing (admin must not leak
+  to the public plane), I'll re-verify properly: re-confirm the static gate,
+  bring the stack up to run the automated runtime suite on the new paths, and do
+  a focused self-review of the delta — in parallel.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  Resuming agent a88556b
+
+● Static gate green on the reworked state (Check 3 now reads
+  /balance/api(strip->/api)->balance-service), compose valid, and the diff is
+  the expected 11 files (step-1 config now modified by the rework + the
+  doc/spec/test updates). Stack is building for the runtime suite; self-reviewer
+  is doing the delta pass. Waiting on both, then I run the automated runtime
+  suite on the new paths and update PR #30.
+
+✻ Churned for 1m 0s · done 6:00 PM
+● Background command "Bring up reworked stack for runtime suite" completed (exit
+code 0)
+
+● Stack bringup finished. Checking health, then running the runtime suite on the
+  new paths:
+
+  Read 1 file (ctrl+o to expand)
+
+● Stack healthy. Running the automated runtime suite on the new /balance/api
+  paths:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Runtime suite 7/7 green on the reworked /balance/api paths — vertical slice,
+  anti-spoof, role-gate, rate-limit, and the strengthened default-deny (bare
+  /api, /balance/admin, /admin, /internal all → 404; only /balance/api reaches
+  balance). Tearing down while I wait for the self-reviewer's delta verdict:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Teardown running. Runtime suite passed on the new paths; now just awaiting the
+  self-reviewer's delta verdict on the routing rework before I commit and
+  update PR #30.
+
+✻ Cooked for 32s · done 6:01 PM
+
+● Background command "Tear down stack and remove local env" completed (exit code
+0)
+
+● Teardown done. Waiting on the self-reviewer's delta verdict before committing
+  the rework to PR #30.
+
+✻ Churned for 1s · done 6:01 PM
+
+● Agent "Self-review public edge code + tests" finished · 3m 0s
+
+● Self-reviewer: clear to update PR #30 — no blockers. It confirmed the
+  security-critical invariant holds two ways: nginx only forwards /balance/api/,
+  and Kong's fixed /api service-path prepend means the upstream's first segment
+  is always api, so admin is structurally unreachable on the public plane (even
+  /balance/api/admin → /api/admin, first segment api, 404). Traversal
+  normalizes at nginx before Kong. Pre-function byte-identical (auth boundary
+  intact). ADR-17 + specs accurate.
+
+  Committing the rework and updating PR #30:
+
+  Committed bf969d0, pushed to transport-public-edge (ctrl+o to expand)
+
+● PR #30 updated with the rework commit (bf969d0). Now refreshing the PR
+  description to reflect the service-namespaced convention:
+
+  Made 1 scratchpad edit +72, ran 1 shell command (ctrl+o to expand)
+
+● That output is a Projects-classic deprecation notice, not an error — but let
+  me verify the edit actually applied:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Title didn't change — the Projects-classic GraphQL error aborted the edit.
+  Retrying:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● gh pr edit keeps hitting a Projects-classic GraphQL bug in the CLI. Bypassing
+  it via the REST API directly:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● PR #30 is updated (title + body now reflect the service-namespaced
+  /balance/api convention + ADR-17), via the REST API since gh pr edit hits a
+  CLI Projects bug.
+
+  Step 1 (rework) is fully done and re-verified. Now starting step 2 — the 
+  internal edge. Creating the stacked branch off the reworked public edge:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● On transport-internal-edge (stacked on the reworked public edge). Now briefing
+  the implementor and test-writer for the internal edge — resuming both since
+  they have the pre-function/JWKS context this mirrors:
+  ⎿  Resuming agent a66d169
+  ⎿  Resuming agent af54252
+
+● Both agents building the internal edge in parallel:
+  - Implementor — infra/kong-internal/ (two service-namespaced routes
+    /balance/admin + /analytics/admin → strip → /admin, admin-role pre-function
+    reusing the public JWKS logic, default-deny, never /internal) +
+    infra/nginx-internal/ (:8081) + compose wiring.
+  - Test-writer — internal-edge suite: admin→/balance/admin & /analytics/admin
+    200, customer→403, anti-spoof, default-deny + /internal unroutable,
+    rate-limit.
+
+  Pipeline: step 2 build → gate + live verify (both edges up) → self-review →
+  stacked PR (base transport-public-edge). I'll report when they land.
+
+✻ Churned for 3m 22s · done 6:07 PM
+
+● Agent "Implement public edge (nginx + kong)" finished · 9m 35s
+
+● Implementor's internal edge is in and live-verified — both edges up healthy,
+  and with real tokens: demo-admin → /balance/admin/whoami and
+  /analytics/admin/whoami → 200, demo-customer → 403, no token → 401, anti-spoof
+  stripped, and default-deny holds (bare /admin, /balance/internal,
+  /analytics/internal, /internal all → 404). Nice touch: the admin gate is a
+  single YAML-anchored pre-function applied to both routes (differs from the
+  public gate only by REQUIRED_ROLE = "admin"), so the security-critical Lua
+  can't drift between routes.
+
+  Waiting on the test-writer's internal-edge suite, then I run the gate + live
+  runtime + self-review, and open the stacked PR.
+
+✻ Baked for 8s · done 6:16 PM
+
+● Agent "Write tests for public edge slice" finished · 12m 14s
+
+● Both step-2 agents done — static suite now 6/6 (public 1-3 + internal I1-I3),
+  discrimination verified, public checks intact. Running the gate, bringing up
+  both edges for the live runtime suite, and a focused self-review of the
+  internal edge — in parallel:
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  Resuming agent a88556b
+● Static gate green (6/6, internal admin gate + both strip-routes verified),
+  compose valid, and the diff is the clean step-2 delta (infra/kong-internal/,
+  infra/nginx-internal/ new; compose/spec/tests updated). Both edges building
+  for the live runtime suite; self-reviewer auditing the internal delta. Waiting
+  on both, then I run the full runtime suite and open the stacked PR.
+
+✻ Sautéed for 39s · done 6:19 PM
+
+● Background command "Bring up both edges for runtime suite" completed (exit
+code 0)
+
+  Read 1 file (ctrl+o to expand)
+
+● Both edges up healthy. Running the full runtime suite (public + internal):
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Full runtime suite: 13/13 PASS across both edges. Every spec 06 DoD item is
+  now proven live:
+  - Public (4–9): vertical slice, 401, anti-spoof, customer 403, default-deny,
+    429
+  - Internal (I4–I9): admin → /balance/admin + /analytics/admin 200, customer → 
+    /admin 403, /internal unroutable, anti-spoof, 429
+
+  Tearing down while the self-reviewer finishes its verdict:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Runtime green (13/13), teardown running. Awaiting the self-reviewer's verdict
+  on the internal edge, then I commit and open the stacked step-2 PR.
+
+✻ Brewed for 43s · done 6:20 PM
+
+● Background command "Tear down stack and remove env" completed (exit code 0)
+
+● Teardown done. Waiting on the self-reviewer's internal-edge verdict before
+  committing and opening the stacked PR.
+
+✻ Brewed for 1s · done 6:21 PM
+
+● Agent "Self-review public edge code + tests" finished · 5m 42s
+
+● Self-reviewer: clear to open the stacked step-2 PR — no implementation
+  blocker. It verified the admin gate is byte-identical to the cleared public
+  gate (same Lua SHA on both routes via the anchor), /internal unroutable, strip
+  correct, network posture correct, no secrets.
+
+  It did flag one Medium test-completeness gap worth closing before the PR: the
+  negative-gate probes (customer→403, header-only-spoof→401) only hit
+  /balance/admin, not /analytics/admin. The implementation is proven correct
+  (single anchored gate on both routes; positive /analytics/admin already passed
+  live), so it's a coverage gap not a live defect — but it's a money-safety
+  negative path, so I'll close it rather than waive it. Resuming the test-writer
+  to add the analytics-route negative probes, and pre-warming the stack in
+  parallel to verify them live:
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  Resuming agent af54252
+
+● Stack pre-warming and test-writer adding the analytics-route negative probes
+  in parallel. Once both are ready I'll run the internal runtime checks to
+  confirm the new probes pass live, then commit step 2 and open the stacked PR
+  (base transport-public-edge).
+
+✻ Baked for 47s · done 6:26 PM
+
+● Background command "Pre-warm both edges for re-verification" completed (exit
+code 0)
+
+● Stack is up. Let me confirm it came up healthy so I'm ready to run the runtime
+  checks the moment the test-writer finishes:
+
+  Read 1 file (ctrl+o to expand)
+
+● Stack healthy, both edges up. Ready to run the internal runtime checks
+  (including the new analytics negative probes) as soon as the test-writer
+  finishes. Waiting on it.
+
+✻ Cogitated for 8s · done 6:26 PM
+
+● Agent "Write tests for public edge slice" finished · 2m 13s
+
+● Gap closed — I5 (customer→403) and I7(b) (header-only spoof→401) now loop over
+  both admin routes, and the test-writer verified it catches an analytics-only
+  bypass that would previously have been missed. Stack is up; running the
+  runtime suite to confirm the new analytics negative probes pass live:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Runtime suite 13/13 with the extended coverage — I5 now proves customer→403 at
+  both admin routes and I7(b) proves header-only spoof→401 at both (analytics
+  included). The money-safety negative path is fully covered and verified live.
+
+  Step 2 is complete and fully verified. Tearing down and committing:
+
+  Committed cd7fd7b, ran 1 shell command (ctrl+o to expand)
+
+● Committed step 2 (cd7fd7b), stacked on the public edge. Writing the stacked-PR
+  body and opening it:
+
+  Made 1 scratchpad edit +56 (ctrl+o to expand)
+
+● Background command "Tear down stack" completed (exit code 0)
+
+● Pushing and opening the stacked PR (base transport-public-edge):
+
+  Pushed to transport-internal-edge, created PR #33 (ctrl+o to expand)
+
+● Step 2 PR opened: https://github.com/RandyDpoe45/supercool-finances/pull/33
+  (stacked on #30). Both edges of spec 06 are now shipped. Updating the roadmap
+  memory to reflect completion:
+
+  Recalled 1 memory, wrote 2 memories (ctrl+o to expand)
+
+● Spec 06 (Transport) is complete — both edges shipped and proven end-to-end.
+
+  Two PRs
+
+  - #30 — public edge (transport-public-edge): /balance/api → balance, JWKS
+    pre-function, customer gate.
+    https://github.com/RandyDpoe45/supercool-finances/pull/30
+  - #33 — internal edge (transport-internal-edge, stacked on #30):
+    /balance/admin + /analytics/admin → admin gate, /internal unroutable.
+    https://github.com/RandyDpoe45/supercool-finances/pull/33
+
+  Merge order: #30 first; GitHub will retarget #33 to main once #30 lands.
+
+  What landed
+
+  - ADR-17 — service-namespaced edge routing (/<service>/<surface>, Kong strips
+    /<service>), per your ruling. Both edges follow it; the strip is
+    security-load-bearing (guarantees the guard's admin-gate fires and admin
+    can't leak to the public plane).
+  - Stock Kong 3.9.0 + JWKS pre-function on both edges (the admin gate is the
+    public gate reused verbatim via a YAML anchor, only the role differs — so
+    the security Lua can't drift).
+  - The compose reproducibility fix (missing
+    OTP_HASH_SECRET/RAILS_WEBHOOK_SIGNING_SECRET) rides along in #30, so docker 
+    compose up boots from zero.
+
+  Verified live (both edges up, real Keycloak tokens)
+
+  Full runtime suite 13/13, static 6/6. Every spec-06 DoD item proven: vertical
+  slice both planes, customer→/admin 403 on both admin routes, admin→/admin 200
+  on both, /internal unroutable from either edge, anti-spoof strip everywhere,
+  rate-limit 429 on both edges. Two escalations you ruled on (Kong-plugin fork,
+  routing scope) and every self-review finding resolved (no High/Medium left).
+
+  One follow-up (flagged, not done here)
+
+  The completed client/otp SPAs call /api; under ADR-17 they move to
+  /balance/api. That's a one-line base-path change in the frontends workstream
+  (paused PRs in …-web), best applied at spec-08 integration — specs 07/08
+  already carry the forward note, so it won't be lost.
+
+  The transport-public-edge worktree holds both branches (pushed) if PR review
+  turns up comments. Want me to start the OTP app (O1→O2 in the frontends
+  workstream) next, or leave things here for you to review/merge #30 → #33
+  first?
+
+✻ Churned for 1h 2m 19s · done 6:31 PM
+
+※ recap: Spec 06 transport is done: both gateway edges built, verified live (13/13), and shipped as PR #30 (public) and stacked PR #33 (internal). Next: merge #30 then #33, or I can start the OTP app. (disable recaps in /config)
+❯ /export transport-layer.txt                                                   
+  ⎿  Conversation exported to:
+     C:\Users\rd-crow-shadow\Documents\personal-projects\supercool-finances.clau
+     de\worktrees\transport-public-edge\transport-layer.txt
