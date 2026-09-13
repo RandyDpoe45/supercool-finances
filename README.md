@@ -8,6 +8,10 @@ derived analytics read model, all orchestrated with Docker Compose.
 - **What it is / why:** [`docs/`](docs/) — architecture, decisions (ADRs), threat model.
 - **What to build, in order:** [`specs/`](specs/) (start at [`specs/README.md`](specs/README.md)).
 - **How we build it (the working agreement):** [`CLAUDE.md`](CLAUDE.md).
+- **How it was actually built:** [`conversation-exports/`](conversation-exports/) — the working
+  transcripts, one per workstream.
+
+See [Learn more](#learn-more--architecture-flows--how-it-was-built) for the full map.
 
 ---
 
@@ -24,6 +28,13 @@ A clean `docker compose up` brings up the **whole system** — both planes:
 Both sit over the identity provider, the two gateways, the balance service, and the
 analytics read model. The logins and seeded accounts for each are listed in
 [step 4](#seeded-logins--accounts).
+
+> ⚠️ **Use two separate browsers** (or one normal window + one private/incognito window)
+> whenever you need **two different users signed in at once** — a **customer** on `:8080`
+> **and** an **admin** on `:8081`, or the **two admins** for the maker-checker reversal.
+> Every app shares **one Keycloak SSO session per browser**, so a second login in the same
+> browser silently replaces the first and the sessions get mixed. Revealing the OTP as the
+> **same** customer in a second **tab** is fine (same user, same session).
 
 ### Prerequisites
 
@@ -86,6 +97,37 @@ by this step). It is **idempotent**: re-running it changes nothing.
 - **Customer B** — the transfer destination (no login): account `1000000002`.
 
 ### 4. Log in and move money
+
+The headline flow — an **internal transfer authorized by an out-of-band one-time code**.
+The code is revealed in a **separate** OTP app, never in the page that starts the transfer,
+so a stolen session alone cannot move money:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Customer
+    participant C as Client SPA
+    participant K as Keycloak
+    participant B as Balance service
+    participant O as OTP SPA
+    U->>C: Open app
+    C->>K: OIDC PKCE login
+    K-->>C: Access token (role: customer)
+    U->>C: Enter destination account, look up
+    C->>B: Confirmation-of-payee
+    B-->>C: Masked payee name
+    U->>C: Confirm payee, enter amount + captcha, Send
+    C->>B: Initiate transfer
+    B-->>C: PENDING — one-time code issued out-of-band
+    Note over U,O: Second tab, same customer via SSO
+    U->>O: Open OTP app, reveal the code
+    O-->>U: Code (shown once)
+    U->>C: Enter code, Confirm
+    C->>B: Confirm transfer (with code)
+    B-->>C: SETTLED — source debited by exactly the amount
+```
+
+Step by step:
 
 1. Open **http://localhost:8080** and log in as the seeded customer:
 
@@ -157,6 +199,53 @@ A clean, repeatable re-run is `down -v` → step 2 → step 3 (migrations no-op,
 
 ---
 
+## What you can do
+
+Two role-separated surfaces behind two front doors. Each login's role (from the realm) is
+what the gateway enforces — a `customer` token cannot reach the admin surface and vice versa.
+
+### Customer operations — the customer SPA (`:8080`, role `customer`)
+
+- **See your accounts & balances** — the overview lists every account you own with its
+  available balance.
+- **Open a new account** — self-service, capped at **5** accounts per customer.
+- **Confirmation-of-payee** — look up a destination account and confirm the **masked**
+  holder name before sending.
+- **Send an internal transfer** — authorized by an out-of-band **OTP** (the flow in
+  step 4); the source is debited **exactly once** on confirm.
+- **Review your transactions** — per-account history.
+
+External (off-platform) payees exist in the domain but are **not** seeded, so that path
+needs a payee enrolled by hand — see the [scope note](#scope-note).
+
+### Admin operations — the admin SPA (`:8081`, role `admin`)
+
+- **View any account, its limits, and its transactions** — read across all customers.
+- **Freeze / unfreeze an account** — block or restore money movement.
+- **Adjust limits** — per-customer per-transaction / daily / monthly caps.
+- **Maker-checker reversal** — one admin *proposes* a reversal; a **different** admin
+  *approves* it. Self-approval is refused (four-eyes). Only then is the transaction reversed.
+- **Audit trail** — every admin mutation is recorded; browse the filterable log.
+- **Analytics dashboard** — account summaries + daily aggregates from the read model.
+
+The maker-checker reversal needs **two** admins — so use two browsers (see the note above):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor M as Maker admin
+    actor K as Checker admin
+    participant B as Balance service
+    M->>B: Propose reversal of a posted transaction
+    B-->>M: PENDING approval
+    M->>B: Approve own proposal
+    B-->>M: 403 self-approval refused, four-eyes
+    K->>B: Approve the proposal
+    B-->>K: REVERSED, compensating entries posted, audit row written
+```
+
+---
+
 ## Automated end-to-end (the same flow, headless)
 
 A one-command harness brings the stack up all-healthy, seeds, installs a browser, and runs
@@ -174,6 +263,18 @@ never touches your `.env`. See [`tests/e2e-fullrun/README.md`](tests/e2e-fullrun
 for the seed↔e2e env contract and what each phase proves. Other acceptance harnesses live
 alongside it under [`tests/`](tests/) (`macro`, `storage`, `keycloak`, `transport`,
 `build-serve`, `seed`).
+
+---
+
+## Learn more — architecture, flows & how it was built
+
+| Where | What's there |
+|---|---|
+| [`docs/`](docs/) | Cross-cutting design: [`ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the moving parts + how they fit), the ADR log [`DECISIONS.md`](docs/DECISIONS.md) (why each choice was made), and the [`THREAT-MODEL.md`](docs/THREAT-MODEL.md). |
+| [`specs/`](specs/) | The build specs, **in order** — start at [`specs/README.md`](specs/README.md). Component specs [`00`](specs/00-architecture.md)–[`08`](specs/08-build-and-serve.md), the [`DATA-MODEL.md`](specs/DATA-MODEL.md), and the `balance`/`analytics` schemas. Each spec ends with a **Definition of Done**. |
+| [`conversation-exports/`](conversation-exports/) | **How it was actually built** — the working transcripts, one per workstream: [`data-modeling`](conversation-exports/data-modeling.txt), [`balance-service`](conversation-exports/balance-service.txt), [`analytics-server`](conversation-exports/analytics-server.txt), [`transport-layer`](conversation-exports/transport-layer.txt), [`client-otp.frontend`](conversation-exports/client-otp.frontend.txt), [`admin-web-app`](conversation-exports/admin-web-app.txt), [`pipeline-serve`](conversation-exports/pipeline-serve.txt). Each component designed and built, decision by decision. |
+| [`CLAUDE.md`](CLAUDE.md) | The working agreement: top-down methodology, the implementor → test-writer → self-reviewer workflow, and the repo conventions every change follows. |
+| Per-component `docs/` | Each service and SPA documents its own internals, e.g. [`services/balance-service/docs/`](services/balance-service/docs/), [`services/analytics-server/docs/`](services/analytics-server/docs/), [`web/client/docs/`](web/client/docs/), [`web/admin/docs/`](web/admin/docs/). |
 
 ---
 
