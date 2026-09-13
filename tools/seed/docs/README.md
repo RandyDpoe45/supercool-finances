@@ -123,14 +123,18 @@ migration-seeded system constants) exists first.
 docker compose up --build -d
 
 # 2. Run the one-shot seed (profile-gated, so it is not in the default up graph).
-docker compose --profile seed up
+#    Use `run --rm seed`, NOT `--profile seed up`: `run` attaches to only the seed
+#    container and returns when it exits; `up` attaches to the whole stack's logs and
+#    keeps streaming after the seed finishes, so it never returns to the prompt.
+docker compose --profile seed run --rm seed
 
 #    A second run is a no-op — every row reports "skipped".
-docker compose --profile seed up
+docker compose --profile seed run --rm seed
 ```
 
-`docker compose --profile seed up` builds `tools/seed`, waits for `balance-service` to
-be healthy, runs the seed to completion, and the container exits (`restart: "no"`).
+`docker compose --profile seed run --rm seed` builds `tools/seed`, waits for
+`balance-service` to be healthy, runs the seed to completion, and returns with the
+seed's exit code; the one-shot container exits (`restart: "no"`) and `--rm` removes it.
 
 ## Supply-chain posture
 
