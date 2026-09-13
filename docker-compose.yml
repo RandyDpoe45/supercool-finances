@@ -85,7 +85,7 @@
 #     only internal-nginx (:8081) is; internal-nginx routes `/` here. See web/admin/docs.
 #   - `seed` (spec 08, THIS step): a ONE-SHOT, PROFILE-GATED demo-data tool
 #     (profiles: ["seed"]) — NOT in the default `up` graph; run explicitly with
-#     `docker compose --profile seed up`. Atomic tool under tools/seed (its own
+#     `docker compose --profile seed run --rm seed` (one-shot; RETURNS when the seed exits, unlike `--profile seed up` which streams the whole stack's logs). Atomic tool under tools/seed (its own
 #     package + image, NO balance-service imports — ADR-16; the balance schema is
 #     duplicated and kept in sync via spec 08). It idempotently upserts the demo
 #     customers + their MXN accounts into the `balance` DB (customers ON CONFLICT
@@ -370,7 +370,7 @@ services:
   # Demo-data seed (spec 08, THIS step) — a ONE-SHOT, PROFILE-GATED tool that loads
   # the demo customers + their MXN accounts into the `balance` DB so the demo has
   # state. It is NOT in the default `up` graph: it sits behind the `seed` profile and
-  # is run explicitly with `docker compose --profile seed up`. Atomic tool (ADR-16):
+  # is run explicitly with `docker compose --profile seed run --rm seed` (one-shot; RETURNS when the seed exits, unlike `--profile seed up` which streams the whole stack's logs). Atomic tool (ADR-16):
   # its own package + image under tools/seed, NO balance-service imports — the balance
   # schema is DUPLICATED there and kept in sync via spec 08. System constants (the MXN
   # currency row, the two clearing accounts, the global baseline user_limits) are

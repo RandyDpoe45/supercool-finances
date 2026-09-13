@@ -60,8 +60,15 @@ Host-published surfaces this pass: **`:8080`** (public-nginx, the front door) an
 ### 3. Load the demo data (idempotent seed)
 
 ```bash
-docker compose --profile seed up     # runs the one-shot seed to completion, then exits
+docker compose --profile seed run --rm seed   # one-shot: runs the seed and returns when it exits
 ```
+
+> Use `run --rm seed`, **not** `--profile seed up`. `up` attaches to the logs of the
+> whole dependency graph (the long-running `balance-service`, `postgres`, …), so it keeps
+> streaming after the seed container has finished and never returns to the prompt. `run`
+> attaches to **only** the seed container and returns with its exit code; `--rm` removes
+> that one-shot container afterward. (The stack from step 2 is already up, so this just
+> runs the seed against it.)
 
 This loads the demo customers + their MXN accounts into the balance DB (system constants —
 currency, clearing accounts, baseline limits — are already seeded by boot migrations, not
